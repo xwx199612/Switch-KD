@@ -1,0 +1,2 @@
+{"id":"ground-001","image":"examples/images/sample_001.jpg","task":"grounding","target_label":"cup","instruction":"Locate the cup in the image."}
+{"id":"ground-002","image":"examples/images/sample_002.jpg","task":"grounding","target_label":"bicycle","instruction":"Locate the bicycle in the image."}

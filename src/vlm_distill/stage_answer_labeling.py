@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import importlib.util
+import json
 import mimetypes
 import os
 from dataclasses import asdict
@@ -21,10 +22,34 @@ class TeacherBackend(Protocol):
 
 class MockTeacher:
     def answer(self, sample: VlmSample) -> dict:
-        seed = f"{sample.id}:{sample.question}:{sample.answer or ''}"
+        seed = f"{sample.id}:{sample.instruction}:{sample.answer or ''}"
         digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
         confidence = 0.55 + (int(digest[:4], 16) / 0xFFFF) * 0.4
-        teacher_answer = sample.answer or f"mock answer for {sample.task}"
+
+        if sample.answer:
+            teacher_answer = sample.answer
+        elif sample.task == "screen_parsing":
+            teacher_answer = json.dumps(
+                {
+                    "screen_type": "unknown_gui_screen",
+                    "elements": [
+                        {"label": "mock icon", "type": "icon"},
+                        {"label": "mock settings", "type": "button"},
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        elif sample.task == "grounding":
+            teacher_answer = json.dumps(
+                {
+                    "label": sample.target_label or "target",
+                    "bbox": sample.bbox or [0, 0, 100, 100],
+                },
+                ensure_ascii=False,
+            )
+        else:
+            teacher_answer = f"mock answer for {sample.task}"
+
         return {
             "teacher_answer": teacher_answer,
             "teacher_confidence": round(confidence, 4),
@@ -52,7 +77,7 @@ class HuggingFaceTeacher:
 
         image_path = self.config.data.image_root / sample.image
         image = Image.open(image_path).convert("RGB")
-        prompt = self.config.distillation.prompt_template.format(question=sample.question)
+        prompt = _format_prompt(self.config, sample)
         inputs = self.processor(images=image, text=prompt, return_tensors="pt").to(self.model.device)
         output_ids = self.model.generate(
             **inputs,
@@ -79,7 +104,7 @@ class OpenAICompatibleTeacher:
     def answer(self, sample: VlmSample) -> dict:
         image_path = self.config.data.image_root / sample.image
         image_data_url = _image_to_data_url(image_path)
-        prompt = self.config.distillation.prompt_template.format(question=sample.question)
+        prompt = _format_prompt(self.config, sample)
 
         payloads = [
             self._build_responses_payload(prompt, image_data_url),
@@ -196,7 +221,7 @@ class OllamaTeacher:
     def answer(self, sample: VlmSample) -> dict:
         image_path = self.config.data.image_root / sample.image
         image_data = _image_to_base64(image_path)
-        prompt = self.config.distillation.prompt_template.format(question=sample.question)
+        prompt = _format_prompt(self.config, sample)
         payload = {
             "model": self.config.teacher.model_name,
             "messages": [
@@ -239,14 +264,57 @@ def build_teacher(config: PipelineConfig) -> TeacherBackend:
         return OllamaTeacher(config)
     raise ValueError(f"Unknown teacher backend: {config.teacher.backend}")
 
+def _format_prompt(config: PipelineConfig, sample: VlmSample) -> str:
+    return config.distillation.prompt_template.format(
+        question=sample.instruction,
+        instruction=sample.instruction,
+        target_label=sample.target_label or "target object",
+        task=sample.task,
+    )
+
+
+def _target_from_existing_annotation(sample: VlmSample) -> str | None:
+    if sample.task == "screen_parsing" and sample.elements:
+        return json.dumps(
+            {
+                "screen_type": "unknown_gui_screen",
+                "elements": sample.elements,
+            },
+            ensure_ascii=False,
+        )
+
+    if sample.task == "grounding" and sample.bbox:
+        return json.dumps(
+            {
+                "label": sample.target_label or "target object",
+                "bbox": sample.bbox,
+            },
+            ensure_ascii=False,
+        )
+
+    if sample.answer:
+        return sample.answer
+
+    return None
 
 def create_distillation_dataset(config: PipelineConfig, samples: list[VlmSample]) -> Path:
     teacher = build_teacher(config)
     rows: list[dict] = []
     for sample in samples:
-        label = teacher.answer(sample)
+        existing_target = _target_from_existing_annotation(sample)
+
+        if existing_target is not None:
+            label = {
+                "teacher_answer": existing_target,
+                "teacher_confidence": 1.0,
+                "teacher_rationale": "Used existing manifest annotation.",
+            }
+        else:
+            label = teacher.answer(sample)
+
         if label["teacher_confidence"] < config.distillation.min_teacher_confidence:
             continue
+
         rows.append(
             {
                 **asdict(sample),

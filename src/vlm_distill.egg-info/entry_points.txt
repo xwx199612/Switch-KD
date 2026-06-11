@@ -1,0 +1,2 @@
+[console_scripts]
+vlm-distill = vlm_distill.cli:main

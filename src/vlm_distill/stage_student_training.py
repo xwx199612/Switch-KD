@@ -87,7 +87,13 @@ def _train_hf_student(config: PipelineConfig, rows: list[dict]) -> Path:
 
     def tokenize(example: dict) -> dict:
         image = load_training_image(config.data.image_root, example["image"])
-        prompt = config.distillation.prompt_template.format(question=example["question"])
+        instruction = example.get("instruction") or example.get("question") or ""
+        prompt = config.distillation.prompt_template.format(
+            question=instruction,
+            instruction=instruction,
+            target_label=example.get("target_label", "target object"),
+            task=example.get("task", "vqa"),
+        )
         target = example[config.distillation.target_field]
         encoded = encode_vlm_training_sample(
             processor,

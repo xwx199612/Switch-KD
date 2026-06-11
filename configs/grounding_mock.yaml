@@ -1,0 +1,55 @@
+seed: 42
+
+data:
+  manifest_path: examples/grounding_manifest.jsonl
+  distill_path: outputs/grounding_distill_dataset.jsonl
+  eval_path: outputs/grounding_distill_dataset.jsonl
+  image_root: .
+  max_samples: 16
+
+teacher:
+  backend: mock
+  model_name: mock-vlm-teacher
+  temperature: 0.2
+  max_new_tokens: 128
+
+student:
+  model_name: mock-vlm-student
+  output_dir: outputs/grounding_student
+  adapter_dir: outputs/grounding_student/adapter
+  use_lora: true
+  quantization: none
+
+training:
+  epochs: 1
+  batch_size: 2
+  gradient_accumulation_steps: 1
+  learning_rate: 0.0002
+  max_steps: 4
+  log_every: 1
+  save_every: 50
+  mixed_precision: "no"
+
+distillation:
+  target_field: student_target
+  prompt_template: |
+    You are a GUI visual grounding assistant.
+
+    Locate the target UI element in the device screenshot.
+
+    Target label: {target_label}
+    Instruction: {instruction}
+
+    Return only valid JSON:
+    {{
+      "label": "{target_label}",
+      "bbox": [x_min, y_min, x_max, y_max]
+    }}
+
+evaluation:
+  output_path: outputs/grounding_eval_report.json
+  metrics:
+    - valid_json_rate
+    - mean_iou
+    - accuracy_iou_50
+    - label_match_rate
