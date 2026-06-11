@@ -1,0 +1,123 @@
+# VLM Distillation Pipeline
+
+一套全新的 Vision-Language Model 蒸餾 pipeline，從資料清單、teacher pseudo-label 產生、student 監督式微調，到評估與匯出皆獨立運作。
+
+## Pipeline Overview
+
+```text
+raw image/question data
+        |
+        v
+manifest.jsonl  ->  teacher inference  ->  distill_dataset.jsonl
+        |                                      |
+        v                                      v
+   validation                           student training
+                                               |
+                                               v
+                                      eval + export adapter
+```
+
+## Features
+
+- 支援 JSONL manifest 資料格式。
+- teacher 可接 Hugging Face VLM，也可先用 mock backend 做管線測試。
+- student 使用 LoRA/QLoRA 風格設定，預設走 Hugging Face `transformers` + `peft`。
+- 蒸餾 loss 支援 hard target、soft target metadata 權重、answer/caption 混合任務。
+- CLI 分成 `validate-data`、`label`、`train`、`evaluate` 四個階段。
+- 設定集中於 YAML，方便替換 teacher/student/model/data path。
+
+## Quick Start
+
+```powershell
+cd outputs\vlm-distillation-pipeline
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e .
+```
+
+先用 mock teacher 跑通資料蒸餾：
+
+```powershell
+vlm-distill validate-data --config configs/mock.yaml
+vlm-distill label --config configs/mock.yaml
+vlm-distill train --config configs/mock.yaml
+vlm-distill evaluate --config configs/mock.yaml
+```
+
+## Data Format
+
+`manifest.jsonl` 每列一筆樣本：
+
+```json
+{"id":"sample-001","image":"examples/images/sample_001.jpg","question":"What object is on the table?","answer":"a cup","task":"vqa"}
+```
+
+蒸餾後的 `distill_dataset.jsonl`：
+
+```json
+{"id":"sample-001","image":"examples/images/sample_001.jpg","question":"What object is on the table?","student_target":"a cup","teacher_answer":"a cup","teacher_confidence":0.91,"task":"vqa"}
+```
+
+## Suggested Real Models
+
+常見組合：
+
+- Teacher: `Qwen/Qwen2.5-VL-7B-Instruct` 或更大的 instruct VLM。
+- Student: `Qwen/Qwen2.5-VL-3B-Instruct`、`HuggingFaceTB/SmolVLM2-2.2B-Instruct`，或你自己的小型 VLM。
+
+請依 GPU VRAM 調整 `configs/*.yaml` 的 batch size、LoRA rank、quantization 與 gradient checkpointing。
+
+## Project Layout
+
+```text
+configs/
+docs/
+deploy/
+  experimental/
+  production/
+examples/
+src/vlm_distill/
+tests/
+```
+
+Switch-KD 4060 Ti notes:
+
+```text
+docs/switch_kd_4060ti.md
+configs/switch_kd_4060ti.yaml
+src/vlm_distill/switch_kd.py
+```
+
+## Deployment Code
+
+實驗階段使用：
+
+```powershell
+C:\Users\GT13-1365xt\miniconda3\envs\vl_distill\python.exe deploy\experimental\infer_with_adapter.py `
+  --base-model "Qwen/Qwen2.5-VL-3B-Instruct" `
+  --adapter-path "outputs/student/adapter" `
+  --image "examples/images/sample_001.jpg" `
+  --question "What object is on the table?"
+```
+
+正式部署先合併 adapter：
+
+```powershell
+C:\Users\GT13-1365xt\miniconda3\envs\vl_distill\python.exe deploy\production\merge_adapter.py `
+  --base-model "Qwen/Qwen2.5-VL-3B-Instruct" `
+  --adapter-path "outputs/student/adapter" `
+  --output-dir "outputs/student/merged"
+```
+
+再用 merged model 推論：
+
+```powershell
+C:\Users\GT13-1365xt\miniconda3\envs\vl_distill\python.exe deploy\production\infer_merged.py `
+  --model-path "outputs/student/merged" `
+  --image "examples/images/sample_001.jpg" `
+  --question "What object is on the table?"
+```
+
+## Notes
+
+這份專案骨架刻意不依賴既有資料夾。你只需要把資料放成 manifest JSONL，再把 config 中的路徑換成你的資料位置。

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# VS Code
+.vscode/
+
+# Training Outputs
+outputs/
+
+# Models
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+
+# Environment Variables
+.env
+
+# Cache
+.cache/

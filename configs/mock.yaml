@@ -1,0 +1,47 @@
+seed: 42
+
+data:
+  manifest_path: examples/manifest.jsonl
+  distill_path: outputs/distill_dataset.jsonl
+  eval_path: outputs/distill_dataset.jsonl
+  image_root: .
+  max_samples: 16
+
+teacher:
+  backend: mock
+  model_name: mock-vlm-teacher
+  temperature: 0.2
+  max_new_tokens: 96
+
+student:
+  model_name: mock-vlm-student
+  output_dir: outputs/student
+  adapter_dir: outputs/student/adapter
+  use_lora: true
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  quantization: none
+
+training:
+  epochs: 1
+  batch_size: 2
+  gradient_accumulation_steps: 1
+  learning_rate: 0.0002
+  warmup_ratio: 0.03
+  max_steps: 4
+  log_every: 1
+  save_every: 50
+  mixed_precision: "no"
+
+distillation:
+  target_field: student_target
+  confidence_weighting: true
+  min_teacher_confidence: 0.0
+  prompt_template: "Question: {question}\nAnswer:"
+
+evaluation:
+  output_path: outputs/eval_report.json
+  metrics:
+    - exact_match
+    - token_f1
