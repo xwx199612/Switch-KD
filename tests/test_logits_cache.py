@@ -1,8 +1,8 @@
 import pytest
 import torch
 
-from vlm_distill.logits_cache import compact_logits, is_compact_logits, materialize_cached_logits
-from vlm_distill.vsd import _get_nested_attr
+from vlm_distill.logits_cache_utils import compact_logits, is_compact_logits, materialize_cached_logits
+from vlm_distill.stage_visual_switch_logits import _get_nested_attr
 
 
 class _Leaf:

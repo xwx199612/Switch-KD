@@ -1,8 +1,8 @@
 import torch
 from PIL import Image
 
-from vlm_distill.logits_cache import align_reference_logits_to_suffix, compact_logits
-from vlm_distill.multimodal import VlmDataCollator, encode_vlm_training_sample
+from vlm_distill.logits_cache_utils import align_reference_logits_to_suffix, compact_logits
+from vlm_distill.vlm_batching import VlmDataCollator, encode_vlm_training_sample
 
 
 class _FakeProcessor:

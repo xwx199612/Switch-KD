@@ -42,7 +42,7 @@ def materialize_cached_logits(cached: Any, *, device, dtype, vocab_size: int | N
         if vocab_size is None:
             vocab_size = cached_vocab_size(cached)
         if vocab_size is None:
-            vocab_size = int(max(cached["indices"][-1][-1])) + 1
+            vocab_size = int(max(cached["indices"][-1])) + 1
         tensor = torch.full(shape, torch.finfo(dtype).min, device=device, dtype=dtype)
         indices = torch.tensor(cached["indices"], device=device)
         values = torch.tensor(cached["values"], device=device, dtype=dtype)

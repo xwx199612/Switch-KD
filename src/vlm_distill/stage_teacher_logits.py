@@ -4,9 +4,9 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from .config import PipelineConfig
-from .data import VlmSample, read_jsonl, validate_manifest, write_jsonl
-from .logits_cache import compact_logits
+from .config_schema import PipelineConfig
+from .data_manifest import VlmSample, read_jsonl, validate_manifest, write_jsonl
+from .logits_cache_utils import compact_logits
 
 
 class TeacherLogitsGenerator:

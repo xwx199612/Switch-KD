@@ -4,8 +4,8 @@ import json
 from collections import Counter
 from pathlib import Path
 
-from .config import PipelineConfig
-from .data import read_jsonl
+from .config_schema import PipelineConfig
+from .data_manifest import read_jsonl
 
 
 def normalize(text: str | None) -> str:

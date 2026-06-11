@@ -3,13 +3,13 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .config import load_config
-from .data import validate_manifest
-from .evaluate import evaluate
-from .teacher import create_distillation_dataset
-from .teacher_logits import create_teacher_logits_dataset
-from .train import train_student
-from .vsd import create_visual_switch_dataset
+from .config_schema import load_config
+from .data_manifest import validate_manifest
+from .stage_evaluation import evaluate
+from .stage_answer_labeling import create_distillation_dataset
+from .stage_teacher_logits import create_teacher_logits_dataset
+from .stage_student_training import train_student
+from .stage_visual_switch_logits import create_visual_switch_dataset
 
 
 def main() -> None:

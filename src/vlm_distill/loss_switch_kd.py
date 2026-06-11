@@ -89,7 +89,6 @@ def dynamic_bidirectional_logits_difference(
     This preserves distribution shape in both directions while avoiding full-vocab
     KD memory pressure on consumer GPUs.
     """
-    import torch
     import torch.nn.functional as F
 
     if student_logits.shape != reference_logits.shape:

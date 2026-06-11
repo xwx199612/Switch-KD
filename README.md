@@ -85,7 +85,7 @@ Switch-KD 4060 Ti notes:
 ```text
 docs/switch_kd_4060ti.md
 configs/switch_kd_4060ti.yaml
-src/vlm_distill/switch_kd.py
+src/vlm_distill/loss_switch_kd.py
 ```
 
 ## Deployment Code

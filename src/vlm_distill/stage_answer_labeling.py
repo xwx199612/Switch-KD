@@ -5,8 +5,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Protocol
 
-from .config import PipelineConfig
-from .data import VlmSample, write_jsonl
+from .config_schema import PipelineConfig
+from .data_manifest import VlmSample, write_jsonl
 
 
 class TeacherBackend(Protocol):

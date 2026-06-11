@@ -1,4 +1,4 @@
-from vlm_distill.evaluate import exact_match, token_f1
+from vlm_distill.stage_evaluation import exact_match, token_f1
 
 
 def test_exact_match_normalizes_case_and_spaces():

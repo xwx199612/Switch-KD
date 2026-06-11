@@ -3,16 +3,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .config import PipelineConfig
-from .data import read_jsonl
-from .logits_cache import (
+from .config_schema import PipelineConfig
+from .data_manifest import read_jsonl
+from .logits_cache_utils import (
     align_reference_logits,
     align_reference_logits_to_suffix,
     cached_vocab_size,
     materialize_cached_logits,
     vocab_sizes_compatible,
 )
-from .multimodal import (
+from .vlm_batching import (
     build_supervision_mask,
     build_vlm_data_collator,
     encode_vlm_training_sample,
@@ -171,7 +171,7 @@ def _load_student_model(config: PipelineConfig):
 def _build_switch_kd_trainer():
     from transformers import Trainer
 
-    from .switch_kd import SwitchKDLoss
+    from .loss_switch_kd import SwitchKDLoss
 
     class SwitchKDTrainer(Trainer):
         _vocab_warning_emitted: set[str] = set()
