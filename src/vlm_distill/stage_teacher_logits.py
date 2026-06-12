@@ -4,7 +4,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from .config_schema import PipelineConfig
+from .config_schema import PipelineConfig, format_prompt
 from .data_manifest import VlmSample, read_jsonl, validate_manifest, write_jsonl
 from .logits_cache_utils import compact_logits
 
@@ -44,9 +44,11 @@ class TeacherLogitsGenerator:
 
         image_path = self.config.data.image_root / sample.image
         image = _load_image(image_path)
-        prompt = self.config.distillation.prompt_template.format(
+        prompt = format_prompt(
+            self.config.distillation.prompt_template,
             query=sample.query,
-            target_label=sample.target_label or "target object",
+            target_label=sample.target_label,
+            target_type=sample.target_type,
             task=sample.task,
         )
         text = f"{prompt} {target_text}".strip()

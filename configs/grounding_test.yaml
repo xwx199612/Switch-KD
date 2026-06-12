@@ -53,7 +53,7 @@ distillation:
 
     Target object:
     {target_label}
-
+ 
     Return ONLY valid JSON:
 
     {{

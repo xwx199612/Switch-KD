@@ -38,7 +38,6 @@ distillation:
     Locate the target UI element in the device screenshot.
 
     Target label: {target_label}
-    query: {query}
 
     Return only valid JSON:
     {{

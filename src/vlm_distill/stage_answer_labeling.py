@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import urljoin
 
-from .config_schema import PipelineConfig
+from .config_schema import PipelineConfig, format_prompt
 from .data_manifest import VlmSample, write_jsonl
 
 
@@ -29,18 +29,20 @@ class MockTeacher:
         if sample.answer:
             teacher_answer = sample.answer
         elif sample.task == "screen_parsing":
+            elements = sample.metadata.get("elements") if isinstance(sample.metadata, dict) else None
             teacher_answer = json.dumps(
                 {
                     "focused_element": "mock settings",
-                    "selectable_elements": ["mock icon", "mock settings"],
+                    "selectable_elements": elements if isinstance(elements, list) else ["mock icon", "mock settings"],
                 },
                 ensure_ascii=False,
             )
         elif sample.task == "grounding":
+            bbox = sample.metadata.get("bbox") if isinstance(sample.metadata, dict) else None
             teacher_answer = json.dumps(
                 {
                     "label": sample.target_label or "target",
-                    "bbox": sample.bbox or [0, 0, 100, 100],
+                    "bbox": bbox or [0, 0, 100, 100],
                 },
                 ensure_ascii=False,
             )
@@ -334,28 +336,30 @@ def build_teacher(config: PipelineConfig) -> TeacherBackend:
     raise ValueError(f"Unknown teacher backend: {config.teacher.backend}")
 
 def _format_prompt(config: PipelineConfig, sample: VlmSample) -> str:
-    return config.distillation.prompt_template.format(
+    return format_prompt(
+        config.distillation.prompt_template,
         query=sample.query,
-        target_label=sample.target_label or "target object",
+        target_label=sample.target_label,
+        target_type=sample.target_type,
         task=sample.task,
     )
 
 
 def _target_from_existing_annotation(sample: VlmSample) -> str | None:
-    if sample.task == "screen_parsing" and sample.elements:
+    elements = sample.metadata.get("elements") if isinstance(sample.metadata, dict) else None
+    bbox = sample.metadata.get("bbox") if isinstance(sample.metadata, dict) else None
+
+    if sample.task == "screen_parsing" and elements:
         return json.dumps(
-            {
-                "focused_element": "mock settings",
-                "selectable_elements": ["mock icon", "mock settings"],
-            },
+            elements if isinstance(elements, dict) else {"elements": elements},
             ensure_ascii=False,
         )
 
-    if sample.task == "grounding" and sample.bbox:
+    if sample.task == "grounding" and bbox:
         return json.dumps(
             {
                 "label": sample.target_label or "target object",
-                "bbox": sample.bbox,
+                "bbox": bbox,
             },
             ensure_ascii=False,
         )
@@ -364,6 +368,7 @@ def _target_from_existing_annotation(sample: VlmSample) -> str | None:
         return sample.answer
 
     return None
+
 
 def create_distillation_dataset(config: PipelineConfig, samples: list[VlmSample]) -> Path:
     teacher = build_teacher(config)

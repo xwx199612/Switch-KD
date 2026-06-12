@@ -54,7 +54,9 @@ class VlmDataCollator:
     """Pad multimodal features; keep cached logits as per-sample payloads."""
 
     _LOGITS_FIELDS = ("teacher_logits", "switch_logits")
-    _SKIP_KEYS = frozenset({"prompt_token_len", "image", "id", "question"})
+    _SKIP_KEYS = frozenset(
+        {"prompt_token_len", "image", "id", "query", "target_label", "target_type", "answer", "metadata"}
+    )
 
     def __init__(self, pad_token_id: int = 0):
         self.pad_token_id = pad_token_id

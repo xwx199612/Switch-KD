@@ -141,3 +141,38 @@ def _build_evaluation_config(raw: dict[str, Any]) -> EvaluationConfig:
     if values.get("output_path") is not None:
         values["output_path"] = Path(values["output_path"])
     return EvaluationConfig(**values)
+
+
+def build_prompt_context(
+    *,
+    query: str | None = None,
+    target_label: str | None = None,
+    target_type: str | None = None,
+    task: str | None = None,
+) -> dict[str, str]:
+    query_text = query or ""
+    return {
+        "query": query_text,
+        "question": query_text,
+        "target_label": target_label or "",
+        "target_type": target_type or "",
+        "task": task or "",
+    }
+
+
+def format_prompt(
+    template: str,
+    *,
+    query: str | None = None,
+    target_label: str | None = None,
+    target_type: str | None = None,
+    task: str | None = None,
+) -> str:
+    return template.format(
+        **build_prompt_context(
+            query=query,
+            target_label=target_label,
+            target_type=target_type,
+            task=task,
+        )
+    )

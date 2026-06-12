@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .config_schema import PipelineConfig
+from .config_schema import PipelineConfig, format_prompt
 from .data_manifest import VlmSample, read_jsonl, validate_manifest, write_jsonl
 from .logits_cache_utils import compact_logits
 
@@ -78,9 +78,11 @@ class VisualSwitchDistiller:
 
         image_path = self.config.data.image_root / sample.image
         image = Image.open(image_path).convert("RGB")
-        prompt = self.config.distillation.prompt_template.format(
+        prompt = format_prompt(
+            self.config.distillation.prompt_template,
             query=sample.query,
-            target_label=sample.target_label or "target object",
+            target_label=sample.target_label,
+            target_type=sample.target_type,
             task=sample.task,
         )
         with torch.no_grad():

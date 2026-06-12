@@ -227,7 +227,8 @@ Example:
   "id":"screen_parsing-000001",
   "image":"D:/TV_data/test_data/example.png",
   "task":"screen_parsing",
-  "instruction":"List all visible UI icons, buttons, menu items, text labels, and actionable elements on this screen."
+  "query":"List all visible UI icons, buttons, menu items, text labels, and actionable elements on this screen.",
+  "metadata":{}
 }
 ```
 
@@ -332,7 +333,8 @@ into:
 ```json
 {
   "target_label":"YouTube",
-  "instruction":"Locate the YouTube on this screen."
+  "target_type":"object",
+  "metadata":{}
 }
 ```
 

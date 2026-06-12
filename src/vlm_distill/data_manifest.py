@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Any
 
@@ -10,12 +10,12 @@ from typing import Iterable, Any
 class VlmSample:
     id: str
     image: str
-    query: str | None = None
-    answer: str | None = None
     task: str = "vqa"
+    query: str | None = None
     target_label: str | None = None
-    bbox: list[float] | None = None
-    elements: list[dict[str, Any]] | None = None
+    target_type: str | None = None
+    answer: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def read_jsonl(path: Path, max_samples: int | None = None) -> list[dict]:
@@ -43,7 +43,7 @@ def write_jsonl(path: Path, rows: Iterable[dict]) -> None:
 def validate_manifest(path: Path, image_root: Path = Path("."), max_samples: int | None = None) -> list[VlmSample]:
     rows = read_jsonl(path, max_samples=max_samples)
     samples: list[VlmSample] = []
-    required = {"id", "image"}
+    required = {"id", "image", "task"}
 
     for index, row in enumerate(rows, start=1):
         missing = required - set(row)
@@ -54,33 +54,39 @@ def validate_manifest(path: Path, image_root: Path = Path("."), max_samples: int
         if not image_path.exists():
             raise FileNotFoundError(f"{path}:{index} image not found: {image_path}")
 
-        task = str(row.get("task", "vqa"))
-        query = row.get("query")
-
-        if not query:
-            if task == "screen_parsing":
-                query = "List all visible UI icons, buttons, menu items, and actionable elements."
-            elif task == "grounding" and row.get("target_label"):
-                query = f"Locate the {row['target_label']} in the image."
-            else:
-                raise ValueError(
-                    f"{path}:{index} requires query, "
-                    "or target_label for grounding."
-                )
-
-        if task == "grounding" and not row.get("target_label"):
+        task = str(row["task"])
+        target_label = row.get("target_label")
+        if task == "grounding" and not target_label:
             raise ValueError(f"{path}:{index} grounding task requires target_label")
+
+        known_keys = {
+            "id",
+            "image",
+            "task",
+            "query",
+            "target_label",
+            "target_type",
+            "answer",
+            "metadata",
+        }
+        metadata: dict[str, Any] = {}
+        existing_metadata = row.get("metadata")
+        if isinstance(existing_metadata, dict):
+            metadata.update(existing_metadata)
+        for key, value in row.items():
+            if key not in known_keys:
+                metadata[key] = value
 
         samples.append(
             VlmSample(
                 id=str(row["id"]),
                 image=str(row["image"]),
-                query=str(query) if query is not None else None,
-                answer=row.get("answer"),
                 task=task,
-                target_label=row.get("target_label"),
-                bbox=row.get("bbox"),
-                elements=row.get("elements"),
+                query=str(row["query"]) if row.get("query") is not None else None,
+                target_label=str(target_label) if target_label is not None else None,
+                target_type=str(row["target_type"]) if row.get("target_type") is not None else None,
+                answer=row.get("answer"),
+                metadata=metadata,
             )
         )
 

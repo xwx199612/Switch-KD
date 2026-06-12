@@ -20,7 +20,6 @@ TASK_DEFAULTS = {
         ),
     },
     "grounding": {
-        "query_template": "Locate the {target_label} on this screen.",
         "source_filename": "screen_parsing_teacher_labels.jsonl",
     },
 }
@@ -98,8 +97,6 @@ def create_grounding_manifest(
     source_path: Path,
     output_path: Path,
 ) -> Path:
-    query_template = TASK_DEFAULTS["grounding"]["query_template"]
-
     if not source_path.exists():
         raise FileNotFoundError(
             f"screen_parsing teacher label file not found: {source_path}\n"
@@ -123,7 +120,6 @@ def create_grounding_manifest(
                     "image": row["image"],
                     "task": "grounding",
                     "target_label": label,
-                    "query": query_template.format(target_label=label),
                     "source_screen_parsing_id": row["id"],
                 }
             )

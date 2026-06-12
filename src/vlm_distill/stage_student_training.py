@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .config_schema import PipelineConfig
+from .config_schema import PipelineConfig, format_prompt
 from .data_manifest import read_jsonl
 from .logits_cache_utils import (
     align_reference_logits,
@@ -82,10 +82,12 @@ def _train_hf_student(config: PipelineConfig, rows: list[dict]) -> Path:
 
     def tokenize(example: dict) -> dict:
         image = load_training_image(config.data.image_root, example["image"])
-        query = example.get("query") or ""
-        prompt = config.distillation.prompt_template.format(
-            query=query,
-            target_label=example.get("target_label", "target object"),
+        metadata = example.get("metadata") if isinstance(example.get("metadata"), dict) else {}
+        prompt = format_prompt(
+            config.distillation.prompt_template,
+            query=example.get("query") or metadata.get("query"),
+            target_label=example.get("target_label") or metadata.get("target_label"),
+            target_type=example.get("target_type") or metadata.get("target_type"),
             task=example.get("task", "vqa"),
         )
         target = example[config.distillation.target_field]

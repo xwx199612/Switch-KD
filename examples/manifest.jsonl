@@ -1,2 +1,2 @@
-{"id":"sample-001","image":"examples/images/sample_001.jpg","question":"What object is on the table?","answer":"a cup","task":"vqa"}
-{"id":"sample-002","image":"examples/images/sample_002.jpg","question":"Describe the scene in one sentence.","answer":"A person is standing near a bicycle.","task":"caption"}
+{"id":"sample-001","image":"examples/images/sample_001.jpg","task":"vqa","query":"What object is on the table?","answer":"a cup","metadata":{}}
+{"id":"sample-002","image":"examples/images/sample_002.jpg","task":"caption","query":"Describe the scene in one sentence.","answer":"A person is standing near a bicycle.","metadata":{}}
