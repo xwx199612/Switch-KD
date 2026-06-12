@@ -120,6 +120,7 @@ def create_grounding_manifest(
                     "image": row["image"],
                     "task": "grounding",
                     "target_label": label,
+                    "target_type": element.get("type") if isinstance(element, dict) else None,
                     "source_screen_parsing_id": row["id"],
                 }
             )
@@ -162,12 +163,14 @@ def _extract_elements(row: dict[str, Any]) -> list[Any]:
     if not isinstance(parsed, dict):
         return []
 
-    for key in ("elements", "selectable_elements"):
-        elements = parsed.get(key, [])
-        if isinstance(elements, list):
-            return elements
+    elements = parsed.get("elements")
+    if elements is None:
+        elements = parsed.get("selectable_elements")
 
-    return []
+    if not isinstance(elements, list):
+        return []
+
+    return elements
 
 
 def _parse_json_like(value: Any) -> dict[str, Any] | None:

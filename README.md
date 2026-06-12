@@ -227,8 +227,7 @@ Example:
   "id":"screen_parsing-000001",
   "image":"D:/TV_data/test_data/example.png",
   "task":"screen_parsing",
-  "query":"List all visible UI icons, buttons, menu items, text labels, and actionable elements on this screen.",
-  "metadata":{}
+  "query":"List all visible UI icons, buttons, menu items, text labels, and actionable elements on this screen."
 }
 ```
 
@@ -333,9 +332,7 @@ into:
 ```json
 {
   "target_label":"YouTube",
-  "target_type":"object",
-  "source_screen_parsing_id":"screen-001",
-  "metadata":{}
+  "target_type":"object"
 }
 ```
 

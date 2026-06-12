@@ -84,7 +84,7 @@ def validate_manifest(path: Path, image_root: Path = Path("."), max_samples: int
                 task=task,
                 query=str(row["query"]) if row.get("query") is not None else None,
                 target_label=str(target_label) if target_label is not None else None,
-                target_type=str(row["target_type"]) if row.get("target_type") is not None else None,
+                target_type=row.get("target_type"),
                 answer=row.get("answer"),
                 metadata=metadata,
             )

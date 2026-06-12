@@ -86,7 +86,7 @@ distillation:
       "active_top_tab": "",
       "focused_element": "",
       "focus_state": "",
-      "selectable_elements": []
+      "elements": []
     }}
 
 evaluation:
