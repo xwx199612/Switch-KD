@@ -38,7 +38,7 @@ distillation:
     Locate the target UI element in the device screenshot.
 
     Target label: {target_label}
-    Instruction: {instruction}
+    query: {query}
 
     Return only valid JSON:
     {{

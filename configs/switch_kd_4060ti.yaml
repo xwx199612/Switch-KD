@@ -51,7 +51,7 @@ distillation:
   target_field: student_target
   confidence_weighting: true
   min_teacher_confidence: 0.35
-  prompt_template: "Question: {question}\nAnswer:"
+  prompt_template: "query: {query}\nAnswer:"
   lm_loss_weight: 1.0
   dbild_loss_weight: 0.5
   vsd_loss_weight: 0.5

@@ -45,7 +45,7 @@ distillation:
   target_field: student_target
   confidence_weighting: true
   min_teacher_confidence: 0.35
-  prompt_template: "Question: {question}\nAnswer:"
+  prompt_template: "query: {query}\nAnswer:"
 
 evaluation:
   output_path: outputs/eval_report.json

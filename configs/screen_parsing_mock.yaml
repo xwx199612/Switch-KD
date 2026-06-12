@@ -37,7 +37,7 @@ distillation:
 
     Analyze this device screenshot and list all visible UI icons, buttons, menu items, and actionable elements.
 
-    Instruction: {instruction}
+    query: {query}
 
     Return only valid JSON:
     {{
