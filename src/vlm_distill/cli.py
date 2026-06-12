@@ -28,8 +28,10 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "create-manifest":
-        
+        config = load_config(args.config)
+
         output_path = create_manifest_from_config(
+            config=config,
             task=args.task,
             recursive=args.recursive,
         )

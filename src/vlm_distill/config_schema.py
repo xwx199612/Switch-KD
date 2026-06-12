@@ -6,8 +6,6 @@ from typing import Any
 
 import yaml
 
-
-@dataclass
 @dataclass
 class DataConfig:
     manifest_path: Path
@@ -29,6 +27,7 @@ class TeacherConfig:
     ollama_host: str = "http://localhost:11434"
     request_timeout: int = 120
     torch_dtype: str | None = None
+    quantization: str = "none"
     temperature: float = 0.2
     max_new_tokens: int = 128
 
