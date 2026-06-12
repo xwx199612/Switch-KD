@@ -1,10 +1,10 @@
 seed: 42
 
 data:
-  manifest_path: data/grounding_test.jsonl
-  distill_path: outputs/grounding_teacher_labels.jsonl
-  eval_path: outputs/grounding_teacher_labels.jsonl
-
+  output_dir: D:/TV_data/teacher_parsing
+  manifest_path: D:/TV_data/teacher_parsing/grounding_manifest.jsonl
+  distill_path: D:/TV_data/teacher_parsing/grounding_teacher_labels.jsonl
+  eval_path: D:/TV_data/teacher_parsing/grounding_teacher_labels.jsonl
   image_root: .
   max_samples: 10
 

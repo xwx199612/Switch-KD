@@ -8,11 +8,14 @@ import yaml
 
 
 @dataclass
+@dataclass
 class DataConfig:
     manifest_path: Path
     distill_path: Path
     eval_path: Path | None = None
     image_root: Path = Path(".")
+    image_dir: Path | None = None
+    output_dir: Path | None = None
     max_samples: int | None = None
 
 
@@ -121,7 +124,7 @@ def load_config(path: str | Path) -> PipelineConfig:
 
 def _build_data_config(raw: dict[str, Any]) -> DataConfig:
     values = dict(raw)
-    for key in ("manifest_path", "distill_path", "eval_path", "image_root"):
+    for key in ("manifest_path", "distill_path", "eval_path", "image_root", "image_dir", "output_dir"):
         if values.get(key) is not None:
             values[key] = Path(values[key])
     return DataConfig(**values)

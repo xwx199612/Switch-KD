@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .config_schema import load_config
 from .data_manifest import validate_manifest
-from .manifest_builder import create_manifest
+from .manifest_builder import create_manifest_from_config
 from .stage_evaluation import evaluate
 from .stage_answer_labeling import create_distillation_dataset
 from .stage_teacher_logits import create_teacher_logits_dataset
@@ -17,18 +17,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="vlm-distill")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    create_manifest_parser = subparsers.add_parser("create-manifest")
+    create_manifest_parser.add_argument("--config", type=Path, required=True)
     create_manifest_parser.add_argument("--task", type=str, required=True)
     create_manifest_parser.add_argument("--recursive", action="store_true")
 
     for command in ("validate-data", "label", "teacher-logits", "switch-logits", "train", "evaluate"):
         command_parser = subparsers.add_parser(command)
         command_parser.add_argument("--config", type=Path, required=True)
-
     args = parser.parse_args()
 
     if args.command == "create-manifest":
         
-        output_path = create_manifest(
+        output_path = create_manifest_from_config(
             task=args.task,
             recursive=args.recursive,
         )
