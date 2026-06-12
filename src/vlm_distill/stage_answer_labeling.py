@@ -59,11 +59,11 @@ class HuggingFaceTeacher:
         self.config = config
         try:
             import torch
-            from transformers import (
-                AutoModelForVision2Seq,
-                AutoProcessor,
-                BitsAndBytesConfig,
-            )
+            from transformers import AutoProcessor, BitsAndBytesConfig
+            try:
+                from transformers import AutoModelForImageTextToText as AutoModelForVLM
+            except ImportError:  # pragma: no cover - fallback for older transformers
+                from transformers import AutoModelForVision2Seq as AutoModelForVLM
         except ImportError as exc:
             raise RuntimeError(
                 "Install torch, transformers and bitsandbytes to use the Hugging Face teacher backend."
@@ -84,6 +84,7 @@ class HuggingFaceTeacher:
         model_kwargs = {
             "device_map": config.teacher.device_map or "auto",
             "trust_remote_code": True,
+            "attn_implementation": "eager",
         }
 
         if config.teacher.quantization == "4bit":
@@ -105,7 +106,7 @@ class HuggingFaceTeacher:
             elif config.teacher.torch_dtype == "float32":
                 model_kwargs["torch_dtype"] = torch.float32
 
-        self.model = AutoModelForVision2Seq.from_pretrained(
+        self.model = AutoModelForVLM.from_pretrained(
             config.teacher.model_name,
             **model_kwargs,
         )

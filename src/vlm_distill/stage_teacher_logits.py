@@ -18,16 +18,22 @@ class TeacherLogitsGenerator:
         self._processor = None
 
     def load(self) -> None:
-        from transformers import AutoModelForVision2Seq, AutoProcessor
+        from transformers import AutoProcessor
+
+        try:
+            from transformers import AutoModelForImageTextToText as AutoModelForVLM
+        except ImportError:  # pragma: no cover - fallback for older transformers
+            from transformers import AutoModelForVision2Seq as AutoModelForVLM
 
         self._processor = AutoProcessor.from_pretrained(
             self.config.teacher.model_name,
             trust_remote_code=True,
         )
-        self._model = AutoModelForVision2Seq.from_pretrained(
+        self._model = AutoModelForVLM.from_pretrained(
             self.config.teacher.model_name,
             device_map=self.config.teacher.device_map or "auto",
             trust_remote_code=True,
+            attn_implementation="eager",
         ).eval()
 
     def generate_for_sample(self, sample: VlmSample, target_text: str) -> dict[str, Any]:
@@ -35,10 +41,9 @@ class TeacherLogitsGenerator:
             self.load()
 
         import torch
-        from PIL import Image
 
         image_path = self.config.data.image_root / sample.image
-        image = Image.open(image_path).convert("RGB")
+        image = _load_image(image_path)
         prompt = self.config.distillation.prompt_template.format(
             query=sample.query,
             target_label=sample.target_label or "target object",
@@ -47,9 +52,10 @@ class TeacherLogitsGenerator:
         text = f"{prompt} {target_text}".strip()
 
         with torch.no_grad():
-            prompt_inputs = self._processor(images=image, text=prompt, return_tensors="pt")
-            inputs = self._processor(images=image, text=text, return_tensors="pt")
-            inputs = {key: value.to(self._model.device) for key, value in inputs.items()}
+            prompt_inputs = self._build_multimodal_inputs(image, prompt)
+            inputs = self._build_multimodal_inputs(image, text)
+            prompt_inputs = _move_batch_to_device(prompt_inputs, self._model.device)
+            inputs = _move_batch_to_device(inputs, self._model.device)
             outputs = self._model(**inputs)
             if not hasattr(outputs, "logits"):
                 raise ValueError("Teacher model forward did not return logits.")
@@ -65,6 +71,29 @@ class TeacherLogitsGenerator:
             f"{field}_prompt_len": int(prompt_inputs["input_ids"].shape[1]),
             f"{field}_vocab_size": int(outputs.logits.shape[-1]),
         }
+
+    def _build_multimodal_inputs(self, image, prompt: str):
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+
+        text = self._processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+        return self._processor(
+            text=[text],
+            images=[image],
+            return_tensors="pt",
+        )
 
 
 def create_teacher_logits_dataset(config: PipelineConfig) -> Path:
@@ -91,3 +120,13 @@ def create_teacher_logits_dataset(config: PipelineConfig) -> Path:
 
     write_jsonl(config.data.distill_path, output_rows)
     return config.data.distill_path
+
+
+def _load_image(image_path: Path):
+    from PIL import Image
+
+    return Image.open(image_path).convert("RGB")
+
+
+def _move_batch_to_device(batch: dict[str, Any], device):
+    return {key: value.to(device) if hasattr(value, "to") else value for key, value in batch.items()}

@@ -40,7 +40,12 @@ class VisualSwitchDistiller:
 
     def load(self) -> None:
         import torch
-        from transformers import AutoModelForVision2Seq, AutoProcessor
+        from transformers import AutoProcessor
+
+        try:
+            from transformers import AutoModelForImageTextToText as AutoModelForVLM
+        except ImportError:  # pragma: no cover - fallback for older transformers
+            from transformers import AutoModelForVision2Seq as AutoModelForVLM
 
         self._torch = torch
         self._student_processor = AutoProcessor.from_pretrained(
@@ -51,15 +56,17 @@ class VisualSwitchDistiller:
             self.config.teacher.model_name,
             trust_remote_code=True,
         )
-        self._student_model = AutoModelForVision2Seq.from_pretrained(
+        self._student_model = AutoModelForVLM.from_pretrained(
             self.config.student.model_name,
             device_map="auto",
             trust_remote_code=True,
+            attn_implementation="eager",
         ).eval()
-        self._teacher_model = AutoModelForVision2Seq.from_pretrained(
+        self._teacher_model = AutoModelForVLM.from_pretrained(
             self.config.teacher.model_name,
             device_map="auto",
             trust_remote_code=True,
+            attn_implementation="eager",
         ).eval()
 
     def generate_for_sample(self, sample: VlmSample) -> dict[str, Any]:

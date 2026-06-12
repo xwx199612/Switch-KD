@@ -49,12 +49,7 @@ def _train_hf_student(config: PipelineConfig, rows: list[dict]) -> Path:
     try:
         from datasets import Dataset
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-        from transformers import (
-            AutoModelForVision2Seq,
-            AutoProcessor,
-            Trainer,
-            TrainingArguments,
-        )
+        from transformers import AutoProcessor, Trainer, TrainingArguments
     except ImportError as exc:
         raise RuntimeError("Install transformers, datasets and peft to run real training.") from exc
 
@@ -150,11 +145,15 @@ def _train_hf_student(config: PipelineConfig, rows: list[dict]) -> Path:
 
 
 def _load_student_model(config: PipelineConfig):
-    from transformers import AutoModelForVision2Seq
+    try:
+        from transformers import AutoModelForImageTextToText as AutoModelForVLM
+    except ImportError:  # pragma: no cover - fallback for older transformers
+        from transformers import AutoModelForVision2Seq as AutoModelForVLM
 
     model_kwargs: dict = {
         "device_map": "auto",
         "trust_remote_code": True,
+        "attn_implementation": "eager",
     }
     if config.student.quantization == "4bit":
         from transformers import BitsAndBytesConfig
@@ -170,7 +169,7 @@ def _load_student_model(config: PipelineConfig):
 
         model_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
 
-    return AutoModelForVision2Seq.from_pretrained(config.student.model_name, **model_kwargs)
+    return AutoModelForVLM.from_pretrained(config.student.model_name, **model_kwargs)
 
 
 def _build_switch_kd_trainer():
