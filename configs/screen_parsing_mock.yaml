@@ -35,15 +35,14 @@ distillation:
   prompt_template: |
     You are a GUI screen parsing assistant.
 
-    Analyze this device screenshot and list all visible UI icons, buttons, menu items, and actionable elements.
+    Analyze this device screenshot and list only visible interactive UI elements.
 
     query: {query}
 
     Return only valid JSON:
     {{
-      "screen_type": "",
       "elements": [
-        {{"label": "", "type": "icon|button|menu_item|text|toggle|input|unknown"}}
+        ""
       ]
     }}
 

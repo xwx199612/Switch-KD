@@ -30,6 +30,7 @@ class TeacherConfig:
     quantization: str = "none"
     temperature: float = 0.2
     max_new_tokens: int = 128
+    image_resize: str = "original"
 
 
 @dataclass

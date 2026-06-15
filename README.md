@@ -66,6 +66,7 @@ teacher:
 
   temperature: 0.0
   max_new_tokens: 256
+  image_resize: original  # original, 720p, or 480p
 ```
 
 Recommended for:
@@ -227,7 +228,7 @@ Example:
   "id":"screen_parsing-000001",
   "image":"D:/TV_data/test_data/example.png",
   "task":"screen_parsing",
-  "query":"List all visible UI icons, buttons, menu items, text labels, and actionable elements on this screen."
+  "query":"List all visible interactive UI elements on this screen."
 }
 ```
 
@@ -263,17 +264,9 @@ Expected teacher response:
 
 ```json
 {
-  "screen_type":"Android TV Home",
-
   "elements":[
-    {
-      "label":"YouTube",
-      "type":"app_icon"
-    },
-    {
-      "label":"Settings",
-      "type":"icon"
-    }
+    "YouTube",
+    "Search"
   ]
 }
 ```

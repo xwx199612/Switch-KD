@@ -15,8 +15,7 @@ DEFAULT_OUTPUT_DIR = Path("outputs")
 TASK_DEFAULTS = {
     "screen_parsing": {
         "query": (
-            "List all visible UI icons, buttons, menu items, text labels, "
-            "and actionable elements on this screen."
+            "List all visible interactive UI elements on this screen."
         ),
     },
     "grounding": {

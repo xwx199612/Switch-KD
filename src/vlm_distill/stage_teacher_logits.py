@@ -67,7 +67,7 @@ class TeacherLogitsGenerator:
         model_kwargs: dict[str, Any] = {
             "device_map": self.config.teacher.device_map or "auto",
             "trust_remote_code": True,
-            "attn_implementation": "eager",
+            "attn_implementation": "sdpa",
         }
 
         if self.config.teacher.quantization == "4bit":

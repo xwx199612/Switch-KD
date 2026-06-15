@@ -155,7 +155,7 @@ def _load_student_model(config: PipelineConfig):
     model_kwargs: dict = {
         "device_map": "auto",
         "trust_remote_code": True,
-        "attn_implementation": "eager",
+        "attn_implementation": "sdpa",
     }
     if config.student.quantization == "4bit":
         from transformers import BitsAndBytesConfig

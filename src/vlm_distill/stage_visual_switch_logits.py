@@ -60,13 +60,13 @@ class VisualSwitchDistiller:
             self.config.student.model_name,
             device_map="auto",
             trust_remote_code=True,
-            attn_implementation="eager",
+            attn_implementation="sdpa",
         ).eval()
         self._teacher_model = AutoModelForVLM.from_pretrained(
             self.config.teacher.model_name,
             device_map="auto",
             trust_remote_code=True,
-            attn_implementation="eager",
+            attn_implementation="sdpa",
         ).eval()
 
     def generate_for_sample(self, sample: VlmSample) -> dict[str, Any]:
