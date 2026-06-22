@@ -1,9 +1,9 @@
-seed: 42
+﻿seed: 42
 
 data:
-  manifest_path: examples/screen_parsing_manifest.jsonl
-  distill_path: outputs/screen_parsing_distill_dataset.jsonl
-  eval_path: outputs/screen_parsing_distill_dataset.jsonl
+  manifest_path: examples/parsing_manifest.jsonl
+  distill_path: outputs/parsing_distill_dataset.jsonl
+  eval_path: outputs/parsing_distill_dataset.jsonl
   image_root: .
   max_samples: 16
 
@@ -12,11 +12,12 @@ teacher:
   model_name: mock-vlm-teacher
   temperature: 0.2
   max_new_tokens: 256
+  image_resize: original
 
 student:
   model_name: mock-vlm-student
-  output_dir: outputs/screen_parsing_student
-  adapter_dir: outputs/screen_parsing_student/adapter
+  output_dir: outputs/parsing_student
+  adapter_dir: outputs/parsing_student/adapter
   use_lora: true
   quantization: none
 
@@ -29,9 +30,9 @@ training:
   log_every: 1
   save_every: 50
   mixed_precision: "no"
+  image_resize: original
 
 distillation:
-  target_field: student_target
   prompt_template: |
     You are a GUI screen parsing assistant.
 
@@ -47,7 +48,8 @@ distillation:
     }}
 
 evaluation:
-  output_path: outputs/screen_parsing_eval_report.json
+  output_path: outputs/parsing_eval_report.json
   metrics:
     - valid_json_rate
     - element_f1
+

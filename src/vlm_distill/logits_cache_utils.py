@@ -34,6 +34,18 @@ def cached_vocab_size(cached: Any) -> int | None:
     return None
 
 
+def cached_token_weight(cached: Any, *, device, dtype):
+    import torch
+
+    if not is_compact_logits(cached):
+        return None
+
+    values = cached.get("entropy_weight")
+    if values is None:
+        return None
+    return torch.tensor(values, device=device, dtype=dtype)
+
+
 def materialize_cached_logits(cached: Any, *, device, dtype, vocab_size: int | None = None):
     import torch
 
@@ -137,6 +149,60 @@ def align_reference_logits_to_suffix(
     )
     aligned[:, int(student_prompt_len) : int(student_prompt_len) + ref_answer.shape[1], :] = ref_answer
     return align_reference_logits(aligned, target_shape=target_shape, dtype=dtype)
+
+
+def align_reference_token_weight_to_suffix(
+    reference,
+    *,
+    target_shape: tuple[int, ...],
+    reference_prompt_len: int | None,
+    student_prompt_len: int | None,
+    dtype=None,
+):
+    import torch
+
+    if len(target_shape) != 2:
+        raise ValueError(f"Expected target_shape (batch, seq), got {target_shape}")
+
+    batch_size, seq_len = target_shape
+    aligned = reference
+
+    if aligned.shape[0] != batch_size:
+        if aligned.shape[0] == 1 and batch_size > 1:
+            aligned = aligned.expand(batch_size, -1)
+        else:
+            aligned = aligned[:batch_size]
+
+    fill_value = torch.zeros((), device=aligned.device, dtype=dtype or aligned.dtype)
+    if reference_prompt_len is None or student_prompt_len is None:
+        output = torch.full(
+            (batch_size, seq_len),
+            fill_value,
+            device=aligned.device,
+            dtype=dtype or aligned.dtype,
+        )
+        copy_len = min(aligned.shape[1], seq_len)
+        output[:, :copy_len] = aligned[:, :copy_len]
+        return output
+
+    ref_answer = aligned[:, int(reference_prompt_len) :]
+    answer_len = seq_len - int(student_prompt_len)
+    if answer_len <= 0:
+        return torch.zeros((batch_size, seq_len), device=aligned.device, dtype=dtype or aligned.dtype)
+
+    if ref_answer.shape[1] > answer_len:
+        ref_answer = ref_answer[:, :answer_len]
+    elif ref_answer.shape[1] < answer_len:
+        pad = torch.zeros(
+            (ref_answer.shape[0], answer_len - ref_answer.shape[1]),
+            device=aligned.device,
+            dtype=dtype or aligned.dtype,
+        )
+        ref_answer = torch.cat([ref_answer, pad], dim=1)
+
+    output = torch.zeros((batch_size, seq_len), device=aligned.device, dtype=dtype or aligned.dtype)
+    output[:, int(student_prompt_len) : int(student_prompt_len) + ref_answer.shape[1]] = ref_answer
+    return output
 
 
 def vocab_sizes_compatible(reference_vocab: int | None, student_vocab: int) -> bool:

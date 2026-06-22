@@ -1,11 +1,11 @@
 # Experimental Deployment
 
-實驗階段建議不要把 LoRA adapter 合併進 base model。這樣可以快速切換不同蒸餾實驗產出的 adapter。
+實驗階段建議不要把 LoRA adapter 合併進 base model。這樣可以快速切換不同蒸餾實驗產出的 adapter，也最能確保原始 student model 不被污染。
 
 ## Usage
 
 ```powershell
-cd C:\Users\GT13-1365xt\Documents\Codex\2026-06-09\vlm-pipeline\outputs\vlm-distillation-pipeline
+cd C:\Users\GT13-1365xt\Documents\Codex\2026-06-09\vlm-pipeline\outputs\Switch-KD
 
 $env:PYTHONPATH="src"
 C:\Users\GT13-1365xt\miniconda3\envs\vl_distill\python.exe deploy\experimental\infer_with_adapter.py `

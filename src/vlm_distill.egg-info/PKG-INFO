@@ -47,7 +47,7 @@ manifest.jsonl  ->  teacher inference  ->  distill_dataset.jsonl
 ## Quick Start
 
 ```powershell
-cd outputs\vlm-distillation-pipeline
+cd outputs\Switch-KD
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e .
@@ -73,7 +73,7 @@ vlm-distill evaluate --config configs/mock.yaml
 蒸餾後的 `distill_dataset.jsonl`：
 
 ```json
-{"id":"sample-001","image":"examples/images/sample_001.jpg","question":"What object is on the table?","student_target":"a cup","teacher_answer":"a cup","teacher_confidence":0.91,"task":"vqa"}
+{"id":"sample-001","image":"examples/images/sample_001.jpg","question":"What object is on the table?","teacher_answer":"a cup","teacher_confidence":0.91,"task":"vqa"}
 ```
 
 ## Suggested Real Models

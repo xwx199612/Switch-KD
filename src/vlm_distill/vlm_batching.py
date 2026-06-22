@@ -13,9 +13,10 @@ class EncodedVlmSample:
     prompt_token_len: int
 
 
-def load_training_image(image_root: Path, image_path: str) -> Image.Image:
+def load_training_image(image_root: Path, image_path: str, *, resize_mode: str = "original") -> Image.Image:
     path = image_root / image_path
-    return Image.open(path).convert("RGB")
+    image = Image.open(path).convert("RGB")
+    return _resize_training_image(image, resize_mode)
 
 
 def encode_vlm_training_sample(
@@ -28,9 +29,10 @@ def encode_vlm_training_sample(
     mask_prompt_labels: bool = True,
 ) -> EncodedVlmSample:
     """Encode one image+prompt+target sample for causal VLM fine-tuning."""
-    prompt_text = prompt.strip()
+    prompt_text = _build_training_prompt_text(processor, prompt.strip())
     target_text = target.strip()
-    full_text = f"{prompt_text} {target_text}".strip()
+    separator = "" if prompt_text.endswith((" ", "\n")) else " "
+    full_text = f"{prompt_text}{separator}{target_text}".strip()
 
     common_kwargs = {"return_tensors": "pt", "truncation": True, "max_length": max_length}
     full_inputs = _processor_call(processor, image=image, text=full_text, **common_kwargs)
@@ -123,9 +125,30 @@ def build_supervision_mask(labels):
 
 def _processor_call(processor, *, image: Image.Image, text: str, **kwargs):
     try:
-        return processor(images=image, text=text, **kwargs)
+        return processor(images=[image], text=[text], **kwargs)
     except TypeError:
-        return processor(text=text, images=image, **kwargs)
+        return processor(text=[text], images=[image], **kwargs)
+
+
+def _build_training_prompt_text(processor, prompt: str) -> str:
+    apply_chat_template = getattr(processor, "apply_chat_template", None)
+    if not callable(apply_chat_template):
+        return prompt
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": prompt},
+            ],
+        }
+    ]
+    return apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
 
 
 def _resolve_pad_token_id(processor) -> int:
@@ -134,3 +157,48 @@ def _resolve_pad_token_id(processor) -> int:
     if pad_token_id is None:
         pad_token_id = getattr(tokenizer, "eos_token_id", 0)
     return int(pad_token_id or 0)
+
+
+def _resize_training_image(image: Image.Image, resize_mode: str) -> Image.Image:
+    mode = _normalize_image_resize_mode(resize_mode)
+    if mode == "original":
+        return image
+
+    target_height = {
+        "480p": 480,
+        "720p": 720,
+        "1080p": 1080,
+    }[mode]
+    width, height = image.size
+    if height <= target_height:
+        return image
+
+    target_width = round(width * target_height / height)
+    return image.resize((target_width, target_height), _pil_lanczos())
+
+
+def _normalize_image_resize_mode(resize_mode: str | None) -> str:
+    mode = (resize_mode or "original").lower()
+    aliases = {
+        "none": "original",
+        "no": "original",
+        "off": "original",
+        "native": "original",
+        "original": "original",
+        "480": "480p",
+        "480p": "480p",
+        "720": "720p",
+        "720p": "720p",
+        "1080": "1080p",
+        "1080p": "1080p",
+    }
+    if mode not in aliases:
+        raise ValueError(
+            f"Unsupported training.image_resize={resize_mode!r}. "
+            "Use one of: original, 480p, 720p, 1080p."
+        )
+    return aliases[mode]
+
+
+def _pil_lanczos():
+    return getattr(getattr(Image, "Resampling", Image), "LANCZOS")

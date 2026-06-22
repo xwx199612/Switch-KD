@@ -23,6 +23,8 @@ teacher:
 
   max_new_tokens: 256
 
+  image_resize: original
+
 student:
   model_name: mock-vlm-student
 
@@ -43,9 +45,9 @@ training:
 
   max_steps: 4
 
-distillation:
-  target_field: student_target
+  image_resize: original
 
+distillation:
   prompt_template: |
     You are a visual grounding assistant.
 

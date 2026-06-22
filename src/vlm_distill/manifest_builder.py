@@ -1,27 +1,39 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from pathlib import Path
 from typing import Any
 
-from .config_schema import PipelineConfig
+from .config_schema import PipelineConfig, remap_output_path
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 DEFAULT_IMAGE_DIR = Path("data/images")
-DEFAULT_OUTPUT_DIR = Path("outputs")
+DEFAULT_OUTPUT_DIR = remap_output_path(Path("outputs"))
 
 TASK_DEFAULTS = {
-    "screen_parsing": {
+    "parsing": {
         "query": (
             "List all visible interactive UI elements on this screen."
         ),
     },
     "grounding": {
-        "source_filename": "screen_parsing_teacher_labels.jsonl",
+        "source_filename": "parsing_teacher_labels.jsonl",
     },
 }
+
+
+def infer_manifest_task_from_config_path(config_path: Path) -> str:
+    stem = config_path.stem.casefold()
+    if "grounding" in stem:
+        return "grounding"
+    if "parsing" in stem:
+        return "parsing"
+    raise ValueError(
+        "Could not infer manifest task from config filename. "
+        "Include 'parsing' or 'grounding' in the config filename."
+    )
 
 
 def create_manifest_from_config(
@@ -29,8 +41,8 @@ def create_manifest_from_config(
     task: str,
     recursive: bool = False,
 ) -> Path:
-    if task == "screen_parsing":
-        return create_screen_parsing_manifest(
+    if task == "parsing":
+        return create_parsing_manifest(
             image_dir=config.data.image_dir or DEFAULT_IMAGE_DIR,
             output_path=config.data.manifest_path,
             recursive=recursive,
@@ -52,12 +64,12 @@ def create_manifest_from_config(
     )
 
 
-def create_screen_parsing_manifest(
+def create_parsing_manifest(
     image_dir: Path,
     output_path: Path,
     recursive: bool = False,
 ) -> Path:
-    query = TASK_DEFAULTS["screen_parsing"]["query"]
+    query = TASK_DEFAULTS["parsing"]["query"]
 
     if not image_dir.exists():
         raise FileNotFoundError(f"image_dir not found: {image_dir}")
@@ -78,14 +90,14 @@ def create_screen_parsing_manifest(
     with output_path.open("w", encoding="utf-8") as handle:
         for index, image_path in enumerate(images, start=1):
             row = {
-                "id": f"screen_parsing-{index:06d}",
+                "id": f"parsing-{index:06d}",
                 "image": str(image_path).replace("\\", "/"),
-                "task": "screen_parsing",
+                "task": "parsing",
                 "query": query,
             }
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    print(f"Created screen_parsing manifest: {output_path}")
+    print(f"Created parsing manifest: {output_path}")
     print(f"Image dir: {image_dir}")
     print(f"Samples: {len(images)}")
 
@@ -98,7 +110,7 @@ def create_grounding_manifest(
 ) -> Path:
     if not source_path.exists():
         raise FileNotFoundError(
-            f"screen_parsing teacher label file not found: {source_path}\n"
+            f"parsing teacher label file not found: {source_path}\n"
             "Run screen parsing label generation first."
         )
 
@@ -120,7 +132,7 @@ def create_grounding_manifest(
                     "task": "grounding",
                     "target_label": label,
                     "target_type": element.get("type") if isinstance(element, dict) else None,
-                    "source_screen_parsing_id": row["id"],
+                    "source_parsing_id": row["id"],
                 }
             )
 
@@ -154,10 +166,7 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _extract_elements(row: dict[str, Any]) -> list[Any]:
-    parsed = _parse_json_like(row.get("student_target"))
-
-    if parsed is None:
-        parsed = _parse_json_like(row.get("teacher_answer"))
+    parsed = _parse_json_like(row.get("teacher_answer"))
 
     if not isinstance(parsed, dict):
         return []
@@ -216,3 +225,4 @@ def _element_label(element: Any) -> str | None:
             return label or None
 
     return None
+

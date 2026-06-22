@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import inspect
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .config_schema import PipelineConfig, format_prompt
+from .config_schema import (
+    PipelineConfig,
+    format_prompt,
+    resolve_label_path,
+    resolve_switch_logits_path,
+    resolve_teacher_logits_path,
+)
 from .data_manifest import VlmSample, read_jsonl, validate_manifest, write_jsonl
-from .logits_cache_utils import compact_logits
+from .model_loading import resolve_attn_implementation
+from .vlm_batching import load_training_image
+
+
+INACTIVE_LOGIT = -1.0e4
 
 
 @dataclass
@@ -39,8 +50,11 @@ class VisualSwitchDistiller:
         self._aligner = None
 
     def load(self) -> None:
+        if self._is_mock_mode():
+            return
+
         import torch
-        from transformers import AutoProcessor
+        from transformers import AutoProcessor, BitsAndBytesConfig
 
         try:
             from transformers import AutoModelForImageTextToText as AutoModelForVLM
@@ -51,33 +65,46 @@ class VisualSwitchDistiller:
         self._student_processor = AutoProcessor.from_pretrained(
             self.config.student.model_name,
             trust_remote_code=True,
+            local_files_only=True,
         )
         self._teacher_processor = AutoProcessor.from_pretrained(
             self.config.teacher.model_name,
             trust_remote_code=True,
+            local_files_only=True,
         )
         self._student_model = AutoModelForVLM.from_pretrained(
             self.config.student.model_name,
-            device_map="auto",
-            trust_remote_code=True,
-            attn_implementation="sdpa",
+            **_build_vlm_load_kwargs(
+                model_name=self.config.student.model_name,
+                quantization=getattr(self.config.student, "quantization", "none"),
+                torch_dtype=None,
+                attn_implementation=self.config.student.attn_implementation,
+                BitsAndBytesConfig=BitsAndBytesConfig,
+            ),
         ).eval()
         self._teacher_model = AutoModelForVLM.from_pretrained(
             self.config.teacher.model_name,
-            device_map="auto",
-            trust_remote_code=True,
-            attn_implementation="sdpa",
+            **_build_vlm_load_kwargs(
+                model_name=self.config.teacher.model_name,
+                quantization=getattr(self.config.teacher, "quantization", "none"),
+                torch_dtype=getattr(self.config.teacher, "torch_dtype", None),
+                attn_implementation=self.config.teacher.attn_implementation,
+                BitsAndBytesConfig=BitsAndBytesConfig,
+            ),
         ).eval()
 
     def generate_for_sample(self, sample: VlmSample) -> dict[str, Any]:
+        if self._is_mock_mode():
+            return self._mock_generate_for_sample(sample)
         if self._student_model is None or self._teacher_model is None:
             self.load()
 
         import torch
-        from PIL import Image
-
-        image_path = self.config.data.image_root / sample.image
-        image = Image.open(image_path).convert("RGB")
+        image = load_training_image(
+            self.config.data.image_root,
+            sample.image,
+            resize_mode=self.config.training.image_resize,
+        )
         prompt = format_prompt(
             self.config.distillation.prompt_template,
             query=sample.query,
@@ -86,8 +113,9 @@ class VisualSwitchDistiller:
             task=sample.task,
         )
         with torch.no_grad():
-            student_visual = self._student_visual_outputs(image)
-            projected_visual = self._student_projector_outputs(student_visual)
+            student_inputs = self._student_image_inputs(image)
+            student_visual = self._student_visual_outputs(student_inputs)
+            projected_visual = self._student_projector_outputs(student_visual, student_inputs)
             teacher_inputs = self._teacher_text_inputs(prompt)
             switched_embeds, attention_mask = self._splice_visual_embeds(
                 teacher_inputs=teacher_inputs,
@@ -97,17 +125,60 @@ class VisualSwitchDistiller:
                 inputs_embeds=switched_embeds,
                 attention_mask=attention_mask,
             )
-            cached_logits = compact_logits(
+            cached_logits = _compact_adaptive_sequence_logits(
                 switch_logits,
-                self.config.distillation.max_cached_logits_vocab,
+                base_k=int(self.config.distillation.dbild_top_k),
+                max_cached_logits_vocab=self.config.distillation.max_cached_logits_vocab,
+                temperature=float(self.config.distillation.kd_temperature),
             )
 
         field = self.config.distillation.switch_logits_field
         return {
             field: cached_logits,
-            f"{field}_format": "topk" if self.config.distillation.max_cached_logits_vocab else "dense",
+            f"{field}_format": "switch_kd",
             f"{field}_prompt_len": int(teacher_inputs["input_ids"].shape[1]),
             f"{field}_vocab_size": int(switch_logits.shape[-1]),
+            f"{field}_temperature": float(self.config.distillation.kd_temperature),
+        }
+
+    def _is_mock_mode(self) -> bool:
+        teacher_backend = (self.config.teacher.backend or "").lower()
+        student_name = (self.config.student.model_name or "").lower()
+        return teacher_backend == "mock" or student_name.startswith("mock-")
+
+    def _mock_generate_for_sample(self, sample: VlmSample) -> dict[str, Any]:
+        import torch
+
+        field = self.config.distillation.switch_logits_field
+        prompt = format_prompt(
+            self.config.distillation.prompt_template,
+            query=sample.query,
+            target_label=sample.target_label,
+            target_type=sample.target_type,
+            task=sample.task,
+        )
+        prompt_len = max(1, len(prompt.split()))
+        seq_len = max(2, min(6, prompt_len // 2))
+        vocab_size = 32
+        logits = torch.full((1, seq_len, vocab_size), -6.0, dtype=torch.float32)
+        for step_index in range(seq_len):
+            peak_index = (step_index * 3) % vocab_size
+            logits[0, step_index, peak_index] = 5.0
+            logits[0, step_index, (peak_index + 1) % vocab_size] = 3.5
+            logits[0, step_index, (peak_index + 2) % vocab_size] = 2.0
+
+        cached_logits = _compact_adaptive_sequence_logits(
+            logits,
+            base_k=int(self.config.distillation.dbild_top_k),
+            max_cached_logits_vocab=self.config.distillation.max_cached_logits_vocab,
+            temperature=float(self.config.distillation.kd_temperature),
+        )
+        return {
+            field: cached_logits,
+            f"{field}_format": "switch_kd",
+            f"{field}_prompt_len": int(prompt_len),
+            f"{field}_vocab_size": vocab_size,
+            f"{field}_temperature": float(self.config.distillation.kd_temperature),
         }
 
     def _components(self) -> VSDComponents:
@@ -149,17 +220,26 @@ class VisualSwitchDistiller:
             teacher_lm_head=teacher_lm_head,
         )
 
-    def _student_visual_outputs(self, image):
+    def _student_image_inputs(self, image):
+        student_inputs = _processor_image_inputs(self._student_processor, image)
+        return _move_batch(student_inputs, _module_device(self._student_model))
+
+    def _student_visual_outputs(self, student_inputs):
         components = self._components()
-        student_inputs = self._student_processor(images=image, return_tensors="pt")
         device = _module_device(components.student_vision)
-        student_inputs = _move_batch(student_inputs, device)
-        outputs = components.student_vision(**student_inputs)
+        vision_inputs = _move_batch(student_inputs, device)
+        vision_kwargs = _build_vision_forward_kwargs(components.student_vision, vision_inputs)
+        outputs = components.student_vision(**vision_kwargs)
         return _first_tensor(outputs)
 
-    def _student_projector_outputs(self, visual_outputs):
+    def _student_projector_outputs(self, visual_outputs, student_inputs):
         components = self._components()
-        projected = components.student_projector(visual_outputs)
+        projector_kwargs = _build_projector_forward_kwargs(
+            components.student_projector,
+            visual_outputs,
+            student_inputs,
+        )
+        projected = components.student_projector(**projector_kwargs)
         return _first_tensor(projected)
 
     def _teacher_text_inputs(self, prompt: str):
@@ -245,7 +325,8 @@ def create_visual_switch_dataset(config: PipelineConfig) -> Path:
         image_root=config.data.image_root,
         max_samples=config.data.max_samples,
     )
-    base_rows = read_jsonl(config.data.distill_path) if config.data.distill_path.exists() else []
+    output_path = resolve_switch_logits_path(config.data)
+    base_rows = _load_switch_base_rows(config)
     rows_by_id = {str(row["id"]): row for row in base_rows}
     distiller = VisualSwitchDistiller(config)
     output_rows: list[dict[str, Any]] = []
@@ -253,11 +334,29 @@ def create_visual_switch_dataset(config: PipelineConfig) -> Path:
         row = rows_by_id.get(sample.id, asdict(sample))
         row.update(distiller.generate_for_sample(sample))
         output_rows.append(row)
-    write_jsonl(config.data.distill_path, output_rows)
-    return config.data.distill_path
+    write_jsonl(output_path, output_rows)
+    return output_path
+
+
+def _load_switch_base_rows(config: PipelineConfig) -> list[dict[str, Any]]:
+    candidate_paths = (
+        resolve_label_path(config.data),
+        resolve_teacher_logits_path(config.data),
+        resolve_switch_logits_path(config.data),
+    )
+    seen: set[Path] = set()
+    for path in candidate_paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        if path.exists():
+            return read_jsonl(path)
+    return []
 
 
 def _resolve_component(model, configured_path: str | None, candidates: tuple[str, ...], label: str):
+    if configured_path == "__identity__":
+        return _identity_projector
     if configured_path:
         return _get_nested_attr(model, configured_path)
     for path in candidates:
@@ -295,7 +394,22 @@ def _get_nested_attr(obj, path: str):
 def _should_invoke_component(value, name: str) -> bool:
     if not callable(value) or isinstance(value, type):
         return False
-    return name in _INVOKABLE_COMPONENT_METHODS or name.startswith("get_")
+    if name not in _INVOKABLE_COMPONENT_METHODS and not name.startswith("get_"):
+        return False
+    try:
+        parameters = inspect.signature(value).parameters
+    except (TypeError, ValueError):
+        return False
+    required = [
+        param
+        for param in parameters.values()
+        if param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+        and param.default is inspect._empty
+    ]
+    return len(required) == 0
 
 
 def _module_device(module):
@@ -309,6 +423,206 @@ def _move_batch(batch, device):
     if device is None:
         return batch
     return {key: value.to(device) if hasattr(value, "to") else value for key, value in batch.items()}
+
+
+def _processor_image_inputs(processor, image):
+    try:
+        return processor(images=image, return_tensors="pt")
+    except TypeError:
+        pass
+    except Exception as exc:
+        if "NoneType" not in str(exc):
+            raise
+
+    # Qwen2.x-VL processors expect a paired text input so they can place image tokens.
+    try:
+        return processor(
+            text=" ",
+            images=image,
+            return_tensors="pt",
+        )
+    except TypeError:
+        return processor(
+            text=[" "],
+            images=[image],
+            return_tensors="pt",
+        )
+
+
+def _build_vlm_load_kwargs(
+    *,
+    model_name: str,
+    quantization: str | None,
+    torch_dtype: str | None,
+    attn_implementation: str,
+    BitsAndBytesConfig,
+) -> dict[str, Any]:
+    import torch
+
+    model_kwargs: dict[str, Any] = {
+        "device_map": "auto",
+        "trust_remote_code": True,
+        "local_files_only": True,
+        "offload_buffers": True,
+        "attn_implementation": resolve_attn_implementation(attn_implementation),
+    }
+
+    mode = (quantization or "none").lower()
+    if mode == "4bit":
+        model_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+        )
+    elif mode == "8bit":
+        model_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+    elif torch_dtype == "float16":
+        model_kwargs["torch_dtype"] = torch.float16
+    elif torch_dtype == "bfloat16":
+        model_kwargs["torch_dtype"] = torch.bfloat16
+    elif torch_dtype == "float32":
+        model_kwargs["torch_dtype"] = torch.float32
+
+    return model_kwargs
+
+
+def _build_vision_forward_kwargs(vision_module, student_inputs: dict[str, Any]) -> dict[str, Any]:
+    try:
+        parameters = inspect.signature(vision_module.forward).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+
+    if "hidden_states" in parameters and "grid_thw" in parameters:
+        kwargs: dict[str, Any] = {}
+        if "pixel_values" in student_inputs:
+            kwargs["hidden_states"] = student_inputs["pixel_values"]
+        if "image_grid_thw" in student_inputs:
+            kwargs["grid_thw"] = student_inputs["image_grid_thw"]
+        if kwargs:
+            return kwargs
+
+    return {
+        key: value
+        for key, value in student_inputs.items()
+        if key not in {"input_ids", "attention_mask"}
+    }
+
+
+def _compact_adaptive_sequence_logits(
+    logits,
+    *,
+    base_k: int,
+    max_cached_logits_vocab: int | None,
+    temperature: float,
+):
+    import torch
+
+    logits = logits.detach().float().cpu()
+    if logits.ndim != 3:
+        raise ValueError(f"Expected switch logits to have shape [batch, seq, vocab], got {tuple(logits.shape)}")
+
+    batch_size, seq_len, vocab_size = logits.shape
+    base_k = max(1, int(base_k))
+    low_k = max(1, base_k // 4)
+    mid_k = base_k
+    high_k = base_k * 2
+    if max_cached_logits_vocab is not None:
+        high_k = min(high_k, int(max_cached_logits_vocab))
+    max_k = min(vocab_size, max(low_k, mid_k, high_k))
+
+    low_entropy_threshold = 1.0
+    high_entropy_threshold = 2.5
+    safe_temperature = max(float(temperature), 1e-6)
+
+    scaled_logits = logits / safe_temperature
+    probs = torch.softmax(scaled_logits, dim=-1)
+    entropy = -(probs * torch.log(probs.clamp_min(1e-12))).sum(dim=-1)
+
+    top_values, top_indices = torch.topk(logits, k=max_k, dim=-1)
+    token_k = torch.empty((batch_size, seq_len), dtype=torch.long)
+    entropy_weight = torch.empty((batch_size, seq_len), dtype=torch.float32)
+
+    for batch_index in range(batch_size):
+        for step_index in range(seq_len):
+            entropy_value = float(entropy[batch_index, step_index].item())
+            active_k = _adaptive_k(
+                entropy_value,
+                low_entropy_threshold=low_entropy_threshold,
+                high_entropy_threshold=high_entropy_threshold,
+                low_k=low_k,
+                mid_k=mid_k,
+                high_k=high_k,
+                max_k=max_k,
+            )
+            token_k[batch_index, step_index] = active_k
+            entropy_weight[batch_index, step_index] = _entropy_to_weight(entropy_value)
+            if active_k < max_k:
+                top_values[batch_index, step_index, active_k:] = INACTIVE_LOGIT
+
+    return {
+        "indices": top_indices.tolist(),
+        "values": top_values.tolist(),
+        "shape": [batch_size, seq_len, vocab_size],
+        "vocab_size": int(vocab_size),
+        "adaptive": True,
+        "token_k": token_k.tolist(),
+        "entropy": entropy.tolist(),
+        "entropy_weight": entropy_weight.tolist(),
+        "switch_kd": True,
+        "k_policy": {
+            "low_entropy_threshold": low_entropy_threshold,
+            "high_entropy_threshold": high_entropy_threshold,
+            "low_k": int(low_k),
+            "mid_k": int(mid_k),
+            "high_k": int(high_k),
+            "max_k": int(max_k),
+        },
+    }
+
+
+def _adaptive_k(
+    entropy: float,
+    *,
+    low_entropy_threshold: float,
+    high_entropy_threshold: float,
+    low_k: int,
+    mid_k: int,
+    high_k: int,
+    max_k: int,
+) -> int:
+    if entropy < low_entropy_threshold:
+        return min(max_k, low_k)
+    if entropy < high_entropy_threshold:
+        return min(max_k, mid_k)
+    return min(max_k, high_k)
+
+
+def _entropy_to_weight(entropy: float) -> float:
+    return 1.0 / (1.0 + max(float(entropy), 0.0))
+
+
+def _build_projector_forward_kwargs(projector_module, visual_outputs, student_inputs: dict[str, Any]) -> dict[str, Any]:
+    try:
+        parameters = inspect.signature(projector_module).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+
+    if "pixel_values" in parameters:
+        kwargs: dict[str, Any] = {
+            "pixel_values": student_inputs["pixel_values"],
+        }
+        if "image_grid_thw" in parameters and "image_grid_thw" in student_inputs:
+            kwargs["image_grid_thw"] = student_inputs["image_grid_thw"]
+        return kwargs
+
+    if "x" in parameters:
+        return {"x": visual_outputs}
+
+    if "hidden_states" in parameters:
+        return {"hidden_states": visual_outputs}
+
+    return {"x": visual_outputs}
 
 
 def _first_tensor(outputs):
@@ -386,6 +700,10 @@ def _pad_sequence(items, padding_value=0):
     import torch
 
     return torch.nn.utils.rnn.pad_sequence(items, batch_first=True, padding_value=padding_value)
+
+
+def _identity_projector(x):
+    return x
 
 
 _INVOKABLE_COMPONENT_METHODS = frozenset(

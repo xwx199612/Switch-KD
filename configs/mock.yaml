@@ -12,6 +12,7 @@ teacher:
   model_name: mock-vlm-teacher
   temperature: 0.2
   max_new_tokens: 96
+  image_resize: original
 
 student:
   model_name: mock-vlm-student
@@ -33,9 +34,9 @@ training:
   log_every: 1
   save_every: 50
   mixed_precision: "no"
+  image_resize: original
 
 distillation:
-  target_field: student_target
   confidence_weighting: true
   min_teacher_confidence: 0.0
   prompt_template: "query: {query}\nAnswer:"

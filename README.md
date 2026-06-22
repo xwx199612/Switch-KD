@@ -1,4 +1,4 @@
-# VLM Distillation Pipeline
+﻿# VLM Distillation Pipeline
 
 Vision-Language Model Distillation Pipeline for GUI Automation Testing.
 
@@ -11,22 +11,22 @@ This project is designed for Android TV, mobile devices, tablets, in-vehicle inf
 Current milestone:
 
 ```text
-Screen Parsing → Auto Grounding Bootstrap Pipeline
+Screen Parsing â†’ Auto Grounding Bootstrap Pipeline
 ```
 
 Pipeline:
 
 ```text
 Device Screenshot
-        ↓
+        â†“
 Screen Parsing Teacher
-        ↓
+        â†“
 UI Elements
-        ↓
+        â†“
 Grounding Teacher
-        ↓
+        â†“
 Bounding Boxes
-        ↓
+        â†“
 Student Distillation
 ```
 
@@ -112,8 +112,7 @@ Generate a manifest from image folders.
 
 ```powershell
 vlm-distill create-manifest \
-  --config configs/screen_parsing_test.yaml \
-  --task screen_parsing
+  --config configs/parsing_labeling.yaml \
 ```
 
 or
@@ -121,17 +120,31 @@ or
 ```powershell
 vlm-distill create-manifest \
   --config configs/grounding_test.yaml \
-  --task grounding
 ```
 
 ---
 
-## Validate Dataset
+## Validate Manifest
 
 ```powershell
-vlm-distill validate-data \
-  --config configs/screen_parsing_test.yaml
+vlm-distill validate-manifest \
+  --config configs/parsing_labeling.yaml
 ```
+
+---
+
+## Validate Labels
+
+```powershell
+vlm-distill validate-labels \
+  --config configs/parsing_response_distillation.yaml
+```
+
+This reads `data.distill_path` and reports:
+
+- `total_rows`
+- `teacher_answer_rows`
+- `non_empty_teacher_answer_rows`
 
 ---
 
@@ -139,8 +152,19 @@ vlm-distill validate-data \
 
 ```powershell
 vlm-distill label \
-  --config configs/screen_parsing_test.yaml
+  --config configs/parsing_labeling.yaml
 ```
+
+---
+
+## Batch Predict With Student Or Merged Model
+
+```powershell
+vlm-distill predict \
+  --config configs/parsing_response_distillation.yaml
+```
+
+This reads `data.manifest_path` and writes predictions to `data.prediction_path` when set, otherwise `data.distill_path`.
 
 ---
 
@@ -180,6 +204,17 @@ vlm-distill evaluate \
 
 ---
 
+## Evaluate Prediction JSONL
+
+```powershell
+vlm-distill evaluate-predictions \
+  --config configs/parsing_response_distillation.yaml
+```
+
+This compares `data.prediction_path` against `data.eval_path` when set, otherwise `data.label_path` / `data.distill_path`.
+
+---
+
 # Screen Parsing Workflow
 
 ## Configuration
@@ -192,11 +227,11 @@ data:
 
   output_dir: D:/TV_data/teacher_parsing
 
-  manifest_path: D:/TV_data/teacher_parsing/screen_parsing_manifest.jsonl
+  manifest_path: D:/TV_data/teacher_parsing/parsing_manifest.jsonl
 
-  distill_path: D:/TV_data/teacher_parsing/screen_parsing_teacher_labels.jsonl
+  distill_path: D:/TV_data/teacher_parsing/parsing_teacher_labels.jsonl
 
-  eval_path: D:/TV_data/teacher_parsing/screen_parsing_teacher_labels.jsonl
+  eval_path: D:/TV_data/teacher_parsing/parsing_teacher_labels.jsonl
 
   image_root: .
 
@@ -211,23 +246,22 @@ Generate manifest:
 
 ```powershell
 vlm-distill create-manifest \
-  --config configs/screen_parsing_test.yaml \
-  --task screen_parsing
+  --config configs/parsing_labeling.yaml \
 ```
 
 Output:
 
 ```text
-D:\TV_data\teacher_parsing\screen_parsing_manifest.jsonl
+D:\TV_data\teacher_parsing\parsing_manifest.jsonl
 ```
 
 Example:
 
 ```json
 {
-  "id":"screen_parsing-000001",
+  "id":"parsing-000001",
   "image":"D:/TV_data/test_data/example.png",
-  "task":"screen_parsing",
+  "task":"parsing",
   "query":"List all visible interactive UI elements on this screen."
 }
 ```
@@ -239,8 +273,8 @@ Example:
 Validate:
 
 ```powershell
-vlm-distill validate-data \
-  --config configs/screen_parsing_test.yaml
+vlm-distill validate-manifest \
+  --config configs/parsing_labeling.yaml
 ```
 
 ---
@@ -251,13 +285,13 @@ Generate teacher labels:
 
 ```powershell
 vlm-distill label \
-  --config configs/screen_parsing_test.yaml
+  --config configs/parsing_labeling.yaml
 ```
 
 Output:
 
 ```text
-D:\TV_data\teacher_parsing\screen_parsing_teacher_labels.jsonl
+D:\TV_data\teacher_parsing\parsing_teacher_labels.jsonl
 ```
 
 Expected teacher response:
@@ -269,6 +303,13 @@ Expected teacher response:
     "Search"
   ]
 }
+```
+
+Validate generated labels:
+
+```powershell
+vlm-distill validate-labels \
+  --config configs/parsing_labeling.yaml
 ```
 
 ---
@@ -303,13 +344,12 @@ Generate grounding manifest:
 ```powershell
 vlm-distill create-manifest \
   --config configs/grounding_test.yaml \
-  --task grounding
 ```
 
 This automatically reads:
 
 ```text
-screen_parsing_teacher_labels.jsonl
+parsing_teacher_labels.jsonl
 ```
 
 and expands:
@@ -356,17 +396,291 @@ Output:
 D:\TV_data\teacher_parsing\grounding_teacher_labels.jsonl
 ```
 
+Validate generated labels:
+
+```powershell
+vlm-distill validate-labels \
+  --config configs/grounding_test.yaml
+```
+
 ---
 
+# Response Distillation Workflow
+
+Use this workflow when you want to distill a larger teacher VLM into a smaller student with standard response distillation / SFT.
+
+Full flow:
+
+```text
+images
+  -> parsing_manifest.jsonl
+  -> parsing_teacher_labels.jsonl
+  -> response distillation training
+  -> distilled 3B adapter
+  -> evaluation report
+```
+
+## Step 1
+
+Create the screen parsing manifest:
+
+```powershell
+vlm-distill create-manifest \
+  --config configs/parsing_labeling.yaml \
+```
+
+Typical output:
+
+```text
+D:\TV_data\teacher_parsing\parsing_manifest.jsonl
+```
+
+## Step 2
+
+Validate the manifest:
+
+```powershell
+vlm-distill validate-manifest \
+  --config configs/parsing_labeling.yaml
+```
+
+## Step 3
+
+Generate teacher labels:
+
+```powershell
+vlm-distill label \
+  --config configs/parsing_labeling.yaml
+```
+
+Typical output:
+
+```text
+D:\TV_data\teacher_parsing\parsing_teacher_labels.jsonl
+```
+
+Example teacher row:
+
+```json
+{
+  "id": "parsing-000001",
+  "image": "D:/TV_data/test_data/example.png",
+  "task": "parsing",
+  "query": "List all visible interactive UI elements on this screen.",
+  "teacher_answer": "{\"elements\": [\"YouTube\", \"Search\"]}",
+  "teacher_confidence": 1.0
+}
+```
+
+## Step 4
+
+Prepare the response distillation config.
+
+If you already have a teacher-labeled JSONL, you can start from this step directly.
+
+Example config:
+
+```yaml
+data:
+  manifest_path: D:/TV_data/teacher_parsing/parsing_manifest.jsonl
+  distill_path: D:/TV_data/teacher_parsing/parsing_teacher_labels_1080p_8bit.jsonl
+  eval_path: D:/TV_data/teacher_parsing/parsing_teacher_labels_1080p_8bit.jsonl
+  image_root: .
+
+student:
+  model_name: Qwen/Qwen2.5-VL-3B-Instruct
+  output_dir: outputs/parsing_response_1080p_8bit
+  adapter_dir: outputs/parsing_response_1080p_8bit/adapter
+  quantization: 4bit
+
+training:
+  batch_size: 1
+  gradient_accumulation_steps: 8
+  mixed_precision: bf16
+  max_length: 4096
+
+distillation:
+  method: response
+  prompt_template: "query: {query}\nAnswer:"
+```
+
+Reference configs in this repo:
+
+```text
+configs/parsing_labeling.yaml
+configs/parsing_response_distillation.yaml
+```
+
+These configs share the same option keys and derived profiles:
+
+```text
+quality
+teacher_quantization
+student_quantization
+label_profile = {quality}_{teacher_quantization}
+response_profile = {quality}_{teacher_quantization}_student_{student_quantization}
+```
+
+The response distillation config currently points to:
+
+```text
+manifest_path = D:/TV_data/teacher_parsing/parsing_manifest.jsonl
+distill_path = D:/TV_data/teacher_parsing/parsing_teacher_labels_1080p_8bit.jsonl
+student model = Qwen/Qwen2.5-VL-3B-Instruct
+teacher labels = 1080p_8bit screen parsing outputs
+```
+
+## Step 5
+
+Validate the response distillation inputs:
+
+```powershell
+vlm-distill validate-manifest --config configs/parsing_response_distillation.yaml
+
+vlm-distill validate-labels --config configs/parsing_response_distillation.yaml
+```
+
+## Step 6
+
+Train the student:
+
+```powershell
+vlm-distill train --config configs/parsing_response_distillation.yaml
+```
+
+Typical artifact output:
+
+```text
+outputs/parsing_response_1080p_8bit/adapter
+```
+
+## Step 7
+
+Evaluate the distilled student:
+
+```powershell
+vlm-distill evaluate \
+  --config configs/parsing_response_distillation.yaml
+```
+
+Typical evaluation output:
+
+```text
+outputs/parsing_response_1080p_8bit/eval_report.json
+```
+
+What this does:
+
+```text
+teacher_answer JSONL
+        ->
+multimodal prompt + image
+        ->
+training target = teacher_answer
+        ->
+LoRA fine-tuning on the student VLM
+```
+
+Adapter / merge guidance:
+
+* Training writes a LoRA adapter into `student.adapter_dir`; it does not overwrite the original student base model.
+* While you are still comparing experiments, keep inference in adapter mode instead of merging.
+* Only merge for deployment, and always write the merged weights into a new directory such as `outputs/.../merged-*`.
+* Do not write merged weights back into the base model directory. Keeping the original student base untouched lets you merge other adapters later.
+
+## Step 8
+
+Batch test a merged student model.
+
+Instead of using `infer_merged.py` one sample at a time, you can run the merged model on the whole manifest like `label`.
+
+Example config:
+
+```yaml
+data:
+  manifest_path: D:/TV_data/teacher_parsing/parsing_manifest.jsonl
+  label_path: D:/TV_data/teacher_parsing/parsing_teacher_labels_480p_8bit.jsonl
+  prediction_path: outputs/parsing_merged_predictions_480p_8bit.jsonl
+  eval_path: D:/TV_data/teacher_parsing/parsing_teacher_labels_480p_8bit.jsonl
+  image_root: .
+
+teacher:
+  model_name: Qwen/Qwen2.5-VL-7B-Instruct
+  max_new_tokens: 128
+
+student:
+  model_name: Qwen/Qwen2.5-VL-3B-Instruct
+  inference_model_path: outputs/student/merged_response_KD_480p_8bit
+  output_dir: outputs/parsing_response_480p_8bit_student_4bit
+  adapter_dir: outputs/parsing_response_480p_8bit_student_4bit/adapter
+  quantization: none
+
+distillation:
+  prompt_template: "query: {query}\nAnswer:"
+
+evaluation:
+  output_path: outputs/parsing_merged_eval_report_480p_8bit.json
+```
+
+Run batch prediction:
+
+```powershell
+vlm-distill predict \
+  --config your_merged_eval_config.yaml
+```
+
+Typical output:
+
+```text
+outputs/parsing_merged_predictions_480p_8bit.jsonl
+```
+
+Run batch evaluation:
+
+```powershell
+vlm-distill evaluate-predictions \
+  --config your_merged_eval_config.yaml
+```
+
+Typical evaluation output:
+
+```text
+outputs/parsing_merged_eval_report_480p_8bit.json
+```
+
+What this does:
+
+```text
+manifest.jsonl
+  ->
+merged student model
+  ->
+prediction JSONL
+  ->
+evaluation against reference labels
+```
+
+Notes for Qwen2.5-VL:
+
+* `teacher_answer` is the supervision target used during training.
+* `training.image_resize` controls how the student-side training image is resized before encoding. In the generic response config, it follows `{quality}` by default.`r`n* 1080p images can expand into a large number of image tokens, so `max_length: 4096` is a safer starting point than `512`.
+* If you compare multiple teacher label files first, keep the original teacher label JSONL for training; the compare JSONL is for analysis, not for student training.
+* The response distillation training path in this repo expects the original teacher label JSONL, not the row-wise compare JSONL.
+* If you want to measure the gap between the distilled 3B student and the 7B teacher, keep the teacher label JSONL as the evaluation reference and run `vlm-distill evaluate` after training.
+
+---
 # Switch-KD Workflow
 
 Switch-KD training pipeline:
 
 ```powershell
-vlm-distill validate-data \
+vlm-distill validate-manifest \
   --config configs/switch_kd_4060ti.yaml
 
 vlm-distill label \
+  --config configs/switch_kd_4060ti.yaml
+
+vlm-distill validate-labels \
   --config configs/switch_kd_4060ti.yaml
 
 vlm-distill teacher-logits \
@@ -404,29 +718,26 @@ Teacher label generation only:
 python -m compileall src
 
 vlm-distill create-manifest \
-  --config configs/screen_parsing_test.yaml \
-  --task screen_parsing
+  --config configs/parsing_labeling.yaml \
 
-vlm-distill validate-data \
-  --config configs/screen_parsing_test.yaml
+vlm-distill validate-manifest \
+  --config configs/parsing_labeling.yaml
 
 vlm-distill label \
-  --config configs/screen_parsing_test.yaml
+  --config configs/parsing_labeling.yaml
 ```
 
 Screen Parsing + Grounding:
 
 ```powershell
 vlm-distill create-manifest \
-  --config configs/screen_parsing_test.yaml \
-  --task screen_parsing
+  --config configs/parsing_labeling.yaml \
 
 vlm-distill label \
-  --config configs/screen_parsing_test.yaml
+  --config configs/parsing_labeling.yaml
 
 vlm-distill create-manifest \
   --config configs/grounding_test.yaml \
-  --task grounding
 
 vlm-distill label \
   --config configs/grounding_test.yaml

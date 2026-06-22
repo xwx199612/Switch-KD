@@ -50,7 +50,7 @@ The core distillation row can look like this:
   "id": "sample-001",
   "image": "data/images/001.jpg",
   "query": "What is in the image?",
-  "student_target": "a cup",
+  "teacher_answer": "a cup",
   "teacher_logits": [[[...]]],
   "switch_logits": [[[...]]]
 }
@@ -134,4 +134,3 @@ distillation:
   teacher_lm_head_path: lm_head
   visual_token_placeholder: "<|image_pad|>"
 ```
-

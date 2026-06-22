@@ -1,11 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from .config_schema import PipelineConfig
+from .config_schema import PipelineConfig, resolve_label_path
 from .data_manifest import read_jsonl
 
 
@@ -34,13 +34,13 @@ def token_f1(prediction: str, target: str) -> float:
 
 
 def evaluate(config: PipelineConfig) -> Path:
-    eval_path = config.data.distill_path if config.data.eval_path is None else config.data.eval_path
+    eval_path = resolve_label_path(config.data) if config.data.eval_path is None else config.data.eval_path
     rows = read_jsonl(eval_path, max_samples=config.data.max_samples)
     predictions = []
 
     for row in rows:
-        prediction = row.get(config.distillation.target_field) or row.get("teacher_answer") or ""
-        target = _build_target(row, config.distillation.target_field)
+        prediction = row.get("teacher_answer") or ""
+        target = _build_target(row)
 
         item = {
             "id": row["id"],
@@ -66,7 +66,7 @@ def evaluate(config: PipelineConfig) -> Path:
                 }
             )
 
-        if row.get("task") == "screen_parsing":
+        if row.get("task") == "parsing":
             pred_json = _parse_json(prediction)
             target_json = _parse_json(target)
             precision, recall, f1 = element_f1(pred_json, target_json)
@@ -89,7 +89,7 @@ def evaluate(config: PipelineConfig) -> Path:
         "mean_iou": _mean(item.get("bbox_iou", 0.0) for item in predictions if item.get("task") == "grounding"),
         "accuracy_iou_50": _mean(item.get("iou_50", 0.0) for item in predictions if item.get("task") == "grounding"),
         "label_match_rate": _mean(item.get("label_match", 0.0) for item in predictions if item.get("task") == "grounding"),
-        "element_f1": _mean(item.get("element_f1", 0.0) for item in predictions if item.get("task") == "screen_parsing"),
+        "element_f1": _mean(item.get("element_f1", 0.0) for item in predictions if item.get("task") == "parsing"),
     }
 
     report = {"metrics": metrics, "predictions": predictions}
@@ -98,7 +98,7 @@ def evaluate(config: PipelineConfig) -> Path:
     return config.evaluation.output_path
 
 
-def _build_target(row: dict[str, Any], target_field: str) -> str:
+def _build_target(row: dict[str, Any]) -> str:
     if row.get("task") == "grounding" and row.get("bbox"):
         return json.dumps(
             {
@@ -108,7 +108,7 @@ def _build_target(row: dict[str, Any], target_field: str) -> str:
             ensure_ascii=False,
         )
 
-    if row.get("task") == "screen_parsing" and row.get("elements"):
+    if row.get("task") == "parsing" and row.get("elements"):
         return json.dumps(
             {
                 "screen_type": row.get("screen_type", "unknown_gui_screen"),
@@ -117,7 +117,7 @@ def _build_target(row: dict[str, Any], target_field: str) -> str:
             ensure_ascii=False,
         )
 
-    return row.get("answer") or row.get(target_field) or row.get("teacher_answer") or ""
+    return row.get("answer") or row.get("teacher_answer") or ""
 
 
 def _parse_json(text: str | dict | None) -> dict | None:
@@ -213,3 +213,4 @@ def _element_labels(data: dict | None) -> list[str]:
 def _mean(values) -> float:
     values = list(values)
     return sum(values) / len(values) if values else 0.0
+

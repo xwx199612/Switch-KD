@@ -1,0 +1,3 @@
+﻿{"id":"screen-001","image":"examples/images/sample_001.jpg","task":"parsing","query":"List all visible UI elements on this screen."}
+{"id":"screen-002","image":"examples/images/sample_002.jpg","task":"parsing","query":"List all visible icons, buttons, and menu items on this screen."}
+

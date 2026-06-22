@@ -41,10 +41,10 @@ class SwitchKDLoss:
         teacher_logits=None,
         switch_logits=None,
         attention_mask=None,
+        teacher_token_weight=None,
+        switch_token_weight=None,
+        sample_weight=None,
     ) -> SwitchKDLossOutput:
-        import torch
-        import torch.nn.functional as F
-
         lm_loss = _causal_lm_loss(student_logits, labels)
         zero = student_logits.new_zeros(())
 
@@ -57,6 +57,8 @@ class SwitchKDLoss:
                 temperature=self.temperature,
                 top_k=self.top_k,
                 min_prob=self.min_prob,
+                token_weight=teacher_token_weight,
+                sample_weight=sample_weight,
             )
 
         vsd_loss = zero
@@ -68,6 +70,8 @@ class SwitchKDLoss:
                 temperature=self.temperature,
                 top_k=self.top_k,
                 min_prob=self.min_prob,
+                token_weight=switch_token_weight,
+                sample_weight=sample_weight,
             )
 
         loss = self.lm_weight * lm_loss + self.dbild_weight * dbild_loss + self.vsd_weight * vsd_loss
@@ -81,6 +85,8 @@ def dynamic_bidirectional_logits_difference(
     temperature: float = 2.0,
     top_k: int = 64,
     min_prob: float = 0.0,
+    token_weight=None,
+    sample_weight: float | None = None,
 ):
     """DBiLD approximation for Switch-KD.
 
@@ -89,6 +95,7 @@ def dynamic_bidirectional_logits_difference(
     This preserves distribution shape in both directions while avoiding full-vocab
     KD memory pressure on consumer GPUs.
     """
+    import torch
     import torch.nn.functional as F
 
     if student_logits.shape != reference_logits.shape:
@@ -112,26 +119,35 @@ def dynamic_bidirectional_logits_difference(
     if min_prob > 0:
         informative |= (student_probs > min_prob) | (reference_probs > min_prob)
 
-    masked_student_logits = scaled_student.masked_fill(~informative, torch.finfo(scaled_student.dtype).min)
-    masked_reference_logits = scaled_reference.masked_fill(
-        ~informative,
-        torch.finfo(scaled_reference.dtype).min,
-    )
+    fill_value = scaled_student.new_full((), -1.0e4)
+    masked_student_logits = scaled_student.masked_fill(~informative, fill_value)
+    masked_reference_logits = scaled_reference.masked_fill(~informative, fill_value)
 
-    student_log_probs = F.log_softmax(masked_student_logits, dim=-1)
-    reference_log_probs = F.log_softmax(masked_reference_logits, dim=-1)
-    student_region_probs = F.softmax(masked_student_logits, dim=-1)
-    reference_region_probs = F.softmax(masked_reference_logits, dim=-1)
+    student_region_probs = F.softmax(masked_student_logits, dim=-1).clamp_min(1e-12)
+    reference_region_probs = F.softmax(masked_reference_logits, dim=-1).clamp_min(1e-12)
+    student_region_probs = student_region_probs / student_region_probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    reference_region_probs = reference_region_probs / reference_region_probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    student_log_probs = student_region_probs.log()
+    reference_log_probs = reference_region_probs.log()
 
-    forward_kl = F.kl_div(student_log_probs, reference_region_probs, reduction="none").sum(dim=-1)
-    reverse_kl = F.kl_div(reference_log_probs, student_region_probs, reduction="none").sum(dim=-1)
+    forward_kl = (reference_region_probs * (reference_log_probs - student_log_probs)).sum(dim=-1)
+    reverse_kl = (student_region_probs * (student_log_probs - reference_log_probs)).sum(dim=-1)
     token_loss = 0.5 * (forward_kl + reverse_kl) * (temperature**2)
 
+    if token_weight is not None:
+        token_loss = token_loss * token_weight.to(token_loss.dtype)
     if attention_mask is not None:
         token_loss = token_loss * attention_mask.to(token_loss.dtype)
-        return token_loss.sum() / attention_mask.to(token_loss.dtype).sum().clamp_min(1.0)
+        normalizer = attention_mask.to(token_loss.dtype)
+        if token_weight is not None:
+            normalizer = normalizer * token_weight.to(token_loss.dtype)
+        loss = token_loss.sum() / normalizer.sum().clamp_min(1.0)
+    else:
+        loss = token_loss.mean()
 
-    return token_loss.mean()
+    if sample_weight is not None:
+        loss = loss * float(sample_weight)
+    return loss
 
 
 def _causal_lm_loss(logits, labels):
