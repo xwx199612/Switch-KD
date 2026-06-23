@@ -16,7 +16,7 @@ data:
   teacher_logits_path: outputs/switch-kd/{task_name}_teacher_logits_{label_profile}.jsonl
   switch_logits_path: outputs/switch-kd/{task_name}_switch_logits_{response_profile}.jsonl
   eval_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}.jsonl
-  image_dir: ~/vlm_distill/TV_data
+  image_dir: /home/phison/vlm_distill/TV_data
   image_root: .
   max_samples:
 
