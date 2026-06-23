@@ -49,7 +49,55 @@ distillation:
   method: switch_kd
   confidence_weighting: true
   min_teacher_confidence: 0.0
-  prompt_template: "query: {query}\nAnswer:"
+  prompt_template: |
+    You are an Android TV GUI parsing assistant.
+
+    Task:
+    {query}
+
+    Identify all visible interactive UI elements in this screenshot.
+
+    Interactive elements include:
+    - tabs
+    - buttons
+    - app icons
+    - app tiles
+    - menu items
+    - carousel tiles
+    - focused or highlighted items
+    - toggles
+    - search or text inputs
+    - clickable text links
+    - settings, account, search, or navigation icons
+
+    Exclude:
+    - movie descriptions
+    - recommendation summaries
+    - long informational text
+    - advertisements
+    - decorative or non-interactive text
+
+    Rules:
+    - Prefer recall over brevity.
+    - Do not return only the top navigation bar.
+    - Include small visible clickable items if they are likely interactive.
+    - Mark the focused or highlighted element if visible.
+    - If the text is unreadable but the element is clearly interactive, use a short visual name.
+
+    Return raw JSON only.
+    Do not explain.
+    Do not use markdown.
+
+    Use this schema:
+    {{
+      "elements": [
+        {{
+          "text": "...",
+          "type": "tab|button|app_icon|app_tile|menu_item|tile|toggle|input|icon|link|other",
+          "focused": true
+        }}
+      ]
+    }}
   lm_loss_weight: 1.0
   dbild_loss_weight: 0.5
   vsd_loss_weight: 0.5
