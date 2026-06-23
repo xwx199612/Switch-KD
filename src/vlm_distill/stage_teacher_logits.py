@@ -1,12 +1,13 @@
 ﻿from __future__ import annotations
 
 import json
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
 
 from .config_schema import PipelineConfig, resolve_teacher_logits_path
-from .data_manifest import VlmSample, validate_manifest, write_jsonl
+from .data_manifest import VlmSample, read_jsonl, validate_manifest
 from .device_utils import (
     batch_to_device,
     ensure_stage_uses_cuda,
@@ -374,19 +375,55 @@ def create_teacher_logits_dataset(config: PipelineConfig) -> Path:
         max_samples=config.data.max_samples,
     )
 
-    generator = TeacherLogitsGenerator(config)
-    rows: list[dict[str, Any]] = []
-
-    for sample in samples:
-        row = {
-            **asdict(sample),
-            **generator.generate_for_sample(sample, mode=mode),
-        }
-        rows.append(row)
-
     output_path = resolve_teacher_logits_path(config.data)
-    write_jsonl(output_path, rows)
+    completed_ids = _load_completed_ids(output_path)
+    total = len(samples)
+    pending_samples = [sample for sample in samples if sample.id not in completed_ids]
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    print(
+        f"Teacher logits samples: total={total}, completed={len(completed_ids)}, "
+        f"pending={len(pending_samples)}, output={output_path}"
+    )
+
+    if not pending_samples:
+        print("No pending samples. Existing teacher logits output is already complete for this manifest.")
+        return output_path
+
+    generator = TeacherLogitsGenerator(config)
+    completed_now = 0
+    with output_path.open("a", encoding="utf-8") as handle:
+        for sample in pending_samples:
+            started = time.perf_counter()
+            row = {
+                **asdict(sample),
+                **generator.generate_for_sample(sample, mode=mode),
+            }
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+            handle.flush()
+            completed_now += 1
+            elapsed = time.perf_counter() - started
+            total_done = len(completed_ids) + completed_now
+            pending = total - total_done
+            print(
+                "[teacher-logits] "
+                f"total={total} completed={total_done} pending={pending} "
+                f"current_sample_id={sample.id} elapsed_seconds_per_sample={elapsed:.2f} "
+                f"output_path={output_path}"
+            )
     return output_path
+
+
+def _load_completed_ids(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+
+    completed_ids: set[str] = set()
+    for row in read_jsonl(path):
+        sample_id = row.get("id")
+        if sample_id is not None:
+            completed_ids.add(str(sample_id))
+    return completed_ids
 
 
 def _resolve_teacher_logits_mode(config: PipelineConfig) -> DistillationMode:
