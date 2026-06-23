@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -38,6 +39,42 @@ def resolve_requested_device_map(device_map: str | None, *, quantization: str, r
         f"Unsupported {role}.device_map={device_map!r}. "
         "Use one of: auto, balanced, balanced_low_0, sequential, cuda, cuda:N."
     )
+
+
+def is_distributed_training_active() -> bool:
+    def _int_env(name: str) -> int | None:
+        raw = os.environ.get(name)
+        if raw is None or raw == "":
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+
+    world_size = _int_env("WORLD_SIZE")
+    if world_size is not None and world_size > 1:
+        return True
+
+    for name in ("LOCAL_RANK", "RANK"):
+        value = _int_env(name)
+        if value is not None:
+            return True
+    return False
+
+
+def resolve_training_device_map(
+    device_map: str | None,
+    *,
+    quantization: str | None,
+    role: str = "student",
+    allow_accelerate_ddp: bool = True,
+) -> str | None:
+    if device_map is None:
+        if allow_accelerate_ddp and is_distributed_training_active():
+            return None
+        return resolve_requested_device_map("auto", quantization=quantization or "none", role=role)
+
+    return resolve_requested_device_map(device_map, quantization=quantization or "none", role=role)
 
 
 def normalize_device_location(location: Any):
@@ -159,6 +196,7 @@ def ensure_stage_uses_cuda(
     requested_device_map: str | None,
     model,
     selected_input_device,
+    allow_distributed_none: bool = False,
 ) -> None:
     info = model_debug_info(model)
     has_cuda_in_map = bool(info["hf_device_map"]) and any(
@@ -167,6 +205,9 @@ def ensure_stage_uses_cuda(
     )
     has_cuda_first_param = info["first_param_device"] is not None and info["first_param_device"].type == "cuda"
     has_cuda_input = selected_input_device is not None and selected_input_device.type == "cuda"
+    if allow_distributed_none and requested_device_map is None and is_distributed_training_active():
+        if has_cuda_first_param or has_cuda_input:
+            return
     if has_cuda_in_map or has_cuda_first_param or has_cuda_input:
         return
     raise RuntimeError(

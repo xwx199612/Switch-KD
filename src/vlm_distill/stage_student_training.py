@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,7 @@ from .device_utils import (
     ensure_stage_uses_cuda,
     get_module_by_path,
     print_stage_model_debug,
+    resolve_training_device_map,
     select_model_input_device,
 )
 from .logits_cache_utils import (
@@ -133,7 +135,7 @@ def _train_hf_student(config: PipelineConfig, rows: list[dict]) -> Path:
         trust_remote_code=True,
         local_files_only=True,
     )
-    model = _load_student_model(config, student_model_path)
+    model, resolved_device_map = _load_student_model(config, student_model_path)
     selected_input_device = select_model_input_device(
         model,
         preferred_modules=(
@@ -148,15 +150,16 @@ def _train_hf_student(config: PipelineConfig, rows: list[dict]) -> Path:
         stage_label="Train",
         model_path=student_model_path,
         quantization_mode=config.student.quantization,
-        requested_device_map="auto",
+        requested_device_map=resolved_device_map,
         model=model,
         selected_input_device=selected_input_device,
     )
     ensure_stage_uses_cuda(
         stage_label="Train",
-        requested_device_map="auto",
+        requested_device_map=resolved_device_map,
         model=model,
         selected_input_device=selected_input_device,
+        allow_distributed_none=True,
     )
 
     if config.student.quantization in {"4bit", "8bit"}:
@@ -164,6 +167,8 @@ def _train_hf_student(config: PipelineConfig, rows: list[dict]) -> Path:
 
     if config.training.gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
+        if hasattr(model, "config"):
+            model.config.use_cache = False
 
     if config.training.freeze_vision_tower:
         _freeze_vision_modules(model)
@@ -194,6 +199,7 @@ def _train_hf_student(config: PipelineConfig, rows: list[dict]) -> Path:
         fp16=config.training.mixed_precision == "fp16",
         bf16=config.training.mixed_precision == "bf16",
         remove_unused_columns=False,
+        **_build_gradient_checkpointing_kwargs(config.training.gradient_checkpointing, TrainingArguments),
     )
 
     trainer_cls = Trainer
@@ -214,6 +220,24 @@ def _train_hf_student(config: PipelineConfig, rows: list[dict]) -> Path:
     return config.student.adapter_dir
 
 
+def _build_gradient_checkpointing_kwargs(
+    enabled: bool,
+    training_arguments_cls,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {"gradient_checkpointing": enabled}
+    if not enabled:
+        return kwargs
+
+    try:
+        signature = inspect.signature(training_arguments_cls.__init__)
+    except (TypeError, ValueError):
+        return kwargs
+
+    if "gradient_checkpointing_kwargs" in signature.parameters:
+        kwargs["gradient_checkpointing_kwargs"] = {"use_reentrant": False}
+    return kwargs
+
+
 def _load_student_model(config: PipelineConfig, model_path: str | None = None):
     import torch
 
@@ -222,10 +246,17 @@ def _load_student_model(config: PipelineConfig, model_path: str | None = None):
     except ImportError:  # pragma: no cover - fallback for older transformers
         from transformers import AutoModelForVision2Seq as AutoModelForVLM
 
+    resolved_device_map = resolve_training_device_map(
+        config.student.device_map,
+        quantization=config.student.quantization,
+        role="student",
+        allow_accelerate_ddp=True,
+    )
     model_kwargs: dict = {
-        "device_map": "auto",
         "trust_remote_code": True,
     }
+    if resolved_device_map is not None:
+        model_kwargs["device_map"] = resolved_device_map
     apply_attn_implementation(model_kwargs, config.student.attn_implementation)
     if config.student.quantization == "4bit":
         from transformers import BitsAndBytesConfig
@@ -243,7 +274,8 @@ def _load_student_model(config: PipelineConfig, model_path: str | None = None):
 
     model_kwargs["local_files_only"] = True
     model_name_or_path = model_path or resolve_model_path(config.student.model_name)
-    return AutoModelForVLM.from_pretrained(model_name_or_path, **model_kwargs)
+    model = AutoModelForVLM.from_pretrained(model_name_or_path, **model_kwargs)
+    return model, resolved_device_map
 
 
 def _build_switch_kd_trainer():

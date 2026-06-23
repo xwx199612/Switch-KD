@@ -46,6 +46,7 @@ class StudentConfig:
     output_dir: Path
     adapter_dir: Path
     inference_model_path: str | None = None
+    device_map: str | None = "auto"
     attn_implementation: str = "sdpa"
     use_lora: bool = True
     lora_rank: int = 16

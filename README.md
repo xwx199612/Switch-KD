@@ -193,6 +193,26 @@ vlm-distill train \
   --config configs/switch_kd_4060ti.yaml
 ```
 
+Single-process single-GPU training with model sharding:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m vlm_distill.cli train --config configs/parsing_switch_kd.yaml
+```
+
+Multi-GPU DDP training with Accelerate:
+
+```bash
+accelerate launch --num_processes 4 -m vlm_distill.cli train --config configs/parsing_switch_kd_ddp.yaml
+```
+
+Notes:
+
+- `student.device_map: auto` means Hugging Face model sharding, not data parallel training.
+- For multi-GPU DDP, use `student.device_map: null` so `from_pretrained()` does not shard the student model.
+- `effective_batch = batch_size * gradient_accumulation_steps * num_gpus`
+- Single GPU example: `batch_size=1`, `gradient_accumulation_steps=16`, `effective_batch=16`
+- 4-GPU DDP example: `batch_size=1`, `gradient_accumulation_steps=4`, `effective_batch=1 * 4 * 4 = 16`
+
 ---
 
 ## Evaluate Student
