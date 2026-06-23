@@ -62,9 +62,6 @@ training:
   mask_prompt_labels: true
 
 distillation:
-  method: switch_kd
-  confidence_weighting: true
-  min_teacher_confidence: 0.35
   prompt_template: |
     You are an Android TV GUI parsing assistant.
 
@@ -96,9 +93,11 @@ distillation:
     Rules:
     - Prefer recall over brevity.
     - Do not return only the top navigation bar.
-    - Include small visible clickable items if they are likely interactive.
+    - Include every visible app icon, tile, card, tab, and focused item.
+    - If there are multiple rows or carousels, inspect all visible rows.
     - Mark the focused or highlighted element if visible.
     - If the text is unreadable but the element is clearly interactive, use a short visual name.
+    - Each element must be an object with text, type, and focused.
 
     Return raw JSON only.
     Do not explain.
