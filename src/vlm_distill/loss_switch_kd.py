@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-_SHAPE_DEBUG_EMITTED = False
 _INACTIVE_LOGIT = -1.0e4
 
 
@@ -36,6 +35,7 @@ class SwitchKDLoss:
         self.temperature = temperature
         self.top_k = top_k
         self.min_prob = min_prob
+        self._debug_emitted = False
 
     def __call__(
         self,
@@ -50,6 +50,15 @@ class SwitchKDLoss:
     ) -> SwitchKDLossOutput:
         lm_loss = _causal_lm_loss(student_logits, labels)
         zero = student_logits.new_zeros(())
+        debug_enabled = not self._debug_emitted
+
+        if debug_enabled:
+            print(
+                "Switch-KD first loss call:",
+                f"teacher_reference={'compact' if isinstance(teacher_logits, dict) else 'dense' if teacher_logits is not None else 'none'}",
+                f"switch_reference={'compact' if isinstance(switch_logits, dict) else 'dense' if switch_logits is not None else 'none'}",
+                f"student_logits_shape={tuple(student_logits.shape)}",
+            )
 
         dbild_loss = zero
         if teacher_logits is not None:
@@ -62,6 +71,8 @@ class SwitchKDLoss:
                 min_prob=self.min_prob,
                 token_weight=teacher_token_weight,
                 sample_weight=sample_weight,
+                debug_enabled=debug_enabled,
+                debug_label="teacher",
             )
 
         vsd_loss = zero
@@ -75,36 +86,36 @@ class SwitchKDLoss:
                 min_prob=self.min_prob,
                 token_weight=switch_token_weight,
                 sample_weight=sample_weight,
+                debug_enabled=debug_enabled,
+                debug_label="switch",
             )
 
         loss = self.lm_weight * lm_loss + self.dbild_weight * dbild_loss + self.vsd_weight * vsd_loss
+        self._debug_emitted = True
         return SwitchKDLossOutput(loss=loss, lm_loss=lm_loss, dbild_loss=dbild_loss, vsd_loss=vsd_loss)
 
 
-def _emit_shape_debug(
+def _emit_reference_debug(
     *,
+    label: str,
+    compact: bool,
     student_logits_shape,
     reference_logits_shape,
-    student_top_shape,
-    reference_top_shape,
-    candidate_indices_shape,
-    gathered_logits_shape,
+    reference_indices_shape=None,
+    gathered_logits_shape=None,
+    candidate_count_shape=None,
+    candidate_count_max=None,
 ):
-    global _SHAPE_DEBUG_EMITTED
-
-    if _SHAPE_DEBUG_EMITTED:
-        return
-
     print(
-        "Switch-KD shapes:",
+        f"Switch-KD {label} path:",
+        f"reference_kind={'compact' if compact else 'dense'}",
         f"student_logits={tuple(student_logits_shape)}",
         f"reference_logits={tuple(reference_logits_shape)}",
-        f"student_top={tuple(student_top_shape)}",
-        f"reference_top={tuple(reference_top_shape)}",
-        f"candidate_indices={tuple(candidate_indices_shape)}",
-        f"gathered_logits={tuple(gathered_logits_shape)}",
+        f"reference_indices={tuple(reference_indices_shape) if reference_indices_shape is not None else None}",
+        f"gathered_student_candidate_logits={tuple(gathered_logits_shape) if gathered_logits_shape is not None else None}",
+        f"candidate_count_shape={tuple(candidate_count_shape) if candidate_count_shape is not None else None}",
+        f"candidate_count_max={candidate_count_max}",
     )
-    _SHAPE_DEBUG_EMITTED = True
 
 
 def _build_candidate_union(student_top_indices, reference_top_indices, reference_active=None):
@@ -138,7 +149,7 @@ def _build_candidate_union(student_top_indices, reference_top_indices, reference
     )
     candidate_active = position < candidate_count.unsqueeze(-1)
     candidate_indices = torch.where(candidate_active, candidate_indices, torch.zeros_like(candidate_indices))
-    return candidate_indices, candidate_active
+    return candidate_indices, candidate_active, candidate_count
 
 
 def _apply_candidate_min_prob(
@@ -173,6 +184,8 @@ def dynamic_bidirectional_logits_difference(
     min_prob: float = 0.0,
     token_weight=None,
     sample_weight: float | None = None,
+    debug_enabled: bool = False,
+    debug_label: str = "reference",
 ):
     """DBiLD approximation for Switch-KD over cached compact reference logits."""
     import torch
@@ -188,6 +201,8 @@ def dynamic_bidirectional_logits_difference(
             min_prob=min_prob,
             token_weight=token_weight,
             sample_weight=sample_weight,
+            debug_enabled=debug_enabled,
+            debug_label=debug_label,
         )
 
     if student_logits.shape != reference_logits.shape:
@@ -201,18 +216,20 @@ def dynamic_bidirectional_logits_difference(
     safe_temperature = max(float(temperature), 1e-6)
     student_top_indices = torch.topk(student_logits, k=effective_top_k, dim=-1).indices
     reference_top_indices = torch.topk(reference_logits, k=effective_top_k, dim=-1).indices
-    candidate_indices, candidate_active = _build_candidate_union(student_top_indices, reference_top_indices)
+    candidate_indices, candidate_active, candidate_count = _build_candidate_union(student_top_indices, reference_top_indices)
 
     student_candidate_logits = torch.gather(student_logits, dim=-1, index=candidate_indices)
     reference_candidate_logits = torch.gather(reference_logits, dim=-1, index=candidate_indices)
-    _emit_shape_debug(
-        student_logits_shape=student_logits.shape,
-        reference_logits_shape=reference_logits.shape,
-        student_top_shape=student_top_indices.shape,
-        reference_top_shape=reference_top_indices.shape,
-        candidate_indices_shape=candidate_indices.shape,
-        gathered_logits_shape=student_candidate_logits.shape,
-    )
+    if debug_enabled:
+        _emit_reference_debug(
+            label=debug_label,
+            compact=False,
+            student_logits_shape=student_logits.shape,
+            reference_logits_shape=reference_logits.shape,
+            gathered_logits_shape=student_candidate_logits.shape,
+            candidate_count_shape=candidate_count.shape,
+            candidate_count_max=int(candidate_count.max().item()) if candidate_count.numel() > 0 else 0,
+        )
 
     fill_value = student_candidate_logits.new_full((), _INACTIVE_LOGIT)
     scaled_student = (student_candidate_logits / safe_temperature).masked_fill(~candidate_active, fill_value)
@@ -258,6 +275,8 @@ def visual_switch_divergence(
     min_prob: float = 0.0,
     token_weight=None,
     sample_weight: float | None = None,
+    debug_enabled: bool = False,
+    debug_label: str = "switch",
 ):
     return dynamic_bidirectional_logits_difference(
         student_logits=student_logits,
@@ -268,6 +287,8 @@ def visual_switch_divergence(
         min_prob=min_prob,
         token_weight=token_weight,
         sample_weight=sample_weight,
+        debug_enabled=debug_enabled,
+        debug_label=debug_label,
     )
 
 
@@ -281,14 +302,14 @@ def _compact_bidirectional_logits_difference(
     min_prob: float = 0.0,
     token_weight=None,
     sample_weight: float | None = None,
+    debug_enabled: bool = False,
+    debug_label: str = "reference",
 ):
     import torch
     import torch.nn.functional as F
 
-    global _SHAPE_DEBUG_EMITTED
-
     reference_indices = reference_logits["indices"]
-    reference_values = reference_logits["values"]
+    reference_values = reference_logits["logits"] if "logits" in reference_logits else reference_logits["values"]
     token_k = reference_logits.get("token_k")
 
     if reference_indices.ndim != 3 or reference_values.ndim != 3:
@@ -311,7 +332,7 @@ def _compact_bidirectional_logits_difference(
         positions = torch.arange(reference_indices.shape[-1], device=reference_indices.device).view(1, 1, -1)
         reference_active = positions < token_k.unsqueeze(-1)
 
-    candidate_indices, candidate_active = _build_candidate_union(
+    candidate_indices, candidate_active, candidate_count = _build_candidate_union(
         student_top_indices,
         reference_indices,
         reference_active=reference_active,
@@ -327,14 +348,17 @@ def _compact_bidirectional_logits_difference(
         reference_fill,
     )
 
-    _emit_shape_debug(
-        student_logits_shape=student_logits.shape,
-        reference_logits_shape=reference_values.shape,
-        student_top_shape=student_top_indices.shape,
-        reference_top_shape=reference_indices.shape,
-        candidate_indices_shape=candidate_indices.shape,
-        gathered_logits_shape=student_candidate_logits.shape,
-    )
+    if debug_enabled:
+        _emit_reference_debug(
+            label=debug_label,
+            compact=True,
+            student_logits_shape=student_logits.shape,
+            reference_logits_shape=reference_values.shape,
+            reference_indices_shape=reference_indices.shape,
+            gathered_logits_shape=student_candidate_logits.shape,
+            candidate_count_shape=candidate_count.shape,
+            candidate_count_max=int(candidate_count.max().item()) if candidate_count.numel() > 0 else 0,
+        )
 
     fill_value = student_candidate_logits.new_full((), _INACTIVE_LOGIT)
     scaled_student = (student_candidate_logits / safe_temperature).masked_fill(~candidate_active, fill_value)

@@ -413,20 +413,29 @@ def _prepare_reference_logits(
             compact["shape"] = (*compact["shape"][:-1], student_vocab_size)
             compact["vocab_size"] = int(student_vocab_size)
 
+        token_weight = _extract_compact_reference_token_weight(cached, device=device, dtype=dtype)
         if distill.align_kd_logits_to_answer:
-            return align_compact_reference_to_suffix(
+            aligned = align_compact_reference_to_suffix(
                 compact,
                 target_shape=target_shape,
                 reference_prompt_len=effective_reference_prompt_len,
                 student_prompt_len=student_prompt_len,
                 dtype=dtype,
             )
-        return align_compact_reference_to_suffix(
-            compact,
-            target_shape=target_shape,
-            reference_prompt_len=None,
-            student_prompt_len=None,
-            dtype=dtype,
+        else:
+            aligned = align_compact_reference_to_suffix(
+                compact,
+                target_shape=target_shape,
+                reference_prompt_len=None,
+                student_prompt_len=None,
+                dtype=dtype,
+            )
+
+        return _finalize_compact_reference(
+            aligned,
+            token_weight=token_weight,
+            student_prompt_len=student_prompt_len,
+            reference_prompt_len=effective_reference_prompt_len if distill.align_kd_logits_to_answer else None,
         )
 
     tensor = materialize_cached_logits(
@@ -475,6 +484,30 @@ def _prepare_reference_logits(
             dtype=dtype,
         )
     return align_reference_logits(tensor, target_shape=target_shape, dtype=dtype)
+
+
+def _extract_compact_reference_token_weight(cached, *, device, dtype):
+    from .logits_cache_utils import cached_token_weight
+
+    return cached_token_weight(cached, device=device, dtype=dtype)
+
+
+def _finalize_compact_reference(
+    reference: dict[str, Any],
+    *,
+    token_weight,
+    student_prompt_len: int | None,
+    reference_prompt_len: int | None,
+):
+    compact = dict(reference)
+    compact["logits"] = compact["values"]
+    if token_weight is not None:
+        compact["token_weight"] = token_weight
+        compact["entropy_weight"] = token_weight
+    compact["student_prompt_len"] = student_prompt_len
+    compact["reference_prompt_len"] = reference_prompt_len
+    compact["is_compact"] = True
+    return compact
 
 
 def _pop_metadata(inputs: dict, key: str) -> int | None:
