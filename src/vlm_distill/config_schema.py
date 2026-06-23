@@ -61,6 +61,7 @@ class TrainingConfig:
     epochs: int = 1
     batch_size: int = 1
     gradient_accumulation_steps: int = 1
+    ddp_find_unused_parameters: bool | None = False
     learning_rate: float = 2e-4
     warmup_ratio: float = 0.03
     max_steps: int | None = None

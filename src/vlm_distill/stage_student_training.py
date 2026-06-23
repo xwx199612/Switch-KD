@@ -190,6 +190,7 @@ def _train_hf_student(config: PipelineConfig, rows: list[dict]) -> Path:
         output_dir=str(config.student.output_dir),
         per_device_train_batch_size=config.training.batch_size,
         gradient_accumulation_steps=config.training.gradient_accumulation_steps,
+        ddp_find_unused_parameters=config.training.ddp_find_unused_parameters,
         learning_rate=config.training.learning_rate,
         num_train_epochs=config.training.epochs,
         max_steps=config.training.max_steps or -1,
