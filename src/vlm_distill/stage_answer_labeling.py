@@ -16,7 +16,12 @@ from urllib.parse import urljoin
 
 from .config_schema import PipelineConfig, format_prompt, resolve_label_path
 from .data_manifest import VlmSample, read_jsonl
-from .device_utils import normalize_device_location, resolve_requested_device_map, select_model_input_device
+from .device_utils import (
+    ensure_stage_uses_cuda,
+    print_stage_model_debug,
+    resolve_requested_device_map,
+    select_model_input_device,
+)
 from .model_loading import apply_attn_implementation, resolve_model_path
 
 
@@ -64,6 +69,7 @@ class MockTeacher:
 class HuggingFaceTeacher:
     def __init__(self, config: PipelineConfig):
         self.config = config
+        self._input_device = None
         try:
             import torch
             from transformers import AutoProcessor, BitsAndBytesConfig
@@ -126,41 +132,25 @@ class HuggingFaceTeacher:
             **model_kwargs,
             local_files_only=True,
         )
-
-        device_map = getattr(self.model, "hf_device_map", None)
-        cpu_parts = []
-        if device_map:
-            cpu_parts = [k for k, v in device_map.items() if str(v) in {"cpu", "disk"}]
-
-        try:
-            first_param = next(self.model.parameters())
-            first_param_device = first_param.device
-            first_param_dtype = first_param.dtype
-        except StopIteration:
-            first_param_device = None
-            first_param_dtype = None
-
-        print("Teacher resolved model path:", model_path)
-        print("Teacher quantization mode:", config.teacher.quantization)
-        print("Teacher requested device_map:", requested_device_map)
-        print("Teacher hf_device_map:", device_map)
-        print("Teacher CPU/DISK offload parts:", cpu_parts)
-        print("Teacher first parameter device:", first_param_device)
-        print("Teacher first parameter dtype:", first_param_dtype)
-
-        has_cuda_in_map = bool(device_map) and any(
-            (device := normalize_device_location(v)) is not None and device.type == "cuda"
-            for v in device_map.values()
+        self._input_device = select_model_input_device(
+            self.model,
+            preferred_modules=(getattr(self.model, "visual", None),),
+            label="Teacher",
         )
-        has_cuda_first_param = first_param_device is not None and first_param_device.type == "cuda"
-        if not has_cuda_in_map and not has_cuda_first_param:
-            raise RuntimeError(
-                "Teacher model did not place on CUDA. "
-                f"requested device_map={requested_device_map!r}, "
-                f"hf_device_map={device_map!r}, "
-                f"first_param_device={first_param_device!r}. "
-                "Refusing to continue with a CPU-loaded teacher."
-            )
+        print_stage_model_debug(
+            stage_label="Teacher",
+            model_path=model_path,
+            quantization_mode=config.teacher.quantization,
+            requested_device_map=requested_device_map,
+            model=self.model,
+            selected_input_device=self._input_device,
+        )
+        ensure_stage_uses_cuda(
+            stage_label="Teacher",
+            requested_device_map=requested_device_map,
+            model=self.model,
+            selected_input_device=self._input_device,
+        )
 
     def answer(self, sample: VlmSample) -> dict:
         image_path = self.config.data.image_root / sample.image
@@ -221,7 +211,7 @@ class HuggingFaceTeacher:
             text=[text],
             images=[image],
             return_tensors="pt",
-        ).to(select_model_input_device(self.model, preferred_modules=(getattr(self.model, "visual", None),), label="Teacher"))
+        ).to(self._input_device)
 
         generation_kwargs = {
             "do_sample": self.config.teacher.temperature > 0,
