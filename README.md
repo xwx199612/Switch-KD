@@ -588,6 +588,14 @@ Adapter / merge guidance:
 * Only merge for deployment, and always write the merged weights into a new directory such as `outputs/.../merged-*`.
 * Do not write merged weights back into the base model directory. Keeping the original student base untouched lets you merge other adapters later.
 
+Parallel teacher labeling helper:
+
+```bash
+bash scripts/run_parallel_label_4gpu.sh
+```
+
+This helper splits `outputs/switch-kd/parsing_manifest.jsonl` into four shard manifests, generates temporary configs in `configs/generated/`, launches four `label` workers with `CUDA_VISIBLE_DEVICES=0..3`, then merges shard label outputs back into `outputs/switch-kd/parsing_teacher_labels_480p_8bit.jsonl` after all workers succeed.
+
 ## Step 8
 
 Batch test a merged student model.

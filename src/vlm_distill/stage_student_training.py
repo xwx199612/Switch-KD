@@ -268,6 +268,8 @@ def _build_switch_kd_trainer():
                 top_k=distill.dbild_top_k,
                 min_prob=distill.dbild_min_prob,
             )
+            self._switch_kd_last_losses: dict[str, float] | None = None
+            self._switch_kd_last_logged_step = -1
 
         def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
             distill = self.switch_kd_config.distillation
@@ -349,7 +351,54 @@ def _build_switch_kd_trainer():
                 switch_token_weight=switch_token_weight,
                 sample_weight=teacher_confidence if distill.confidence_weighting else None,
             )
+            self._switch_kd_last_losses = {
+                "total_loss": float(loss_output.loss.detach().float().item()),
+                "lm_loss": float(loss_output.lm_loss.detach().float().item()),
+                "dbild_loss": float(loss_output.dbild_loss.detach().float().item()),
+                "vsd_loss": float(loss_output.vsd_loss.detach().float().item()),
+            }
             return (loss_output.loss, outputs) if return_outputs else loss_output.loss
+
+        def log(self, logs, *args, **kwargs):
+            super().log(logs, *args, **kwargs)
+            self._maybe_log_switch_kd_progress()
+
+        def _maybe_log_switch_kd_progress(self) -> None:
+            import torch
+
+            if self._switch_kd_last_losses is None:
+                return
+            global_step = int(self.state.global_step)
+            if global_step <= 0 or global_step == self._switch_kd_last_logged_step:
+                return
+            if self.switch_kd_config.training.log_every <= 0:
+                return
+            if global_step % self.switch_kd_config.training.log_every != 0:
+                return
+
+            max_steps = int(self.state.max_steps or self.args.max_steps or 0)
+            lr = 0.0
+            if self.optimizer is not None and self.optimizer.param_groups:
+                lr = float(self.optimizer.param_groups[0].get("lr", 0.0))
+
+            gpu_mem_allocated = 0
+            gpu_mem_reserved = 0
+            if torch.cuda.is_available():
+                gpu_mem_allocated = int(torch.cuda.memory_allocated())
+                gpu_mem_reserved = int(torch.cuda.memory_reserved())
+
+            loss_values = self._switch_kd_last_losses
+            print(
+                f"[train] step={global_step}/{max_steps} "
+                f"total_loss={loss_values['total_loss']:.6f} "
+                f"lm_loss={loss_values['lm_loss']:.6f} "
+                f"dbild_loss={loss_values['dbild_loss']:.6f} "
+                f"vsd_loss={loss_values['vsd_loss']:.6f} "
+                f"lr={lr:.8g} "
+                f"gpu_mem_allocated={gpu_mem_allocated} "
+                f"gpu_mem_reserved={gpu_mem_reserved}"
+            )
+            self._switch_kd_last_logged_step = global_step
 
     return SwitchKDTrainer
 
