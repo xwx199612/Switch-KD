@@ -35,6 +35,7 @@ INACTIVE_LOGIT = -1.0e4
 class VSDComponents:
     student_vision: object
     student_projector: object
+    visual_switch_projector: object
     teacher_lm: object
     teacher_token_embedding: object
     teacher_lm_head: object | None = None
@@ -61,6 +62,17 @@ class VisualSwitchDistiller:
         self._aligner = None
         self._student_input_device = None
         self._teacher_text_device = None
+        self._vsd_path_logged = False
+        self._last_visual_dim_before_projection: int | None = None
+        self._last_visual_dim_after_projection: int | None = None
+        self._last_teacher_embedding_dim: int | None = None
+        self._last_dim_aligner_created = False
+        self._last_vsd_projector_source: str | None = None
+        self._last_vsd_projector_path: str | None = None
+        self._last_student_vision_type: str | None = None
+        self._last_visual_switch_projector_type: str | None = None
+        self._last_teacher_lm_type: str | None = None
+        self._last_teacher_token_embedding_type: str | None = None
 
     def load(self) -> None:
         self.load_student_only()
@@ -352,7 +364,8 @@ class VisualSwitchDistiller:
             _STUDENT_VISION_CANDIDATES,
             "student vision encoder",
         )
-        student_projector = self._student_component(
+        visual_switch_projector = self._visual_switch_projector_component()
+        student_projector = visual_switch_projector if distill.teacher_projector_path else self._student_component(
             distill.student_projector_path,
             _STUDENT_PROJECTOR_CANDIDATES,
             "student projector",
@@ -374,6 +387,7 @@ class VisualSwitchDistiller:
         return VSDComponents(
             student_vision=student_vision,
             student_projector=student_projector,
+            visual_switch_projector=visual_switch_projector,
             teacher_lm=teacher_lm,
             teacher_token_embedding=teacher_token_embedding,
             teacher_lm_head=teacher_lm_head,
@@ -394,6 +408,35 @@ class VisualSwitchDistiller:
             return None
         return _resolve_optional_component(self._teacher_model, configured_path, candidates)
 
+    def _visual_switch_projector_component(self):
+        distill = self.config.distillation
+        if distill.teacher_projector_path:
+            if self._teacher_model is None:
+                raise RuntimeError(
+                    "Teacher model is not loaded while resolving distillation.teacher_projector_path."
+                )
+            try:
+                projector = _get_nested_attr(self._teacher_model, distill.teacher_projector_path)
+            except AttributeError as exc:
+                raise ValueError(
+                    "Could not resolve distillation.teacher_projector_path="
+                    f"{distill.teacher_projector_path!r} on the teacher model."
+                ) from exc
+            self._last_vsd_projector_source = "teacher"
+            self._last_vsd_projector_path = distill.teacher_projector_path
+            self._last_visual_switch_projector_type = type(projector).__name__
+            return projector
+
+        self._last_vsd_projector_source = "student"
+        self._last_vsd_projector_path = distill.student_projector_path
+        projector = self._student_component(
+            distill.student_projector_path,
+            _STUDENT_PROJECTOR_CANDIDATES,
+            "student projector",
+        )
+        self._last_visual_switch_projector_type = type(projector).__name__
+        return projector
+
     def _student_image_inputs(self, image):
         student_inputs = _processor_image_inputs(self._student_processor, image)
         return batch_to_device(student_inputs, self._student_input_device)
@@ -404,6 +447,7 @@ class VisualSwitchDistiller:
             _STUDENT_VISION_CANDIDATES,
             "student vision encoder",
         )
+        self._last_student_vision_type = type(student_vision).__name__
         device = module_device(student_vision)
         vision_inputs = batch_to_device(student_inputs, device)
         vision_kwargs = _build_vision_forward_kwargs(student_vision, vision_inputs)
@@ -411,18 +455,18 @@ class VisualSwitchDistiller:
         return _first_tensor(outputs)
 
     def _student_projector_outputs(self, visual_outputs, student_inputs):
-        student_projector = self._student_component(
-            self.config.distillation.student_projector_path,
-            _STUDENT_PROJECTOR_CANDIDATES,
-            "student projector",
-        )
+        student_projector = self._visual_switch_projector_component()
         projector_kwargs = _build_projector_forward_kwargs(
             student_projector,
             visual_outputs,
             student_inputs,
         )
         projected = student_projector(**projector_kwargs)
-        return _first_tensor(projected)
+        projected_tensor = _first_tensor(projected)
+        self._last_visual_switch_projector_type = type(student_projector).__name__
+        self._last_visual_dim_before_projection = int(visual_outputs.shape[-1])
+        self._last_visual_dim_after_projection = int(projected_tensor.shape[-1])
+        return projected_tensor
 
     def _teacher_text_inputs(self, prompt: str):
         inputs = self._teacher_processor(text=prompt, return_tensors="pt")
@@ -436,8 +480,10 @@ class VisualSwitchDistiller:
             _TEACHER_EMBEDDING_CANDIDATES,
             "teacher token embedding",
         )
+        self._last_teacher_token_embedding_type = type(teacher_token_embedding).__name__
         input_ids = teacher_inputs["input_ids"]
         text_embeds = teacher_token_embedding(input_ids)
+        self._last_teacher_embedding_dim = int(text_embeds.shape[-1])
         projected_visual = projected_visual.to(text_embeds.device, dtype=text_embeds.dtype)
         projected_visual = _ensure_batch_sequence(projected_visual)
         projected_visual = self._align_visual_dim(projected_visual, text_embeds.shape[-1])
@@ -471,6 +517,8 @@ class VisualSwitchDistiller:
             _TEACHER_LM_CANDIDATES,
             "teacher LLM",
         )
+        self._last_teacher_lm_type = type(teacher_lm).__name__
+        self._maybe_log_vsd_path_configuration()
         teacher_lm_head = self._teacher_optional_component(
             self.config.distillation.teacher_lm_head_path,
             _TEACHER_LM_HEAD_CANDIDATES,
@@ -491,6 +539,7 @@ class VisualSwitchDistiller:
 
         visual_dim = visual_embeds.shape[-1]
         if visual_dim == teacher_dim:
+            self._last_dim_aligner_created = False
             return visual_embeds
         if self._aligner is None:
             self._aligner = torch.nn.Linear(visual_dim, teacher_dim, bias=False).to(
@@ -499,7 +548,53 @@ class VisualSwitchDistiller:
             )
             torch.nn.init.xavier_uniform_(self._aligner.weight)
             self._aligner.requires_grad_(False)
+            self._last_dim_aligner_created = True
+        else:
+            self._last_dim_aligner_created = False
         return self._aligner(visual_embeds)
+
+    def _maybe_log_vsd_path_configuration(self) -> None:
+        if self._vsd_path_logged:
+            return
+        distill = self.config.distillation
+        if self._last_visual_dim_before_projection is None:
+            return
+        if self._last_visual_dim_after_projection is None:
+            return
+        if self._last_teacher_embedding_dim is None:
+            return
+
+        identity_projector_used = (
+            self._last_vsd_projector_source == "student"
+            and distill.student_projector_path == "__identity__"
+        )
+        student_vision_type = self._last_student_vision_type or "<unavailable>"
+        teacher_lm_type = self._last_teacher_lm_type or "<unavailable>"
+        teacher_token_embedding_type = self._last_teacher_token_embedding_type or "<unavailable>"
+        visual_switch_projector_type = self._last_visual_switch_projector_type or "<unavailable>"
+        print("[switch-logits][vsd] path resolution:")
+        print(f"  student_vision_path: {distill.student_vision_path}")
+        print(f"  student_vision_type: {student_vision_type}")
+        print(f"  student_projector_path: {distill.student_projector_path}")
+        print(f"  teacher_projector_path: {distill.teacher_projector_path}")
+        print(f"  teacher_lm_path: {distill.teacher_lm_path}")
+        print(f"  teacher_lm_type: {teacher_lm_type}")
+        print(f"  teacher_token_embedding_path: {distill.teacher_token_embedding_path}")
+        print(f"  teacher_token_embedding_type: {teacher_token_embedding_type}")
+        print(f"  visual_switch_projector_source: {self._last_vsd_projector_source}")
+        print(f"  visual_switch_projector_path: {self._last_vsd_projector_path}")
+        print(f"  visual_switch_projector_type: {visual_switch_projector_type}")
+        print(f"  identity_projector_used: {identity_projector_used}")
+        print(f"  dim_aligner_created: {self._last_dim_aligner_created}")
+        print(f"  visual_dim_before_projection: {self._last_visual_dim_before_projection}")
+        print(f"  visual_dim_after_projection: {self._last_visual_dim_after_projection}")
+        print(f"  teacher_embedding_dim: {self._last_teacher_embedding_dim}")
+        if identity_projector_used:
+            print(
+                "WARNING: VSD is using identity projector plus dim aligner. "
+                "This is an approximation, not paper-faithful S-ViT -> T-Projector -> T-LLM."
+            )
+        self._vsd_path_logged = True
 
     def _visual_placeholder_id(self) -> int | None:
         placeholder = self.config.distillation.visual_token_placeholder
@@ -606,6 +701,8 @@ def create_visual_switch_dataset(config: PipelineConfig) -> Path:
             f"pending={len(pending_samples)} cache_dir={cache_dir}"
         )
         distiller.load_student_only()
+        if config.distillation.teacher_projector_path:
+            distiller.load_teacher_only()
         cached_now = 0
         for sample in pending_samples:
             cache_path = _student_visual_cache_path(cache_dir, sample)

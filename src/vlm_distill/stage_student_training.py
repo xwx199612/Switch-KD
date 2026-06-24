@@ -97,6 +97,11 @@ def train_student(config: PipelineConfig) -> Path:
     rows = _load_training_rows(config)
     _print_training_row_summary(config, rows)
     if config.distillation.method == "switch_kd":
+        if config.training.freeze_vision_tower:
+            print(
+                "WARNING: freeze_vision_tower=true limits VSD's ability to improve the student visual encoder. "
+                "This is an offline/static VSD baseline."
+            )
         _validate_switch_kd_training_rows(config, rows)
     config.student.output_dir.mkdir(parents=True, exist_ok=True)
     config.student.adapter_dir.mkdir(parents=True, exist_ok=True)

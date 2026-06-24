@@ -93,6 +93,7 @@ class DistillationConfig:
     use_cached_logits: bool = True
     student_vision_path: str | None = None
     student_projector_path: str | None = None
+    teacher_projector_path: str | None = None
     teacher_lm_path: str | None = None
     teacher_token_embedding_path: str | None = None
     teacher_lm_head_path: str | None = None
@@ -231,6 +232,7 @@ def _build_distillation_config(raw: dict[str, Any]) -> DistillationConfig:
     for key in (
         "student_vision_path",
         "student_projector_path",
+        "teacher_projector_path",
         "teacher_lm_path",
         "teacher_token_embedding_path",
         "teacher_lm_head_path",
