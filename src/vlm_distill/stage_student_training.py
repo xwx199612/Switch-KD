@@ -771,12 +771,15 @@ def _validate_switch_kd_training_rows(config: PipelineConfig, rows: list[dict]) 
     teacher_field = config.distillation.teacher_logits_field
     switch_field = config.distillation.switch_logits_field
     rows_with_teacher_answer = sum(1 for row in rows if row.get("teacher_answer") is not None)
+    rows_with_teacher_tokens = sum(1 for row in rows if _extract_teacher_tokens(row))
     rows_with_teacher_logits = sum(1 for row in rows if row.get(teacher_field) is not None)
     rows_with_switch_logits = sum(1 for row in rows if row.get(switch_field) is not None)
 
     if rows_with_teacher_answer <= 0:
         raise RuntimeError("Switch-KD method selected but rows_with_teacher_answer=0.")
-    if rows_with_teacher_logits <= 0:
+    if rows_with_teacher_tokens <= 0:
+        raise RuntimeError("Switch-KD method selected but rows_with_teacher_tokens=0.")
+    if config.distillation.teacher_logits and rows_with_teacher_logits <= 0:
         raise RuntimeError(f"Switch-KD method selected but rows_with_{teacher_field}=0.")
     if rows_with_switch_logits <= 0:
         raise RuntimeError(f"Switch-KD method selected but rows_with_{switch_field}=0.")
@@ -789,12 +792,14 @@ def _validate_switch_kd_training_rows(config: PipelineConfig, rows: list[dict]) 
             field_name=teacher_field,
             align_to_answer=config.distillation.align_kd_logits_to_answer,
             label="teacher_logits",
+            required=bool(config.distillation.teacher_logits),
         )
         _validate_cached_logits_alignment(
             row,
             field_name=switch_field,
             align_to_answer=config.distillation.align_kd_logits_to_answer,
             label="switch_logits",
+            required=True,
         )
 
 
@@ -804,27 +809,35 @@ def _validate_cached_logits_alignment(
     field_name: str,
     align_to_answer: bool,
     label: str,
+    required: bool = False,
 ) -> None:
     payload = row.get(field_name)
     if payload is None:
+        if required:
+            raise RuntimeError(f"{label} missing for id={row.get('id')}.")
         return
     raw_seq_len = _cached_logits_seq_len(payload)
     if raw_seq_len is None:
         return
     prompt_len_value = row.get(f"{field_name}_prompt_len")
     prompt_len = int(prompt_len_value) if prompt_len_value is not None else 0
-    effective_prompt_len = _normalize_reference_prompt_len(prompt_len, raw_seq_len) or 0
-    effective_len = raw_seq_len - effective_prompt_len
+    aligned_to_answer = row.get(f"{field_name}_aligned_to_answer") is True
+    effective_len = raw_seq_len if aligned_to_answer else raw_seq_len - (_normalize_reference_prompt_len(prompt_len, raw_seq_len) or 0)
     teacher_tokens_len = len(_extract_teacher_tokens(row))
     answer_label_token_count = teacher_tokens_len or None
     print(
         f"[train][{label}] id={row.get('id')} raw_logits_seq_len={raw_seq_len} "
-        f"prompt_len={prompt_len} effective_logits_seq_len={effective_len} "
+        f"prompt_len={prompt_len} answer_only={aligned_to_answer} effective_logits_seq_len={effective_len} "
         f"teacher_tokens_len={teacher_tokens_len} answer_label_token_count={answer_label_token_count}"
     )
+    if align_to_answer and teacher_tokens_len > 0 and not aligned_to_answer:
+        raise ValueError(
+            f"{label} is not marked as answer-only for id={row.get('id')}. "
+            "Old full-sequence logits are not supported by this training path; regenerate precompute outputs."
+        )
     if align_to_answer and teacher_tokens_len > 0 and effective_len != teacher_tokens_len:
         raise ValueError(
-            f"{label} prompt_len alignment is invalid for id={row.get('id')}: "
+            f"{label} answer-only alignment is invalid for id={row.get('id')}: "
             f"raw_logits_seq_len={raw_seq_len}, prompt_len={prompt_len}, "
             f"effective_logits_seq_len={effective_len}, teacher_tokens_len={teacher_tokens_len}, "
             f"difference={effective_len - teacher_tokens_len}."

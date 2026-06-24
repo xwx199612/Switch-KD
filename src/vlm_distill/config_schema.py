@@ -87,6 +87,7 @@ class DistillationConfig:
     kd_temperature: float = 2.0
     dbild_top_k: int = 64
     dbild_min_prob: float = 0.0
+    teacher_logits: bool = True
     teacher_logits_field: str = "teacher_logits"
     switch_logits_field: str = "switch_logits"
     use_cached_logits: bool = True

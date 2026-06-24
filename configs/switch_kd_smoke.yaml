@@ -44,6 +44,9 @@ training:
 
 distillation:
   method: switch_kd
+  # Unified teacher precompute: label writes teacher_answer, teacher_tokens,
+  # and answer-only teacher_logits together. Set false for answer/tokens only.
+  teacher_logits: true
   confidence_weighting: true
   min_teacher_confidence: 0.0
   prompt_template: "query: {query}\nAnswer:"

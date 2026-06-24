@@ -8,8 +8,8 @@ Usage:
   bash scripts/run_parallel_switch_kd_precompute_4gpu.sh [--dry-run] [--clean-outputs] <stage>
 
 Stages:
-  label
-  teacher-logits
+  label              unified teacher precompute
+  teacher-logits     compatibility fill for missing teacher logits
   switch-logits
   all
 
@@ -169,15 +169,22 @@ clean_stage_outputs() {
   if [[ "${CLEAN_OUTPUTS}" != "1" ]]; then
     return 0
   fi
-  if [[ "${stage}" != "teacher-logits" ]]; then
+  if [[ "${stage}" != "teacher-logits" && "${stage}" != "label" ]]; then
     return 0
   fi
-  echo "=== clean stale teacher logits shard outputs ==="
+  echo "=== clean stale unified teacher shard outputs ==="
   for gpu_index in 0 1 2 3; do
-    local shard_path="${SHARD_DIR}/parsing_teacher_logits_shard${gpu_index}.jsonl"
+    local shard_path="${SHARD_DIR}/parsing_teacher_labels_shard${gpu_index}.jsonl"
     if [[ -f "${shard_path}" ]]; then
       echo "Removing ${shard_path}"
       rm -f "${shard_path}"
+    fi
+    if [[ "${stage}" == "teacher-logits" ]]; then
+      local logits_shard_path="${SHARD_DIR}/parsing_teacher_logits_shard${gpu_index}.jsonl"
+      if [[ -f "${logits_shard_path}" ]]; then
+        echo "Removing ${logits_shard_path}"
+        rm -f "${logits_shard_path}"
+      fi
     fi
   done
 }
@@ -209,9 +216,14 @@ for gpu_index in range(4):
     config_data["data"]["label_path"] = str(
         shard_dir / f"parsing_teacher_labels_shard{gpu_index}.jsonl"
     )
-    if stage in {"teacher-logits", "switch-logits"}:
+    config_data.setdefault("distillation", {}).setdefault("teacher_logits", True)
+    if stage in {"label", "teacher-logits", "switch-logits"}:
         config_data["data"]["teacher_logits_path"] = str(
-            shard_dir / f"parsing_teacher_logits_shard{gpu_index}.jsonl"
+            shard_dir / (
+                f"parsing_teacher_labels_shard{gpu_index}.jsonl"
+                if stage == "label"
+                else f"parsing_teacher_logits_shard{gpu_index}.jsonl"
+            )
         )
     if stage == "switch-logits":
         config_data["data"]["switch_logits_path"] = str(
@@ -224,12 +236,15 @@ for gpu_index in range(4):
     with output_path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(config_data, handle, sort_keys=False, allow_unicode=True)
     print(f"[generate-config] {output_path}")
-    if stage == "teacher-logits":
+    if stage in {"label", "teacher-logits"}:
         print(
             "[generate-config-detail] "
             f"gpu={gpu_index} distillation.method={config_data.get('distillation', {}).get('method')} "
+            f"distillation.teacher_logits={config_data.get('distillation', {}).get('teacher_logits')} "
+            f"label_path={config_data.get('data', {}).get('label_path')} "
             f"teacher_logits_path={config_data.get('data', {}).get('teacher_logits_path')} "
-            f"teacher_logits_field={config_data.get('distillation', {}).get('teacher_logits_field')}"
+            f"teacher_logits_field={config_data.get('distillation', {}).get('teacher_logits_field')} "
+            f"unified_teacher_output={stage == 'label'}"
         )
 PY
 }
@@ -271,6 +286,29 @@ print_safety_checks() {
 
   echo "=== stage ==="
   echo "${stage}"
+  echo "=== teacher precompute dry-run ==="
+  python - <<'PY'
+from __future__ import annotations
+
+from pathlib import Path
+
+import yaml
+
+with Path("configs/parsing_switch_kd.yaml").open("r", encoding="utf-8") as handle:
+    config = yaml.safe_load(handle)
+distillation = config.get("distillation", {})
+data = config.get("data", {})
+teacher_logits = bool(distillation.get("teacher_logits", True))
+label_path = data.get("label_path")
+teacher_logits_path = data.get("teacher_logits_path") or label_path
+mode = "unified" if label_path == teacher_logits_path else "duplicated"
+print(f"method: {distillation.get('method')}")
+print(f"teacher_logits: {str(teacher_logits).lower()}")
+print(f"label_path: {label_path}")
+print(f"teacher_logits_path: {teacher_logits_path}")
+print("unified teacher precompute enabled")
+print(f"teacher output mode: {mode}")
+PY
   echo "=== current working directory ==="
   pwd
   echo "=== active python path ==="
@@ -315,7 +353,10 @@ PY
     echo "  manifest=${SHARD_DIR}/parsing_manifest_shard${gpu_index}.jsonl"
     echo "  config=${GENERATED_CONFIG_DIR}/parsing_switch_kd_${stage_slug}_gpu${gpu_index}.yaml"
     echo "  label=${SHARD_DIR}/parsing_teacher_labels_shard${gpu_index}.jsonl"
-    if [[ "${stage}" == "teacher-logits" || "${stage}" == "switch-logits" ]]; then
+    if [[ "${stage}" == "label" ]]; then
+      echo "  teacher_logits=${SHARD_DIR}/parsing_teacher_labels_shard${gpu_index}.jsonl"
+      echo "  unified teacher precompute enabled"
+    elif [[ "${stage}" == "teacher-logits" || "${stage}" == "switch-logits" ]]; then
       echo "  teacher_logits=${SHARD_DIR}/parsing_teacher_logits_shard${gpu_index}.jsonl"
       if [[ -f "${SHARD_DIR}/parsing_teacher_logits_shard${gpu_index}.jsonl" ]]; then
         echo "  WARNING: existing teacher_logits shard output will be resumed unless invalid rows are recomputed or CLEAN_OUTPUTS=1 is set"
@@ -423,6 +464,15 @@ def is_valid_logits_payload(payload: object) -> bool:
         return False
     return bool(payload.get("indices")) and bool(payload.get("values"))
 
+def teacher_logits_enabled() -> bool:
+    try:
+        import yaml
+        with Path("configs/parsing_switch_kd.yaml").open("r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle)
+        return bool(config.get("distillation", {}).get("teacher_logits", True))
+    except Exception:
+        return True
+
 for shard_index in range(4):
     shard_path = shard_dir / shard_template.format(gpu=shard_index)
     if not shard_path.exists():
@@ -449,12 +499,12 @@ for shard_index in range(4):
                     f"ERROR: duplicate id detected during {stage} merge: {sample_id_str}"
                 )
             seen_ids.add(sample_id_str)
-            if stage == "teacher-logits" and is_valid_logits_payload(row.get("teacher_logits")):
+            if stage in {"label", "teacher-logits"} and is_valid_logits_payload(row.get("teacher_logits")):
                 valid_logits_by_shard[shard_index] = valid_logits_by_shard.get(shard_index, 0) + 1
             rows.append(row)
-    if stage == "teacher-logits" and valid_logits_by_shard.get(shard_index, 0) <= 0:
+    if stage in {"label", "teacher-logits"} and teacher_logits_enabled() and valid_logits_by_shard.get(shard_index, 0) <= 0:
         raise SystemExit(
-            f"ERROR: teacher-logits shard has zero valid teacher_logits rows: {shard_path}"
+            f"ERROR: teacher-logits shard has zero valid teacher_logits rows: {shard_path} stage={stage}"
         )
 
 def sort_key(row: dict) -> tuple[int, object]:
@@ -478,10 +528,15 @@ if expected_count and len(rows) != expected_count:
         f"ERROR: merged row count mismatch for {stage}: merged={len(rows)} expected={expected_count}"
     )
 
-if stage == "teacher-logits":
+if stage in {"label", "teacher-logits"} and teacher_logits_enabled():
     logits_rows = [row for row in rows if is_valid_logits_payload(row.get("teacher_logits"))]
     if len(seen_ids) != len(rows):
         raise SystemExit("ERROR: merged teacher logits ids are not unique")
+    answer_rows = [row for row in rows if row.get("teacher_answer")]
+    if len(answer_rows) != len(rows):
+        raise SystemExit(
+            f"ERROR: merged teacher rows missing teacher_answer: valid={len(answer_rows)} total={len(rows)}"
+        )
     if len(logits_rows) != len(rows):
         raise SystemExit(
             f"ERROR: merged teacher logits rows missing valid teacher_logits: valid={len(logits_rows)} total={len(rows)}"
@@ -497,7 +552,7 @@ with final_output_path.open("w", encoding="utf-8") as handle:
 print(f"Merged rows: {len(rows)}")
 print(f"Expected rows: {expected_count}")
 print(f"Merged output: {final_output_path}")
-if stage == "teacher-logits":
+if stage in {"label", "teacher-logits"} and teacher_logits_enabled():
     print(f"Validated teacher_logits rows: {len(rows)}")
 PY
 }

@@ -22,7 +22,7 @@ def _make_config(tmp_path: Path) -> PipelineConfig:
     )
 
 
-def test_switch_logits_prompt_len_includes_visual_tokens(tmp_path: Path):
+def test_switch_logits_are_answer_only(tmp_path: Path):
     config = _make_config(tmp_path)
     distiller = VisualSwitchDistiller(config)
     row = distiller.generate_for_sample(
@@ -30,8 +30,9 @@ def test_switch_logits_prompt_len_includes_visual_tokens(tmp_path: Path):
         base_row={"teacher_tokens": [10, 11, 12], "visual_token_count": 7},
     )
 
-    assert row["switch_logits_prompt_len"] == 9
-    assert row["switch_logits"]["shape"][1] - row["switch_logits_prompt_len"] == len(row["teacher_tokens"])
+    assert row["switch_logits_prompt_len"] == 0
+    assert row["switch_logits_aligned_to_answer"] is True
+    assert row["switch_logits"]["shape"][1] == len(row["teacher_tokens"])
 
 
 def test_switch_logits_old_text_only_prompt_len_raises():
@@ -48,7 +49,7 @@ def test_switch_logits_old_text_only_prompt_len_raises():
         },
     }
 
-    with pytest.raises(ValueError, match="prompt_len alignment"):
+    with pytest.raises(ValueError, match="answer-only alignment"):
         _validate_switch_logits_row(
             row,
             field_name="switch_logits",
@@ -70,3 +71,4 @@ def test_switch_logits_row_contains_valid_compact_payload(tmp_path: Path):
         visual_token_placeholder="<image>",
     )
     assert {"indices", "values", "vocab_size"}.issubset(row["switch_logits"])
+    assert row["switch_logits"]["shape"][1] == len(row["teacher_tokens"])

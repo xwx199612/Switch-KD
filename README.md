@@ -143,8 +143,10 @@ vlm-distill validate-labels \
 This reads `data.distill_path` and reports:
 
 - `total_rows`
-- `teacher_answer_rows`
-- `non_empty_teacher_answer_rows`
+- `valid teacher_answer rows`
+- `schema-valid rows`
+- `answer/token mismatch rows`
+- `rows with valid teacher_logits` when `distillation.teacher_logits: true`
 
 ---
 
@@ -154,6 +156,16 @@ This reads `data.distill_path` and reports:
 vlm-distill label \
   --config configs/parsing_labeling.yaml
 ```
+
+`label` now runs unified teacher precompute. By default
+`distillation.teacher_logits: true`, so Switch-KD configs write
+`teacher_answer`, `teacher_tokens`, and answer-only `teacher_logits` from the
+same final normalized answer. If `data.teacher_logits_path` differs from
+`data.label_path`, unified rows are mirrored for backward compatibility; new
+code should treat `data.label_path` as the primary teacher precompute output.
+
+Use `vlm-distill teacher-precompute --config ...` for the same stage with an
+explicit name.
 
 ---
 
@@ -174,6 +186,10 @@ This reads `data.manifest_path` and writes predictions to `data.prediction_path`
 vlm-distill teacher-logits \
   --config configs/switch_kd_4060ti.yaml
 ```
+
+This command is a compatibility filler. It reads existing valid teacher rows
+and fills missing `teacher_logits` with teacher-forcing forward; it does not
+generate a new `teacher_answer`.
 
 ---
 
@@ -723,6 +739,10 @@ vlm-distill train \
 vlm-distill evaluate \
   --config configs/switch_kd_4060ti.yaml
 ```
+
+For Switch-KD, the preferred path is `label`/`teacher-precompute` followed by
+`switch-logits`. Run `teacher-logits` only to backfill older valid teacher
+label files that are missing logits.
 
 Training objective:
 

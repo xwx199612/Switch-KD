@@ -20,6 +20,7 @@ def validate_label_rows(
     *,
     max_samples: int | None = None,
     decode_tokens: DecodeTokens | None = None,
+    require_logits: bool = False,
     bad_limit: int = 5,
 ) -> dict[str, Any]:
     rows = read_jsonl(path, max_samples=max_samples)
@@ -27,59 +28,112 @@ def validate_label_rows(
     schema_valid_rows = 0
     string_list_rows = 0
     answer_token_mismatch_rows = 0
+    valid_teacher_logits_rows = 0
+    answer_logits_length_mismatch_rows = 0
+    valid_teacher_answer_rows = 0
     bad_rows: list[dict[str, str]] = []
 
     for index, row in enumerate(rows, start=1):
         row_id = str(row.get("id") or index)
+        valid, reason = validate_teacher_row(
+            row,
+            require_logits=require_logits,
+            decode_tokens=decode_tokens,
+        )
         answer = row.get("teacher_answer")
-        if not isinstance(answer, str):
-            _add_bad_row(bad_rows, row_id, "teacher_answer is missing or not a string", bad_limit)
-            continue
-
-        parsed = _parse_json_object(answer)
-        if parsed is None:
-            _add_bad_row(bad_rows, row_id, "teacher_answer is not valid JSON", bad_limit)
-            continue
-        valid_json_rows += 1
-
-        elements = parsed.get("elements")
-        if isinstance(elements, list) and any(isinstance(element, str) for element in elements):
-            string_list_rows += 1
-
-        schema_valid, schema_reason = _validate_parsing_teacher_answer(answer)
-        if schema_valid:
-            schema_valid_rows += 1
-        else:
-            _add_bad_row(bad_rows, row_id, schema_reason or "schema invalid", bad_limit)
-
+        if isinstance(answer, str):
+            valid_teacher_answer_rows += 1
+            parsed = _parse_json_object(answer)
+            if parsed is not None:
+                valid_json_rows += 1
+                elements = parsed.get("elements")
+                if isinstance(elements, list) and any(isinstance(element, str) for element in elements):
+                    string_list_rows += 1
+            schema_valid, _schema_reason = _validate_parsing_teacher_answer(answer)
+            if schema_valid:
+                schema_valid_rows += 1
         tokens = _extract_teacher_tokens(row)
-        if tokens and decode_tokens is not None:
-            decoded = _strip_special_tokens(decode_tokens(tokens))
+        if tokens and decode_tokens is not None and isinstance(answer, str):
             try:
-                answer_canonical = _canonicalize_teacher_answer(answer)
-                decoded_canonical = _canonicalize_teacher_answer(decoded)
-            except ValueError as exc:
+                decoded = _strip_special_tokens(decode_tokens(tokens))
+                if _canonicalize_teacher_answer(answer) != _canonicalize_teacher_answer(decoded):
+                    answer_token_mismatch_rows += 1
+            except ValueError:
                 answer_token_mismatch_rows += 1
-                _add_bad_row(bad_rows, row_id, str(exc), bad_limit)
-                continue
-
-            if decoded_canonical != answer_canonical:
-                answer_token_mismatch_rows += 1
-                _add_bad_row(
-                    bad_rows,
-                    row_id,
-                    "decoded teacher_tokens do not match teacher_answer",
-                    bad_limit,
-                )
+        logits_valid, logits_reason = _validate_logits_alignment(row, "teacher_logits")
+        if logits_valid:
+            valid_teacher_logits_rows += 1
+        elif row.get("teacher_logits") is not None or require_logits:
+            if logits_reason and "length" in logits_reason:
+                answer_logits_length_mismatch_rows += 1
+        if not valid:
+            _add_bad_row(bad_rows, row_id, reason or "invalid teacher row", bad_limit)
 
     return {
         "total_rows": len(rows),
+        "valid_teacher_answer_rows": valid_teacher_answer_rows,
         "valid_json_rows": valid_json_rows,
         "schema_valid_rows": schema_valid_rows,
         "string_list_rows": string_list_rows,
         "answer_token_mismatch_rows": answer_token_mismatch_rows,
+        "valid_teacher_logits_rows": valid_teacher_logits_rows,
+        "answer_logits_length_mismatch_rows": answer_logits_length_mismatch_rows,
         "bad_rows": bad_rows,
     }
+
+
+def validate_teacher_row(
+    row: dict[str, Any],
+    *,
+    require_logits: bool,
+    decode_tokens: DecodeTokens | None = None,
+    logits_field: str = "teacher_logits",
+) -> tuple[bool, str | None]:
+    answer = row.get("teacher_answer")
+    if not isinstance(answer, str) or not answer.strip():
+        return False, "teacher_answer is missing or not a string"
+    if _parse_json_object(answer) is None:
+        return False, "teacher_answer is not valid JSON"
+    schema_valid, schema_reason = _validate_parsing_teacher_answer(answer)
+    if not schema_valid:
+        return False, schema_reason or "schema invalid"
+    tokens = _extract_teacher_tokens(row)
+    if not tokens:
+        return False, "teacher_tokens missing or empty"
+    if decode_tokens is not None:
+        try:
+            decoded = _strip_special_tokens(decode_tokens(tokens))
+            if _canonicalize_teacher_answer(answer) != _canonicalize_teacher_answer(decoded):
+                return False, "decoded teacher_tokens do not match teacher_answer"
+        except ValueError as exc:
+            return False, str(exc)
+    if require_logits:
+        valid_logits, reason = _validate_logits_alignment(row, logits_field)
+        if not valid_logits:
+            return False, reason
+    return True, None
+
+
+def _validate_logits_alignment(row: dict[str, Any], field_name: str) -> tuple[bool, str | None]:
+    payload = row.get(field_name)
+    if not isinstance(payload, dict):
+        return False, f"{field_name} missing or not a dict"
+    if not all(key in payload for key in ("indices", "values", "vocab_size", "shape")):
+        return False, f"{field_name} missing indices, values, vocab_size, or shape"
+    shape = payload.get("shape")
+    if not isinstance(shape, list) or len(shape) < 2:
+        return False, f"{field_name}.shape invalid"
+    indices = payload.get("indices")
+    values = payload.get("values")
+    if _nested_shape(indices) != _nested_shape(values) or not _nested_shape(indices):
+        return False, f"{field_name} indices/values shape mismatch"
+    tokens = _extract_teacher_tokens(row)
+    seq_len = int(shape[1])
+    if seq_len != len(tokens):
+        return False, f"{field_name} length mismatch with teacher_tokens"
+    if not bool(row.get(f"{field_name}_aligned_to_answer", False)):
+        return False, f"{field_name}_aligned_to_answer is not true"
+    return True, None
 
 
 def build_teacher_token_decoder(config) -> DecodeTokens | None:
@@ -124,6 +178,16 @@ def _extract_teacher_tokens(row: dict[str, Any]) -> list[int]:
         except (TypeError, ValueError):
             return []
     return extracted
+
+
+def _nested_shape(value: Any) -> tuple[int, ...]:
+    if not isinstance(value, list) or not value:
+        return ()
+    first_shape = _nested_shape(value[0])
+    for item in value[1:]:
+        if _nested_shape(item) != first_shape:
+            return ()
+    return (len(value), *first_shape)
 
 
 def _add_bad_row(

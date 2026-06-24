@@ -112,7 +112,8 @@ def test_switch_kd_training_raises_if_teacher_logits_rows_zero(tmp_path: Path):
             "teacher_answer": "answer",
             "teacher_tokens": [1, 2],
             "switch_logits": _valid_logits(4),
-            "switch_logits_prompt_len": 2,
+            "switch_logits_prompt_len": 0,
+            "switch_logits_aligned_to_answer": True,
         }
     ]
 
@@ -127,7 +128,8 @@ def test_switch_kd_training_raises_if_switch_logits_rows_zero(tmp_path: Path):
             "teacher_answer": "answer",
             "teacher_tokens": [1, 2],
             "teacher_logits": _valid_logits(2),
-            "teacher_logits_prompt_len": 20,
+            "teacher_logits_prompt_len": 0,
+            "teacher_logits_aligned_to_answer": True,
         }
     ]
 
@@ -142,13 +144,14 @@ def test_switch_kd_training_raises_if_prompt_len_alignment_invalid(tmp_path: Pat
             "teacher_answer": "answer",
             "teacher_tokens": [1, 2],
             "teacher_logits": _valid_logits(2),
-            "teacher_logits_prompt_len": 20,
+            "teacher_logits_prompt_len": 0,
+            "teacher_logits_aligned_to_answer": True,
             "switch_logits": _valid_logits(10),
             "switch_logits_prompt_len": 3,
         }
     ]
 
-    with pytest.raises(ValueError, match="prompt_len alignment"):
+    with pytest.raises(ValueError, match="not marked as answer-only"):
         _validate_switch_kd_training_rows(_switch_kd_config(tmp_path), rows)
 
 
@@ -159,9 +162,11 @@ def test_switch_kd_training_valid_logits_pass_dataset_validation(tmp_path: Path)
             "teacher_answer": "answer",
             "teacher_tokens": [1, 2, 3],
             "teacher_logits": _valid_logits(3),
-            "teacher_logits_prompt_len": 20,
-            "switch_logits": _valid_logits(8),
-            "switch_logits_prompt_len": 5,
+            "teacher_logits_prompt_len": 0,
+            "teacher_logits_aligned_to_answer": True,
+            "switch_logits": _valid_logits(3),
+            "switch_logits_prompt_len": 0,
+            "switch_logits_aligned_to_answer": True,
         }
     ]
 
