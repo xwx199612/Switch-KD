@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 import sys
 
@@ -10,7 +12,7 @@ SCRIPT = Path("scripts/run_parallel_switch_kd_precompute_4gpu.sh")
 BASE_CONFIG = Path("configs/parsing_switch_kd.yaml")
 DDP_CONFIG = Path("configs/parsing_switch_kd_ddp.yaml")
 GENERATED_CONFIGS = [
-    Path(f"configs/generated/parsing_switch_kd_label_gpu{gpu}.yaml")
+    Path(f"configs/generated/parsing_switch_kd_teacher_precompute_gpu{gpu}.yaml")
     for gpu in range(4)
 ] + [
     Path(f"configs/generated/parsing_switch_kd_switch_logits_gpu{gpu}.yaml")
@@ -83,11 +85,84 @@ def test_parallel_precompute_script_validates_teacher_logits_before_merge():
 def test_parallel_precompute_script_removes_teacher_logits_stage_from_main_workflow():
     text = SCRIPT.read_text(encoding="utf-8")
 
-    assert 'run_stage "label"' in text
+    assert 'run_stage "teacher-precompute"' in text
     assert 'run_stage "switch-logits"' in text
     assert 'run_stage "teacher-logits"' not in text
-    assert 'label|teacher-precompute|switch-logits|all)' in text
-    assert "label|teacher-logits|switch-logits|all" not in text
+    assert 'teacher-precompute|switch-logits|all)' in text
+    assert "label|teacher-precompute|switch-logits|all" not in text
+    assert "run_parallel_switch_kd_precompute_4gpu.sh label" not in text
+
+
+def test_parallel_precompute_script_rejects_label_stage():
+    text = SCRIPT.read_text(encoding="utf-8")
+
+    assert "label" not in text.split("case \"${REQUESTED_STAGE}\" in", 1)[1].split(";;", 1)[0]
+
+
+def test_parallel_precompute_script_fails_on_label_stage():
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "label"],
+        cwd=Path("."),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "ERROR: unsupported stage: label" in (result.stdout + result.stderr)
+
+
+def test_parallel_precompute_script_dry_run_all_runs_teacher_precompute_then_switch_logits(tmp_path):
+    repo_root = Path(".").resolve()
+    home = tmp_path / "home"
+    conda_dir = home / "miniforge3" / "etc" / "profile.d"
+    conda_dir.mkdir(parents=True)
+    (conda_dir / "conda.sh").write_text(
+        "conda() { :; }\n",
+        encoding="utf-8",
+    )
+
+    project_dir = home / "vlm_distill"
+    project_dir.mkdir(parents=True)
+    (project_dir / "Switch-KD").symlink_to(repo_root, target_is_directory=True)
+
+    manifest_path = repo_root / "outputs" / "switch-kd" / "parsing_manifest.jsonl"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        "\n".join(
+            [
+                '{"id":"0","query":"sample 0"}',
+                '{"id":"1","query":"sample 1"}',
+                '{"id":"2","query":"sample 2"}',
+                '{"id":"3","query":"sample 3"}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    result = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "run_parallel_switch_kd_precompute_4gpu.sh"), "--dry-run", "all"],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    try:
+        assert result.returncode == 0, result.stdout + result.stderr
+        output = result.stdout + result.stderr
+        first = output.index("python -m vlm_distill.cli teacher-precompute")
+        second = output.index("python -m vlm_distill.cli switch-logits")
+        assert first < second
+    finally:
+        manifest_path.unlink(missing_ok=True)
+        for gpu in range(4):
+            shard_path = repo_root / "outputs" / "switch-kd" / "shards" / f"parsing_manifest_shard{gpu}.jsonl"
+            shard_path.unlink(missing_ok=True)
 
 
 def test_cli_label_uses_unified_teacher_precompute(monkeypatch, tmp_path):

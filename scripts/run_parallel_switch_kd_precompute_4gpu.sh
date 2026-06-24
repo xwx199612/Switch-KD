@@ -8,18 +8,16 @@ Usage:
   bash scripts/run_parallel_switch_kd_precompute_4gpu.sh [--dry-run] [--clean-outputs] <stage>
 
 Stages:
-  label              unified teacher precompute
-  teacher-precompute unified teacher precompute alias
+  teacher-precompute unified teacher precompute
   switch-logits
   all
 
 Examples:
-  bash scripts/run_parallel_switch_kd_precompute_4gpu.sh label
   bash scripts/run_parallel_switch_kd_precompute_4gpu.sh teacher-precompute
   bash scripts/run_parallel_switch_kd_precompute_4gpu.sh switch-logits
   bash scripts/run_parallel_switch_kd_precompute_4gpu.sh all
   bash scripts/run_parallel_switch_kd_precompute_4gpu.sh --dry-run all
-  CLEAN_OUTPUTS=1 bash scripts/run_parallel_switch_kd_precompute_4gpu.sh label
+  CLEAN_OUTPUTS=1 bash scripts/run_parallel_switch_kd_precompute_4gpu.sh teacher-precompute
 
 What it does:
   - Changes directory to ~/vlm_distill/Switch-KD
@@ -75,7 +73,7 @@ else
   exit 1
 fi
 case "${REQUESTED_STAGE}" in
-  label|teacher-precompute|switch-logits|all)
+  teacher-precompute|switch-logits|all)
     ;;
   *)
     echo "ERROR: unsupported stage: ${REQUESTED_STAGE}"
@@ -171,7 +169,7 @@ clean_stage_outputs() {
   echo "=== clean stale ${stage} shard outputs ==="
   for gpu_index in 0 1 2 3; do
     local shard_path=""
-    if [[ "${stage}" == "label" || "${stage}" == "teacher-precompute" ]]; then
+    if [[ "${stage}" == "teacher-precompute" ]]; then
       shard_path="${SHARD_DIR}/parsing_teacher_labels_shard${gpu_index}.jsonl"
     elif [[ "${stage}" == "switch-logits" ]]; then
       shard_path="${SHARD_DIR}/parsing_switch_logits_shard${gpu_index}.jsonl"
@@ -427,7 +425,7 @@ stage = os.environ["STAGE_NAME"]
 shard_dir = Path("outputs/switch-kd/shards")
 manifest_path = Path("outputs/switch-kd/parsing_manifest.jsonl")
 
-if stage in {"label", "teacher-precompute"}:
+if stage == "teacher-precompute":
     shard_template = "parsing_teacher_labels_shard{gpu}.jsonl"
     final_output_path = Path("outputs/switch-kd/parsing_teacher_labels_480p_8bit.jsonl")
 elif stage == "switch-logits":
@@ -482,10 +480,10 @@ for shard_index in range(4):
                     f"ERROR: duplicate id detected during {stage} merge: {sample_id_str}"
                 )
             seen_ids.add(sample_id_str)
-            if stage in {"label", "teacher-precompute"} and is_valid_logits_payload(row.get("teacher_logits")):
+            if stage == "teacher-precompute" and is_valid_logits_payload(row.get("teacher_logits")):
                 valid_logits_by_shard[shard_index] = valid_logits_by_shard.get(shard_index, 0) + 1
             rows.append(row)
-    if stage in {"label", "teacher-precompute"} and teacher_logits_enabled() and valid_logits_by_shard.get(shard_index, 0) <= 0:
+    if stage == "teacher-precompute" and teacher_logits_enabled() and valid_logits_by_shard.get(shard_index, 0) <= 0:
         raise SystemExit(
             f"ERROR: unified teacher precompute shard has zero valid teacher_logits rows: {shard_path} stage={stage}"
         )
@@ -511,7 +509,7 @@ if expected_count and len(rows) != expected_count:
         f"ERROR: merged row count mismatch for {stage}: merged={len(rows)} expected={expected_count}"
     )
 
-if stage in {"label", "teacher-precompute"} and teacher_logits_enabled():
+if stage == "teacher-precompute" and teacher_logits_enabled():
     logits_rows = [row for row in rows if is_valid_logits_payload(row.get("teacher_logits"))]
     if len(seen_ids) != len(rows):
         raise SystemExit("ERROR: merged teacher logits ids are not unique")
@@ -535,13 +533,13 @@ with final_output_path.open("w", encoding="utf-8") as handle:
 print(f"Merged rows: {len(rows)}")
 print(f"Expected rows: {expected_count}")
 print(f"Merged output: {final_output_path}")
-if stage in {"label", "teacher-precompute"} and teacher_logits_enabled():
+if stage == "teacher-precompute" and teacher_logits_enabled():
     print(f"Validated teacher_logits rows: {len(rows)}")
 PY
 }
 
 run_all() {
-  run_stage "label"
+  run_stage "teacher-precompute"
   run_stage "switch-logits"
 }
 
