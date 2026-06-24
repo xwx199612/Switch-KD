@@ -64,6 +64,9 @@ training:
 
 
 distillation:
+  method: switch_kd
+  confidence_weighting: true
+  min_teacher_confidence: 0.35
   prompt_template: |
     You are an Android TV GUI parsing assistant.
 
