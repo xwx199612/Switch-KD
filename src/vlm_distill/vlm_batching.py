@@ -63,9 +63,9 @@ class VlmDataCollator:    """Pad multimodal features; keep cached logits as per-
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
         import torch
-
-        logits_payload = {field: [feature.pop(field, None) for feature in features] for field in self._LOGITS_FIELDS}
+        
         logits_payload = {field: [feature.pop(field, None) for feature in features] for field in self.logits_fields}
+        
         prompt_token_lens = [int(feature.pop("prompt_token_len", 0)) for feature in features]
         metadata: dict[str, Any] = {}
         for feature in features:
