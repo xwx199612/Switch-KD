@@ -9,17 +9,15 @@ Usage:
 
 Stages:
   label              unified teacher precompute
-  teacher-logits     compatibility fill for missing teacher logits
   switch-logits
   all
 
 Examples:
   bash scripts/run_parallel_switch_kd_precompute_4gpu.sh label
-  bash scripts/run_parallel_switch_kd_precompute_4gpu.sh teacher-logits
   bash scripts/run_parallel_switch_kd_precompute_4gpu.sh switch-logits
   bash scripts/run_parallel_switch_kd_precompute_4gpu.sh all
   bash scripts/run_parallel_switch_kd_precompute_4gpu.sh --dry-run all
-  CLEAN_OUTPUTS=1 bash scripts/run_parallel_switch_kd_precompute_4gpu.sh teacher-logits
+  CLEAN_OUTPUTS=1 bash scripts/run_parallel_switch_kd_precompute_4gpu.sh label
 
 What it does:
   - Changes directory to ~/vlm_distill/Switch-KD
@@ -33,6 +31,7 @@ Notes:
   - Resume behavior is preserved per shard because every worker writes to its own shard file.
   - Existing shard outputs and logs are preserved for resume/debugging unless CLEAN_OUTPUTS=1 or --clean-outputs is set.
   - `--dry-run` writes shard manifests and generated configs, prints planned commands, and skips worker launch/merge.
+  - teacher-logits is deprecated and is not part of the main Switch-KD workflow.
 EOF
 }
 
@@ -75,7 +74,7 @@ else
   exit 1
 fi
 case "${REQUESTED_STAGE}" in
-  label|teacher-logits|switch-logits|all)
+  label|switch-logits|all)
     ;;
   *)
     echo "ERROR: unsupported stage: ${REQUESTED_STAGE}"
@@ -106,7 +105,6 @@ SHARD_DIR="outputs/switch-kd/shards"
 GENERATED_CONFIG_DIR="configs/generated"
 
 FINAL_LABEL_PATH="outputs/switch-kd/parsing_teacher_labels_480p_8bit.jsonl"
-FINAL_TEACHER_LOGITS_PATH="outputs/switch-kd/parsing_teacher_logits_480p_8bit.jsonl"
 FINAL_SWITCH_LOGITS_PATH="outputs/switch-kd/parsing_switch_logits_480p_8bit_student_4bit.jsonl"
 
 mkdir -p "${SHARD_DIR}" "${GENERATED_CONFIG_DIR}"
@@ -169,22 +167,17 @@ clean_stage_outputs() {
   if [[ "${CLEAN_OUTPUTS}" != "1" ]]; then
     return 0
   fi
-  if [[ "${stage}" != "teacher-logits" && "${stage}" != "label" ]]; then
-    return 0
-  fi
-  echo "=== clean stale unified teacher shard outputs ==="
+  echo "=== clean stale ${stage} shard outputs ==="
   for gpu_index in 0 1 2 3; do
-    local shard_path="${SHARD_DIR}/parsing_teacher_labels_shard${gpu_index}.jsonl"
-    if [[ -f "${shard_path}" ]]; then
+    local shard_path=""
+    if [[ "${stage}" == "label" ]]; then
+      shard_path="${SHARD_DIR}/parsing_teacher_labels_shard${gpu_index}.jsonl"
+    elif [[ "${stage}" == "switch-logits" ]]; then
+      shard_path="${SHARD_DIR}/parsing_switch_logits_shard${gpu_index}.jsonl"
+    fi
+    if [[ -n "${shard_path}" && -f "${shard_path}" ]]; then
       echo "Removing ${shard_path}"
       rm -f "${shard_path}"
-    fi
-    if [[ "${stage}" == "teacher-logits" ]]; then
-      local logits_shard_path="${SHARD_DIR}/parsing_teacher_logits_shard${gpu_index}.jsonl"
-      if [[ -f "${logits_shard_path}" ]]; then
-        echo "Removing ${logits_shard_path}"
-        rm -f "${logits_shard_path}"
-      fi
     fi
   done
 }
@@ -208,6 +201,16 @@ shard_dir = Path("outputs/switch-kd/shards")
 with base_config_path.open("r", encoding="utf-8") as handle:
     base_config = yaml.safe_load(handle)
 
+distillation = base_config.get("distillation", {})
+if distillation.get("method") != "switch_kd":
+    raise SystemExit(
+        f"ERROR: base config must use distillation.method=switch_kd: {base_config_path}"
+    )
+if distillation.get("teacher_logits") is not True:
+    raise SystemExit(
+        f"ERROR: base config must use distillation.teacher_logits=true: {base_config_path}"
+    )
+
 for gpu_index in range(4):
     config_data = yaml.safe_load(yaml.safe_dump(base_config, sort_keys=False))
     config_data["data"]["manifest_path"] = str(
@@ -216,15 +219,7 @@ for gpu_index in range(4):
     config_data["data"]["label_path"] = str(
         shard_dir / f"parsing_teacher_labels_shard{gpu_index}.jsonl"
     )
-    config_data.setdefault("distillation", {}).setdefault("teacher_logits", True)
-    if stage in {"label", "teacher-logits", "switch-logits"}:
-        config_data["data"]["teacher_logits_path"] = str(
-            shard_dir / (
-                f"parsing_teacher_labels_shard{gpu_index}.jsonl"
-                if stage == "label"
-                else f"parsing_teacher_logits_shard{gpu_index}.jsonl"
-            )
-        )
+    config_data.get("data", {}).pop("teacher_logits_path", None)
     if stage == "switch-logits":
         config_data["data"]["switch_logits_path"] = str(
             shard_dir / f"parsing_switch_logits_shard{gpu_index}.jsonl"
@@ -236,16 +231,18 @@ for gpu_index in range(4):
     with output_path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(config_data, handle, sort_keys=False, allow_unicode=True)
     print(f"[generate-config] {output_path}")
-    if stage in {"label", "teacher-logits"}:
-        print(
-            "[generate-config-detail] "
-            f"gpu={gpu_index} distillation.method={config_data.get('distillation', {}).get('method')} "
-            f"distillation.teacher_logits={config_data.get('distillation', {}).get('teacher_logits')} "
-            f"label_path={config_data.get('data', {}).get('label_path')} "
-            f"teacher_logits_path={config_data.get('data', {}).get('teacher_logits_path')} "
-            f"teacher_logits_field={config_data.get('distillation', {}).get('teacher_logits_field')} "
-            f"unified_teacher_output={stage == 'label'}"
-        )
+    print(
+        "[generate-config-detail] "
+        f"base_config={base_config_path} "
+        f"generated_config={output_path} "
+        f"gpu={gpu_index} distillation.method={config_data.get('distillation', {}).get('method')} "
+        f"distillation.teacher_logits={config_data.get('distillation', {}).get('teacher_logits')} "
+        f"label_path={config_data.get('data', {}).get('label_path')} "
+        f"teacher_logits_path=deprecated "
+        f"teacher_logits_field={config_data.get('distillation', {}).get('teacher_logits_field')} "
+        f"unified_teacher_precompute_enabled=true "
+        f"canonical_teacher_output_path=label_path"
+    )
 PY
 }
 
@@ -261,16 +258,10 @@ stage = os.environ["STAGE_NAME"]
 shard_dir = Path("outputs/switch-kd/shards")
 
 required: list[Path] = []
-if stage == "teacher-logits":
-    required = [
-        shard_dir / f"parsing_teacher_labels_shard{gpu_index}.jsonl"
-        for gpu_index in range(4)
-    ]
-elif stage == "switch-logits":
+if stage == "switch-logits":
     required = []
     for gpu_index in range(4):
         required.append(shard_dir / f"parsing_teacher_labels_shard{gpu_index}.jsonl")
-        required.append(shard_dir / f"parsing_teacher_logits_shard{gpu_index}.jsonl")
 
 missing = [path for path in required if not path.exists()]
 if missing:
@@ -300,14 +291,15 @@ distillation = config.get("distillation", {})
 data = config.get("data", {})
 teacher_logits = bool(distillation.get("teacher_logits", True))
 label_path = data.get("label_path")
-teacher_logits_path = data.get("teacher_logits_path") or label_path
-mode = "unified" if label_path == teacher_logits_path else "duplicated"
+base_config_path = Path("configs/parsing_switch_kd.yaml")
+mode = "unified"
+print(f"base config path: {base_config_path}")
 print(f"method: {distillation.get('method')}")
 print(f"teacher_logits: {str(teacher_logits).lower()}")
-print(f"label_path: {label_path}")
-print(f"teacher_logits_path: {teacher_logits_path}")
+print(f"canonical teacher output path is label_path: {label_path}")
 print("unified teacher precompute enabled")
 print(f"teacher output mode: {mode}")
+print("teacher-logits stage is removed/deprecated")
 PY
   echo "=== current working directory ==="
   pwd
@@ -352,16 +344,10 @@ PY
     echo "gpu=${gpu_index}"
     echo "  manifest=${SHARD_DIR}/parsing_manifest_shard${gpu_index}.jsonl"
     echo "  config=${GENERATED_CONFIG_DIR}/parsing_switch_kd_${stage_slug}_gpu${gpu_index}.yaml"
-    echo "  label=${SHARD_DIR}/parsing_teacher_labels_shard${gpu_index}.jsonl"
-    if [[ "${stage}" == "label" ]]; then
-      echo "  teacher_logits=${SHARD_DIR}/parsing_teacher_labels_shard${gpu_index}.jsonl"
-      echo "  unified teacher precompute enabled"
-    elif [[ "${stage}" == "teacher-logits" || "${stage}" == "switch-logits" ]]; then
-      echo "  teacher_logits=${SHARD_DIR}/parsing_teacher_logits_shard${gpu_index}.jsonl"
-      if [[ -f "${SHARD_DIR}/parsing_teacher_logits_shard${gpu_index}.jsonl" ]]; then
-        echo "  WARNING: existing teacher_logits shard output will be resumed unless invalid rows are recomputed or CLEAN_OUTPUTS=1 is set"
-      fi
-    fi
+    echo "  label_path=${SHARD_DIR}/parsing_teacher_labels_shard${gpu_index}.jsonl"
+    echo "  canonical_teacher_output_path=label_path"
+    echo "  unified teacher precompute enabled"
+    echo "  teacher_logits_path=deprecated"
     if [[ "${stage}" == "switch-logits" ]]; then
       echo "  switch_logits=${SHARD_DIR}/parsing_switch_logits_shard${gpu_index}.jsonl"
       echo "  student_visual_cache_dir=${SHARD_DIR}/student_visual_cache_shard${gpu_index}"
@@ -444,9 +430,6 @@ manifest_path = Path("outputs/switch-kd/parsing_manifest.jsonl")
 if stage == "label":
     shard_template = "parsing_teacher_labels_shard{gpu}.jsonl"
     final_output_path = Path("outputs/switch-kd/parsing_teacher_labels_480p_8bit.jsonl")
-elif stage == "teacher-logits":
-    shard_template = "parsing_teacher_logits_shard{gpu}.jsonl"
-    final_output_path = Path("outputs/switch-kd/parsing_teacher_logits_480p_8bit.jsonl")
 elif stage == "switch-logits":
     shard_template = "parsing_switch_logits_shard{gpu}.jsonl"
     final_output_path = Path("outputs/switch-kd/parsing_switch_logits_480p_8bit_student_4bit.jsonl")
@@ -499,12 +482,12 @@ for shard_index in range(4):
                     f"ERROR: duplicate id detected during {stage} merge: {sample_id_str}"
                 )
             seen_ids.add(sample_id_str)
-            if stage in {"label", "teacher-logits"} and is_valid_logits_payload(row.get("teacher_logits")):
+            if stage == "label" and is_valid_logits_payload(row.get("teacher_logits")):
                 valid_logits_by_shard[shard_index] = valid_logits_by_shard.get(shard_index, 0) + 1
             rows.append(row)
-    if stage in {"label", "teacher-logits"} and teacher_logits_enabled() and valid_logits_by_shard.get(shard_index, 0) <= 0:
+    if stage == "label" and teacher_logits_enabled() and valid_logits_by_shard.get(shard_index, 0) <= 0:
         raise SystemExit(
-            f"ERROR: teacher-logits shard has zero valid teacher_logits rows: {shard_path} stage={stage}"
+            f"ERROR: unified teacher precompute shard has zero valid teacher_logits rows: {shard_path} stage={stage}"
         )
 
 def sort_key(row: dict) -> tuple[int, object]:
@@ -528,7 +511,7 @@ if expected_count and len(rows) != expected_count:
         f"ERROR: merged row count mismatch for {stage}: merged={len(rows)} expected={expected_count}"
     )
 
-if stage in {"label", "teacher-logits"} and teacher_logits_enabled():
+if stage == "label" and teacher_logits_enabled():
     logits_rows = [row for row in rows if is_valid_logits_payload(row.get("teacher_logits"))]
     if len(seen_ids) != len(rows):
         raise SystemExit("ERROR: merged teacher logits ids are not unique")
@@ -552,14 +535,13 @@ with final_output_path.open("w", encoding="utf-8") as handle:
 print(f"Merged rows: {len(rows)}")
 print(f"Expected rows: {expected_count}")
 print(f"Merged output: {final_output_path}")
-if stage in {"label", "teacher-logits"} and teacher_logits_enabled():
+if stage == "label" and teacher_logits_enabled():
     print(f"Validated teacher_logits rows: {len(rows)}")
 PY
 }
 
 run_all() {
   run_stage "label"
-  run_stage "teacher-logits"
   run_stage "switch-logits"
 }
 

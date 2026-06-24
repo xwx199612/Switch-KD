@@ -353,7 +353,7 @@ def resolve_prediction_path(data: DataConfig) -> Path:
 
 
 def resolve_teacher_logits_path(data: DataConfig) -> Path:
-    return data.teacher_logits_path or data.distill_path
+    return data.teacher_logits_path or resolve_label_path(data)
 
 
 def resolve_switch_logits_path(data: DataConfig) -> Path:

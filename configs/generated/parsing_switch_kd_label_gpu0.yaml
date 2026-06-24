@@ -8,7 +8,6 @@ data:
   manifest_path: outputs/switch-kd/shards/parsing_manifest_shard0.jsonl
   distill_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}.jsonl
   label_path: outputs/switch-kd/shards/parsing_teacher_labels_shard0.jsonl
-  teacher_logits_path: outputs/switch-kd/shards/parsing_teacher_labels_shard0.jsonl
   switch_logits_path: outputs/switch-kd/{task_name}_switch_logits_{response_profile}.jsonl
   eval_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}.jsonl
   image_dir: /home/phison/vlm_distill/TV_data

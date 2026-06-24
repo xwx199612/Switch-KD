@@ -160,9 +160,9 @@ vlm-distill label \
 `label` now runs unified teacher precompute. By default
 `distillation.teacher_logits: true`, so Switch-KD configs write
 `teacher_answer`, `teacher_tokens`, and answer-only `teacher_logits` from the
-same final normalized answer. If `data.teacher_logits_path` differs from
-`data.label_path`, unified rows are mirrored for backward compatibility; new
-code should treat `data.label_path` as the primary teacher precompute output.
+same final normalized answer to `data.label_path`. `data.label_path` is the
+canonical teacher precompute output. `data.teacher_logits_path` is deprecated
+and should only appear in legacy configs that need a compatibility backfill.
 
 Use `vlm-distill teacher-precompute --config ...` for the same stage with an
 explicit name.
@@ -180,16 +180,17 @@ This reads `data.manifest_path` and writes predictions to `data.prediction_path`
 
 ---
 
-## Generate Teacher Logits
+## Legacy Teacher Logits Backfill
 
 ```powershell
 vlm-distill teacher-logits \
   --config configs/switch_kd_4060ti.yaml
 ```
 
-This command is a compatibility filler. It reads existing valid teacher rows
-and fills missing `teacher_logits` with teacher-forcing forward; it does not
-generate a new `teacher_answer`.
+This command is deprecated for the main Switch-KD workflow. Use it only to
+backfill older valid teacher label files that are missing `teacher_logits`.
+New Switch-KD runs should use `label` or `teacher-precompute`, which generate
+`teacher_answer`, `teacher_tokens`, and `teacher_logits` together.
 
 ---
 
@@ -727,9 +728,6 @@ vlm-distill label \
 vlm-distill validate-labels \
   --config configs/switch_kd_4060ti.yaml
 
-vlm-distill teacher-logits \
-  --config configs/switch_kd_4060ti.yaml
-
 vlm-distill switch-logits \
   --config configs/switch_kd_4060ti.yaml
 
@@ -740,9 +738,10 @@ vlm-distill evaluate \
   --config configs/switch_kd_4060ti.yaml
 ```
 
-For Switch-KD, the preferred path is `label`/`teacher-precompute` followed by
-`switch-logits`. Run `teacher-logits` only to backfill older valid teacher
-label files that are missing logits.
+For Switch-KD, use `label` or `teacher-precompute` followed by `switch-logits`
+and `train`. `distillation.teacher_logits: true` means teacher logits are
+generated during `label`/`teacher-precompute`; `teacher-logits` is a legacy
+backfill command and is not part of the main pipeline.
 
 Training objective:
 

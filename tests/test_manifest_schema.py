@@ -154,8 +154,8 @@ evaluation:
     )
 
     config = load_config(config_path)
-    assert str(config.data.distill_path) == "D:\\TV_data\\teacher_parsing\\parsing_teacher_labels_480p_8bit.jsonl"
-    assert str(config.student.output_dir) == "outputs\\parsing_response_480p_8bit_student_4bit"
+    assert config.data.distill_path.as_posix() == "D:/TV_data/teacher_parsing/parsing_teacher_labels_480p_8bit.jsonl"
+    assert config.student.output_dir.as_posix() == "outputs/parsing_response_480p_8bit_student_4bit"
     assert config.student.quantization == "4bit"
     assert config.distillation.prompt_template == "query: {query}\nAnswer:"
 
@@ -186,9 +186,9 @@ student:
     )
 
     config = load_config(config_path)
-    assert str(resolve_label_path(config.data)) == "D:\\TV_data\\teacher_parsing\\parsing_teacher_labels_480p_8bit.jsonl"
-    assert str(resolve_teacher_logits_path(config.data)) == "outputs\\parsing_teacher_logits_480p_8bit.jsonl"
-    assert str(resolve_switch_logits_path(config.data)) == "outputs\\parsing_switch_logits_480p_8bit_student_4bit.jsonl"
+    assert resolve_label_path(config.data).as_posix() == "D:/TV_data/teacher_parsing/parsing_teacher_labels_480p_8bit.jsonl"
+    assert resolve_teacher_logits_path(config.data).as_posix() == "outputs/parsing_teacher_logits_480p_8bit.jsonl"
+    assert resolve_switch_logits_path(config.data).as_posix() == "outputs/parsing_switch_logits_480p_8bit_student_4bit.jsonl"
 
 
 def test_load_config_interpolates_prediction_path(tmp_path: Path):
@@ -215,7 +215,7 @@ student:
     )
 
     config = load_config(config_path)
-    assert str(resolve_prediction_path(config.data)) == "outputs\\parsing_merged_predictions_480p_8bit.jsonl"
+    assert resolve_prediction_path(config.data).as_posix() == "outputs/parsing_merged_predictions_480p_8bit.jsonl"
     assert config.student.inference_model_path == "outputs/student/merged"
 
 
@@ -322,7 +322,7 @@ student:
     )
 
     config = load_config(config_path)
-    assert str(config.data.distill_path) == "D:\\TV_data\\teacher_parsing\\parsing_teacher_labels_480p_8bit.jsonl"
+    assert config.data.distill_path.as_posix() == "D:/TV_data/teacher_parsing/parsing_teacher_labels_480p_8bit.jsonl"
     assert config.teacher.quantization == "8bit"
 
 

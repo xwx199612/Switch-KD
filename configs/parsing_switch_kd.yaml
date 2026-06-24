@@ -12,8 +12,11 @@ options:
 data:
   manifest_path: outputs/switch-kd/{task_name}_manifest.jsonl
   distill_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}.jsonl
+  # Canonical unified teacher output. Rows contain teacher_answer,
+  # teacher_tokens, and teacher_logits when distillation.teacher_logits=true.
   label_path: outputs/switch-kd/{task_name}_teacher_labels_{label_profile}.jsonl
-  teacher_logits_path: outputs/switch-kd/{task_name}_teacher_logits_{label_profile}.jsonl
+  # Deprecated: teacher_logits_path is intentionally omitted from this workflow.
+  # Legacy configs may still set it, but Switch-KD now reads teacher logits from label_path.
   switch_logits_path: outputs/switch-kd/{task_name}_switch_logits_{response_profile}.jsonl
   eval_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}.jsonl
   image_dir: /home/phison/vlm_distill/TV_data
