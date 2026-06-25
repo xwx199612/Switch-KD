@@ -474,6 +474,12 @@ class VisualSwitchDistiller:
         inputs = self._teacher_processor(text=prompt, return_tensors="pt")
         return batch_to_device(inputs, self._teacher_text_device)
 
+    def _load_teacher_image_for_sample(self, sample: VlmSample):
+        from .stage_teacher_precompute import _load_teacher_image
+
+        image_path = self.config.data.image_root / sample.image
+        return _load_teacher_image(image_path, self.config.teacher.image_resize)
+
     def _splice_visual_embeds(self, teacher_inputs, projected_visual):
         import torch
 
@@ -744,17 +750,29 @@ class VisualSwitchDistiller:
         base_row: dict[str, Any] | None = None,
         student_inputs: dict[str, Any] | None = None,
     ):
+        from .stage_teacher_precompute import _build_teacher_forcing_inputs_and_answer_span
+
         teacher_answer = str((base_row or {}).get("teacher_answer") or "").strip()
-        full_text = _join_prompt_and_answer(prompt, teacher_answer)
+        image = self._load_teacher_image_for_sample(sample)
         projected_visual = self._apply_visual_switch_projection(student_visual, student_inputs)
-        prompt_teacher_inputs = self._teacher_text_inputs(prompt)
-        prompt_input_ids = [int(token_id) for token_id in prompt_teacher_inputs["input_ids"][0].tolist()]
+        (
+            prompt_teacher_inputs,
+            teacher_inputs,
+            prompt_input_ids,
+            full_input_ids,
+            answer_token_ids_from_forward,
+        ) = _build_teacher_forcing_inputs_and_answer_span(
+            self._teacher_processor,
+            image,
+            prompt,
+            teacher_answer,
+        )
+        prompt_teacher_inputs = batch_to_device(prompt_teacher_inputs, self._teacher_text_device)
+        teacher_inputs = batch_to_device(teacher_inputs, self._teacher_text_device)
         prompt_embeds, _ = self._splice_visual_embeds(
             teacher_inputs=prompt_teacher_inputs,
             projected_visual=projected_visual,
         )
-        teacher_inputs = self._teacher_text_inputs(full_text)
-        full_input_ids = [int(token_id) for token_id in teacher_inputs["input_ids"][0].tolist()]
         switched_embeds, attention_mask = self._splice_visual_embeds(
             teacher_inputs=teacher_inputs,
             projected_visual=projected_visual,
@@ -780,7 +798,6 @@ class VisualSwitchDistiller:
         answer_len = len(teacher_tokens)
         if answer_len <= 0:
             raise ValueError(f"Switch logits require teacher_tokens for answer-only slicing. id={sample.id}")
-        answer_token_ids_from_forward = full_input_ids[prompt_len : prompt_len + answer_len]
         if answer_token_ids_from_forward != teacher_tokens:
             raise ValueError(
                 "Switch logits token identity mismatch. "

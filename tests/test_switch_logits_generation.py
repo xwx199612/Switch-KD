@@ -7,6 +7,7 @@ import torch
 import pytest
 import yaml
 
+import vlm_distill.stage_teacher_precompute as stage_teacher_precompute
 from vlm_distill.config_schema import DataConfig, DistillationConfig, PipelineConfig, StudentConfig, TeacherConfig, load_config
 from vlm_distill.data_manifest import VlmSample
 from vlm_distill.stage_visual_switch_logits import (
@@ -115,23 +116,34 @@ def test_switch_logits_are_answer_only(tmp_path: Path):
     assert row["switch_logits"]["shape"][1] == len(row["teacher_tokens"])
 
 
-def test_switch_logits_generation_enforces_teacher_token_identity_match(tmp_path: Path):
+def test_switch_logits_generation_enforces_teacher_token_identity_match(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     config = _make_config(tmp_path)
     distiller = VisualSwitchDistiller(config)
     sample = VlmSample(id="sample-1", image="screen.jpg", task="parsing", query="hello world")
 
-    def _teacher_text_inputs(text: str):
-        token_ids = [101, 102, 103] if text == "prompt" else [101, 102, 103, 10, 11]
-        return {"input_ids": torch.tensor([token_ids], dtype=torch.long)}
+    def _build_teacher_forcing_inputs_and_answer_span(processor, image, prompt: str, teacher_answer: str):
+        del processor, image, prompt, teacher_answer
+        return (
+            {"input_ids": torch.tensor([[101, 102, 103]], dtype=torch.long)},
+            {"input_ids": torch.tensor([[101, 102, 103, 10, 11]], dtype=torch.long)},
+            [101, 102, 103],
+            [101, 102, 103, 10, 11],
+            [10, 11],
+        )
 
     def _splice_visual_embeds(*, teacher_inputs, projected_visual):
         seq_len = int(teacher_inputs["input_ids"].shape[1])
         return torch.zeros(1, seq_len, 4), torch.ones(1, seq_len, dtype=torch.long)
 
-    distiller._teacher_text_inputs = _teacher_text_inputs
+    distiller._load_teacher_image_for_sample = lambda sample: object()
     distiller._splice_visual_embeds = _splice_visual_embeds
     distiller._apply_visual_switch_projection = lambda student_visual, student_inputs: student_visual
     distiller._teacher_lm_forward = lambda *, inputs_embeds, attention_mask: torch.zeros(1, 5, 8)
+    monkeypatch.setattr(
+        stage_teacher_precompute,
+        "_build_teacher_forcing_inputs_and_answer_span",
+        _build_teacher_forcing_inputs_and_answer_span,
+    )
 
     row = distiller._generate_for_sample_from_student_visual(
         sample=sample,
@@ -146,23 +158,87 @@ def test_switch_logits_generation_enforces_teacher_token_identity_match(tmp_path
     assert row["switch_logits_debug"]["token_identity_validation_passed"] is True
 
 
-def test_switch_logits_generation_fails_on_same_length_wrong_token_ids(tmp_path: Path):
+def test_switch_logits_generation_uses_canonical_teacher_forcing_answer_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     config = _make_config(tmp_path)
     distiller = VisualSwitchDistiller(config)
     sample = VlmSample(id="sample-1", image="screen.jpg", task="parsing", query="hello world")
 
-    def _teacher_text_inputs(text: str):
-        token_ids = [101, 102, 103] if text == "prompt" else [101, 102, 103, 10, 99]
-        return {"input_ids": torch.tensor([token_ids], dtype=torch.long)}
+    def _teacher_text_inputs(_text: str):
+        raise AssertionError("_teacher_text_inputs should not be used for canonical token identity")
+
+    def _build_teacher_forcing_inputs_and_answer_span(processor, image, prompt: str, teacher_answer: str):
+        del processor, image, prompt, teacher_answer
+        return (
+            {"input_ids": torch.tensor([[101, 102, 103]], dtype=torch.long)},
+            {"input_ids": torch.tensor([[101, 102, 103, 5890, 42]], dtype=torch.long)},
+            [101, 102, 103],
+            [101, 102, 103, 5890, 42],
+            [5890, 42],
+        )
+
+    def _splice_visual_embeds(*, teacher_inputs, projected_visual):
+        seq_len = int(teacher_inputs["input_ids"].shape[1])
+        return torch.zeros(1, seq_len + 2, 4), torch.ones(1, seq_len + 2, dtype=torch.long)
+
+    distiller._teacher_text_inputs = _teacher_text_inputs
+    distiller._load_teacher_image_for_sample = lambda sample: object()
+    distiller._splice_visual_embeds = _splice_visual_embeds
+    distiller._apply_visual_switch_projection = lambda student_visual, student_inputs: student_visual
+    distiller._teacher_lm_forward = lambda *, inputs_embeds, attention_mask: torch.zeros(
+        1,
+        int(inputs_embeds.shape[1]),
+        8,
+    )
+    monkeypatch.setattr(
+        stage_teacher_precompute,
+        "_build_teacher_forcing_inputs_and_answer_span",
+        _build_teacher_forcing_inputs_and_answer_span,
+    )
+
+    row = distiller._generate_for_sample_from_student_visual(
+        sample=sample,
+        prompt="prompt",
+        student_visual=torch.zeros(1, 2, 4),
+        base_row={"teacher_tokens": [5890, 42], "teacher_answer": "{}"},
+        student_inputs={},
+    )
+
+    assert row["switch_logits_answer_token_ids"] == [5890, 42]
+    assert row["switch_logits_token_identity_match"] is True
+    assert row["switch_logits_debug"]["answer_start_logit_index"] == row["switch_logits_debug"]["prompt_embed_len"] - 1
+
+
+def test_switch_logits_generation_fails_on_same_length_wrong_token_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    config = _make_config(tmp_path)
+    distiller = VisualSwitchDistiller(config)
+    sample = VlmSample(id="sample-1", image="screen.jpg", task="parsing", query="hello world")
+
+    def _build_teacher_forcing_inputs_and_answer_span(processor, image, prompt: str, teacher_answer: str):
+        del processor, image, prompt, teacher_answer
+        return (
+            {"input_ids": torch.tensor([[101, 102, 103]], dtype=torch.long)},
+            {"input_ids": torch.tensor([[101, 102, 103, 10, 99]], dtype=torch.long)},
+            [101, 102, 103],
+            [101, 102, 103, 10, 99],
+            [10, 99],
+        )
 
     def _splice_visual_embeds(*, teacher_inputs, projected_visual):
         seq_len = int(teacher_inputs["input_ids"].shape[1])
         return torch.zeros(1, seq_len, 4), torch.ones(1, seq_len, dtype=torch.long)
 
-    distiller._teacher_text_inputs = _teacher_text_inputs
+    distiller._load_teacher_image_for_sample = lambda sample: object()
     distiller._splice_visual_embeds = _splice_visual_embeds
     distiller._apply_visual_switch_projection = lambda student_visual, student_inputs: student_visual
     distiller._teacher_lm_forward = lambda *, inputs_embeds, attention_mask: torch.zeros(1, 5, 8)
+    monkeypatch.setattr(
+        stage_teacher_precompute,
+        "_build_teacher_forcing_inputs_and_answer_span",
+        _build_teacher_forcing_inputs_and_answer_span,
+    )
 
     with pytest.raises(ValueError, match="Switch logits token identity mismatch"):
         distiller._generate_for_sample_from_student_visual(
@@ -174,14 +250,23 @@ def test_switch_logits_generation_fails_on_same_length_wrong_token_ids(tmp_path:
         )
 
 
-def test_switch_logits_generation_slices_in_embedding_space_after_visual_splice(tmp_path: Path):
+def test_switch_logits_generation_slices_in_embedding_space_after_visual_splice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     config = _make_config(tmp_path)
     distiller = VisualSwitchDistiller(config)
     sample = VlmSample(id="sample-1", image="screen.jpg", task="parsing", query="hello world")
 
-    def _teacher_text_inputs(text: str):
-        token_ids = [101, 102, 103] if text == "prompt" else [101, 102, 103, 10, 11]
-        return {"input_ids": torch.tensor([token_ids], dtype=torch.long)}
+    def _build_teacher_forcing_inputs_and_answer_span(processor, image, prompt: str, teacher_answer: str):
+        del processor, image, prompt, teacher_answer
+        return (
+            {"input_ids": torch.tensor([[101, 102, 103]], dtype=torch.long)},
+            {"input_ids": torch.tensor([[101, 102, 103, 10, 11]], dtype=torch.long)},
+            [101, 102, 103],
+            [101, 102, 103, 10, 11],
+            [10, 11],
+        )
 
     def _splice_visual_embeds(*, teacher_inputs, projected_visual):
         seq_len = int(teacher_inputs["input_ids"].shape[1])
@@ -193,10 +278,15 @@ def test_switch_logits_generation_slices_in_embedding_space_after_visual_splice(
         logits = torch.arange(seq_len, dtype=torch.float32).view(1, seq_len, 1)
         return logits
 
-    distiller._teacher_text_inputs = _teacher_text_inputs
+    distiller._load_teacher_image_for_sample = lambda sample: object()
     distiller._splice_visual_embeds = _splice_visual_embeds
     distiller._apply_visual_switch_projection = lambda student_visual, student_inputs: student_visual
     distiller._teacher_lm_forward = _teacher_lm_forward
+    monkeypatch.setattr(
+        stage_teacher_precompute,
+        "_build_teacher_forcing_inputs_and_answer_span",
+        _build_teacher_forcing_inputs_and_answer_span,
+    )
 
     row = distiller._generate_for_sample_from_student_visual(
         sample=sample,
@@ -223,24 +313,38 @@ def test_switch_logits_generation_slices_in_embedding_space_after_visual_splice(
     }
 
 
-def test_switch_logits_generation_raises_on_visual_splice_length_mismatch(tmp_path: Path):
+def test_switch_logits_generation_raises_on_visual_splice_length_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     config = _make_config(tmp_path)
     distiller = VisualSwitchDistiller(config)
     sample = VlmSample(id="sample-1", image="screen.jpg", task="parsing", query="hello world")
 
-    def _teacher_text_inputs(text: str):
-        token_ids = [101, 102, 103] if text == "prompt" else [101, 102, 103, 10, 11]
-        return {"input_ids": torch.tensor([token_ids], dtype=torch.long)}
+    def _build_teacher_forcing_inputs_and_answer_span(processor, image, prompt: str, teacher_answer: str):
+        del processor, image, prompt, teacher_answer
+        return (
+            {"input_ids": torch.tensor([[101, 102, 103]], dtype=torch.long)},
+            {"input_ids": torch.tensor([[101, 102, 103, 10, 11]], dtype=torch.long)},
+            [101, 102, 103],
+            [101, 102, 103, 10, 11],
+            [10, 11],
+        )
 
     def _splice_visual_embeds(*, teacher_inputs, projected_visual):
         seq_len = int(teacher_inputs["input_ids"].shape[1])
         embed_len = seq_len + (4 if seq_len == 3 else 5)
         return torch.zeros(1, embed_len, 4), torch.ones(1, embed_len, dtype=torch.long)
 
-    distiller._teacher_text_inputs = _teacher_text_inputs
+    distiller._load_teacher_image_for_sample = lambda sample: object()
     distiller._splice_visual_embeds = _splice_visual_embeds
     distiller._apply_visual_switch_projection = lambda student_visual, student_inputs: student_visual
     distiller._teacher_lm_forward = lambda *, inputs_embeds, attention_mask: torch.zeros(1, 9, 8)
+    monkeypatch.setattr(
+        stage_teacher_precompute,
+        "_build_teacher_forcing_inputs_and_answer_span",
+        _build_teacher_forcing_inputs_and_answer_span,
+    )
 
     with pytest.raises(ValueError, match="Switch logits visual splice length mismatch"):
         distiller._generate_for_sample_from_student_visual(
@@ -252,24 +356,38 @@ def test_switch_logits_generation_raises_on_visual_splice_length_mismatch(tmp_pa
         )
 
 
-def test_switch_logits_generation_keeps_token_identity_validation_in_input_id_space(tmp_path: Path):
+def test_switch_logits_generation_keeps_token_identity_validation_in_input_id_space(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     config = _make_config(tmp_path)
     distiller = VisualSwitchDistiller(config)
     sample = VlmSample(id="sample-1", image="screen.jpg", task="parsing", query="hello world")
 
-    def _teacher_text_inputs(text: str):
-        token_ids = [101, 102, 103] if text == "prompt" else [101, 102, 103, 10, 99]
-        return {"input_ids": torch.tensor([token_ids], dtype=torch.long)}
+    def _build_teacher_forcing_inputs_and_answer_span(processor, image, prompt: str, teacher_answer: str):
+        del processor, image, prompt, teacher_answer
+        return (
+            {"input_ids": torch.tensor([[101, 102, 103]], dtype=torch.long)},
+            {"input_ids": torch.tensor([[101, 102, 103, 10, 99]], dtype=torch.long)},
+            [101, 102, 103],
+            [101, 102, 103, 10, 99],
+            [10, 99],
+        )
 
     def _splice_visual_embeds(*, teacher_inputs, projected_visual):
         seq_len = int(teacher_inputs["input_ids"].shape[1])
         embed_len = seq_len + 4
         return torch.zeros(1, embed_len, 4), torch.ones(1, embed_len, dtype=torch.long)
 
-    distiller._teacher_text_inputs = _teacher_text_inputs
+    distiller._load_teacher_image_for_sample = lambda sample: object()
     distiller._splice_visual_embeds = _splice_visual_embeds
     distiller._apply_visual_switch_projection = lambda student_visual, student_inputs: student_visual
     distiller._teacher_lm_forward = lambda *, inputs_embeds, attention_mask: torch.zeros(1, 9, 8)
+    monkeypatch.setattr(
+        stage_teacher_precompute,
+        "_build_teacher_forcing_inputs_and_answer_span",
+        _build_teacher_forcing_inputs_and_answer_span,
+    )
 
     with pytest.raises(ValueError, match="Switch logits token identity mismatch"):
         distiller._generate_for_sample_from_student_visual(

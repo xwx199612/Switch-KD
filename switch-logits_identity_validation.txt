@@ -1,0 +1,40 @@
+python - <<'PY'
+import json
+
+p = "outputs/switch-kd/parsing_switch_logits_480p_8bit_student_4bit.jsonl"
+
+total = 0
+ok = 0
+bad = []
+
+for line in open(p, "r", encoding="utf-8"):
+    if not line.strip():
+        continue
+    row = json.loads(line)
+    total += 1
+
+    tokens = row.get("teacher_tokens") or []
+    answer_ids = row.get("switch_logits_answer_token_ids") or []
+    payload = row.get("switch_logits") or {}
+    shape = payload.get("shape") or []
+
+    checks = {
+        "identity_flag": row.get("switch_logits_token_identity_match") is True,
+        "aligned": row.get("switch_logits_aligned_to_answer") is True,
+        "tokens_equal": tokens == answer_ids,
+        "shape_len_equal": len(shape) >= 2 and int(shape[1]) == len(tokens),
+    }
+
+    if all(checks.values()):
+        ok += 1
+    else:
+        bad.append((row.get("id"), checks, len(tokens), len(answer_ids), shape))
+        if len(bad) >= 5:
+            break
+
+print("total =", total)
+print("ok =", ok)
+print("bad_sample_count =", len(bad))
+for item in bad:
+    print(item)
+PY
