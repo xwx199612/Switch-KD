@@ -27,6 +27,7 @@ from .device_utils import (
 )
 from .model_loading import apply_attn_implementation, resolve_model_path
 from .stage_visual_switch_logits import _compact_adaptive_sequence_logits
+from .token_alignment import build_token_mismatch_details
 
 
 class TeacherBackend(Protocol):
@@ -1299,10 +1300,12 @@ class TeacherLogitsGenerator:
                     scores=scores,
                     mode=mode,
                     prompt_len=0,
+                    answer_token_ids=teacher_tokens,
                     source="generation_scores",
                 )
             else:
                 logits_payload = compute_teacher_forced_answer_logits(
+                    sample_id=sample.id,
                     image=image,
                     prompt=prompt,
                     teacher_answer=normalized_answer,
@@ -1380,6 +1383,7 @@ class TeacherLogitsGenerator:
         scores: list[Any],
         mode: DistillationMode,
         prompt_len: int,
+        answer_token_ids: list[int],
         source: str = "generation_scores",
     ) -> dict[str, Any]:
         field = self.config.distillation.teacher_logits_field
@@ -1398,6 +1402,8 @@ class TeacherLogitsGenerator:
             f"{field}_prompt_len": prompt_len,
             f"{field}_vocab_size": compact["vocab_size"],
             f"{field}_aligned_to_answer": True,
+            f"{field}_token_identity_match": True,
+            f"{field}_answer_token_ids": [int(token_id) for token_id in answer_token_ids],
             f"{field}_source": source,
             f"{field}_temperature": float(self.config.distillation.kd_temperature),
         }
@@ -1475,6 +1481,8 @@ class TeacherLogitsGenerator:
                 f"{field}_prompt_len": 0,
                 f"{field}_vocab_size": vocab_size,
                 f"{field}_aligned_to_answer": True,
+                f"{field}_token_identity_match": True,
+                f"{field}_answer_token_ids": [int(token_id) for token_id in teacher_tokens],
                 f"{field}_source": "teacher_forcing_forward",
                 f"{field}_temperature": float(self.config.distillation.kd_temperature),
             }
@@ -1577,12 +1585,13 @@ def _generate_label_with_optional_mock_logits(
         "distillation_mode": _resolve_teacher_logits_mode(config),
     }
     if include_logits:
-        row.update(_mock_answer_only_logits_payload(config, len(tokens), source="teacher_forcing_forward"))
+        row.update(_mock_answer_only_logits_payload(config, tokens, source="teacher_forcing_forward"))
     return row
 
 
-def _mock_answer_only_logits_payload(config: PipelineConfig, answer_len: int, *, source: str) -> dict[str, Any]:
+def _mock_answer_only_logits_payload(config: PipelineConfig, teacher_tokens: list[int], *, source: str) -> dict[str, Any]:
     field = config.distillation.teacher_logits_field
+    answer_len = len(teacher_tokens)
     vocab_size = 16
     max_k = min(vocab_size, max(1, min(int(config.distillation.dbild_top_k), 8)))
     indices = []
@@ -1610,6 +1619,8 @@ def _mock_answer_only_logits_payload(config: PipelineConfig, answer_len: int, *,
         f"{field}_prompt_len": 0,
         f"{field}_vocab_size": vocab_size,
         f"{field}_aligned_to_answer": True,
+        f"{field}_token_identity_match": True,
+        f"{field}_answer_token_ids": [int(token_id) for token_id in teacher_tokens],
         f"{field}_source": source,
         f"{field}_temperature": float(config.distillation.kd_temperature),
     }
@@ -1617,6 +1628,7 @@ def _mock_answer_only_logits_payload(config: PipelineConfig, answer_len: int, *,
 
 def compute_teacher_forced_answer_logits(
     *,
+    sample_id: str | None = None,
     image,
     prompt: str,
     teacher_answer: str,
@@ -1633,11 +1645,19 @@ def compute_teacher_forced_answer_logits(
         image,
         _join_prompt_and_answer(prompt, teacher_answer),
     )
+    prompt_input_ids = [int(token_id) for token_id in prompt_inputs["input_ids"][0].tolist()]
+    full_input_ids = [int(token_id) for token_id in full_inputs["input_ids"][0].tolist()]
     input_device = select_model_input_device(model, label="Teacher forcing")
     prompt_inputs = batch_to_device(prompt_inputs, input_device)
     full_inputs = batch_to_device(full_inputs, input_device)
-    prefix_len = int(prompt_inputs["input_ids"].shape[1])
+    prefix_len = len(prompt_input_ids)
     answer_len = len(teacher_tokens)
+    answer_token_ids = full_input_ids[prefix_len : prefix_len + answer_len]
+    if answer_token_ids != teacher_tokens:
+        raise ValueError(
+            "Teacher logits token identity mismatch. "
+            f"{build_token_mismatch_details(expected=teacher_tokens, actual=answer_token_ids, actual_field_name='actual_answer_token_id', extra={'id': sample_id})}"
+        )
     with torch.no_grad():
         outputs = model(**full_inputs)
     full_logits = outputs.logits
@@ -1662,6 +1682,8 @@ def compute_teacher_forced_answer_logits(
         f"{field}_prompt_len": 0,
         f"{field}_vocab_size": int(compact["vocab_size"]),
         f"{field}_aligned_to_answer": True,
+        f"{field}_token_identity_match": True,
+        f"{field}_answer_token_ids": answer_token_ids,
         f"{field}_source": "teacher_forcing_forward",
         f"{field}_temperature": float(config.distillation.kd_temperature),
     }

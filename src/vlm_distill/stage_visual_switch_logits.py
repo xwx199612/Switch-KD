@@ -26,6 +26,7 @@ from .device_utils import (
     select_model_input_device,
 )
 from .model_loading import resolve_attn_implementation, resolve_model_path
+from .token_alignment import build_token_mismatch_details, coerce_token_ids
 
 
 INACTIVE_LOGIT = -1.0e4
@@ -360,6 +361,8 @@ class VisualSwitchDistiller:
             f"{field}_prompt_len": 0,
             f"{field}_vocab_size": vocab_size,
             f"{field}_aligned_to_answer": True,
+            f"{field}_token_identity_match": True,
+            f"{field}_answer_token_ids": [int(token_id) for token_id in teacher_tokens],
             f"{field}_temperature": float(self.config.distillation.kd_temperature),
             "teacher_tokens": teacher_tokens,
         }
@@ -570,6 +573,7 @@ class VisualSwitchDistiller:
                 f"={teacher_projector_input_dim}."
             )
 
+        student_visual = _move_visual_to_module(student_visual, teacher_projector)
         projector_kwargs = _build_visual_feature_forward_kwargs(teacher_projector, student_visual)
         projected = teacher_projector(**projector_kwargs)
         projected_tensor = _first_tensor(projected)
@@ -627,6 +631,7 @@ class VisualSwitchDistiller:
                 f"={student_dim} does not match teacher projector/merger input dim "
                 f"={teacher_projector_input_dim}."
             )
+        student_visual = _move_visual_to_module(student_visual, teacher_projector)
         projector_kwargs = _build_visual_feature_forward_kwargs(teacher_projector, student_visual)
         projected = teacher_projector(**projector_kwargs)
         projected_tensor = _first_tensor(projected)
@@ -743,11 +748,13 @@ class VisualSwitchDistiller:
         full_text = _join_prompt_and_answer(prompt, teacher_answer)
         projected_visual = self._apply_visual_switch_projection(student_visual, student_inputs)
         prompt_teacher_inputs = self._teacher_text_inputs(prompt)
+        prompt_input_ids = [int(token_id) for token_id in prompt_teacher_inputs["input_ids"][0].tolist()]
         prompt_embeds, _ = self._splice_visual_embeds(
             teacher_inputs=prompt_teacher_inputs,
             projected_visual=projected_visual,
         )
         teacher_inputs = self._teacher_text_inputs(full_text)
+        full_input_ids = [int(token_id) for token_id in teacher_inputs["input_ids"][0].tolist()]
         switched_embeds, attention_mask = self._splice_visual_embeds(
             teacher_inputs=teacher_inputs,
             projected_visual=projected_visual,
@@ -756,13 +763,24 @@ class VisualSwitchDistiller:
             inputs_embeds=switched_embeds,
             attention_mask=attention_mask,
         )
-        prompt_len = int(prompt_embeds.shape[1])
+        prompt_len = len(prompt_input_ids)
+        prompt_embed_len = int(prompt_embeds.shape[1])
+        if prompt_embed_len != prompt_len:
+            raise ValueError(
+                "Switch logits prompt length sanity check failed. "
+                f"id={sample.id}, image={sample.image}, prompt_len={prompt_len}, prompt_embed_len={prompt_embed_len}"
+            )
         teacher_tokens = _extract_teacher_tokens(base_row or {})
-        if teacher_tokens:
-            prompt_len = int(switch_logits.shape[1]) - len(teacher_tokens)
         answer_len = len(teacher_tokens)
         if answer_len <= 0:
             raise ValueError(f"Switch logits require teacher_tokens for answer-only slicing. id={sample.id}")
+        answer_token_ids_from_forward = full_input_ids[prompt_len : prompt_len + answer_len]
+        if answer_token_ids_from_forward != teacher_tokens:
+            raise ValueError(
+                "Switch logits token identity mismatch. "
+                f"id={sample.id}, image={sample.image}, "
+                f"{build_token_mismatch_details(expected=teacher_tokens, actual=answer_token_ids_from_forward, actual_field_name='actual_answer_token_id', extra={'prompt_len': prompt_len, 'full_input_len': len(full_input_ids)})}"
+            )
         answer_logits = switch_logits[:, prompt_len - 1 : prompt_len - 1 + answer_len, :]
         if int(answer_logits.shape[1]) != answer_len:
             raise ValueError(
@@ -783,6 +801,8 @@ class VisualSwitchDistiller:
             f"{field}_prompt_len": 0,
             f"{field}_vocab_size": int(answer_logits.shape[-1]),
             f"{field}_aligned_to_answer": True,
+            f"{field}_token_identity_match": True,
+            f"{field}_answer_token_ids": answer_token_ids_from_forward,
             f"{field}_temperature": float(self.config.distillation.kd_temperature),
             "teacher_tokens": teacher_tokens,
         }
@@ -982,6 +1002,10 @@ def _validate_switch_logits_row(
     teacher_tokens = _extract_teacher_tokens(row)
     answer_len = len(teacher_tokens)
     difference = raw_seq_len - answer_len
+    if row.get(f"{field_name}_aligned_to_answer") is not True:
+        raise ValueError(f"Switch logits row is missing {field_name}_aligned_to_answer=true. id={row.get('id')}")
+    if row.get(f"{field_name}_token_identity_match") is not True:
+        raise ValueError(f"Switch logits row is missing {field_name}_token_identity_match=true. id={row.get('id')}")
     if answer_len > 0 and difference != 0:
         raise ValueError(
             "Switch logits answer-only alignment is invalid. "
@@ -989,8 +1013,15 @@ def _validate_switch_logits_row(
             f"teacher_tokens_len={answer_len}, difference={difference}, "
             f"visual_token_placeholder={visual_token_placeholder}, switch_logits_shape={shape}"
         )
-    if answer_len > 0 and row.get(f"{field_name}_aligned_to_answer") is not True:
-        raise ValueError(f"Switch logits row is missing {field_name}_aligned_to_answer=true. id={row.get('id')}")
+    answer_token_ids = row.get(f"{field_name}_answer_token_ids")
+    if answer_token_ids is not None:
+        answer_token_ids = coerce_token_ids(answer_token_ids)
+        if answer_token_ids != teacher_tokens:
+            raise ValueError(
+                "Switch logits token identity mismatch. "
+                f"id={row.get('id')}, image={row.get('image')}, "
+                f"{build_token_mismatch_details(expected=teacher_tokens, actual=answer_token_ids, actual_field_name='actual_answer_token_id')}"
+            )
 
 
 def _is_valid_switch_logits_row(row: dict[str, Any], *, field_name: str) -> bool:
@@ -1004,13 +1035,23 @@ def _is_valid_switch_logits_row(row: dict[str, Any], *, field_name: str) -> bool
         raw_seq_len = int(payload["shape"][1])
     except (TypeError, ValueError, KeyError, IndexError):
         return False
-    return raw_seq_len == len(teacher_tokens) and row.get(f"{field_name}_aligned_to_answer") is True
+    answer_token_ids = row.get(f"{field_name}_answer_token_ids")
+    if answer_token_ids is None:
+        return False
+    return (
+        raw_seq_len == len(teacher_tokens)
+        and row.get(f"{field_name}_aligned_to_answer") is True
+        and row.get(f"{field_name}_token_identity_match") is True
+        and coerce_token_ids(answer_token_ids) == teacher_tokens
+    )
 
 
 def _print_first_switch_logits_debug(row: dict[str, Any], *, field_name: str) -> None:
     payload = row[field_name]
     shape = payload["shape"]
     teacher_tokens = _extract_teacher_tokens(row)
+    teacher_answer_token_ids = coerce_token_ids(row.get("teacher_logits_answer_token_ids"))
+    switch_answer_token_ids = coerce_token_ids(row.get(f"{field_name}_answer_token_ids"))
     effective_len = int(shape[1])
     top_k_first_token = None
     token_k = payload.get("token_k")
@@ -1020,10 +1061,16 @@ def _print_first_switch_logits_debug(row: dict[str, Any], *, field_name: str) ->
     print(f"  raw_seq_len: {shape[1]}")
     print("  switch_logits_prompt_len: 0")
     print(f"  teacher_tokens_len: {len(teacher_tokens)}")
+    print(f"  teacher_logits_answer_token_ids_len: {len(teacher_answer_token_ids)}")
+    print(f"  switch_logits_answer_token_ids_len: {len(switch_answer_token_ids)}")
+    print("  student_supervised_label_ids_len: pending")
     print(f"  raw_seq_len_minus_prompt_len: {effective_len}")
     print(f"  vocab_size: {payload.get('vocab_size')}")
     print(f"  top_k_first_token: {top_k_first_token}")
-    print(f"  alignment_validation_passed: {effective_len == len(teacher_tokens) if teacher_tokens else True}")
+    print(
+        "  token_identity_validation_passed: "
+        f"{teacher_answer_token_ids == teacher_tokens and switch_answer_token_ids == teacher_tokens if teacher_tokens else True}"
+    )
 
 
 def _is_valid_logits_payload(payload: Any) -> bool:
@@ -1172,6 +1219,26 @@ def _looks_like_full_visual_tower(module, resolved_path: str | None) -> bool:
         return True
     class_name = type(module).__name__.lower()
     return "visiontransformer" in class_name or "visiontower" in class_name
+
+
+def _module_floating_dtype(module):
+    for param in module.parameters(recurse=True):
+        if param.is_floating_point():
+            return param.dtype
+    for buffer in module.buffers(recurse=True):
+        if buffer.is_floating_point():
+            return buffer.dtype
+    return None
+
+
+def _move_visual_to_module(visual_tensor, module):
+    device = module_device(module)
+    dtype = _module_floating_dtype(module)
+    if device is not None:
+        visual_tensor = visual_tensor.to(device)
+    if dtype is not None and visual_tensor.is_floating_point():
+        visual_tensor = visual_tensor.to(dtype=dtype)
+    return visual_tensor
 
 
 def _build_visual_feature_forward_kwargs(module, visual_outputs) -> dict[str, Any]:

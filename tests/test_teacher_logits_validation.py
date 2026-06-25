@@ -32,6 +32,16 @@ def _logits(length: int) -> dict:
     }
 
 
+def _teacher_logits_metadata(tokens: list[int]) -> dict:
+    return {
+        "teacher_logits_format": "adaptive_topk",
+        "teacher_logits_vocab_size": 8,
+        "teacher_logits_aligned_to_answer": True,
+        "teacher_logits_token_identity_match": True,
+        "teacher_logits_answer_token_ids": tokens,
+    }
+
+
 def _write_row(tmp_path: Path, row: dict) -> Path:
     path = tmp_path / "labels.jsonl"
     path.write_text(json.dumps(row) + "\n", encoding="utf-8")
@@ -46,9 +56,7 @@ def test_valid_unified_teacher_row_passes(tmp_path: Path):
         "teacher_answer": _valid_answer(),
         "teacher_tokens": [1, 2, 3],
         "teacher_logits": _logits(3),
-        "teacher_logits_format": "adaptive_topk",
-        "teacher_logits_vocab_size": 8,
-        "teacher_logits_aligned_to_answer": True,
+        **_teacher_logits_metadata([1, 2, 3]),
     }
 
     summary = validate_teacher_output_file(
@@ -141,9 +149,7 @@ def test_full_sequence_logits_fail(tmp_path: Path):
         "teacher_answer": _valid_answer(),
         "teacher_tokens": [1, 2, 3],
         "teacher_logits": _logits(4),
-        "teacher_logits_format": "adaptive_topk",
-        "teacher_logits_vocab_size": 8,
-        "teacher_logits_aligned_to_answer": True,
+        **_teacher_logits_metadata([1, 2, 3]),
     }
 
     valid, reason = validate_teacher_row(
@@ -187,9 +193,7 @@ def test_invalid_logits_payload_fails(mutator, expected_reason):
         "teacher_answer": _valid_answer(),
         "teacher_tokens": [1, 2, 3],
         "teacher_logits": _logits(3),
-        "teacher_logits_format": "adaptive_topk",
-        "teacher_logits_vocab_size": 8,
-        "teacher_logits_aligned_to_answer": True,
+        **_teacher_logits_metadata([1, 2, 3]),
     }
     mutator(row["teacher_logits"])
 
@@ -209,6 +213,8 @@ def test_invalid_logits_payload_fails(mutator, expected_reason):
         ("teacher_logits_format", None, "teacher_logits_format is missing"),
         ("teacher_logits_vocab_size", None, "teacher_logits_vocab_size is missing"),
         ("teacher_logits_aligned_to_answer", False, "teacher_logits_aligned_to_answer is not true"),
+        ("teacher_logits_token_identity_match", False, "teacher_logits_token_identity_match is not true"),
+        ("teacher_logits_answer_token_ids", None, "teacher_logits_answer_token_ids is missing"),
     ],
 )
 def test_missing_logits_metadata_fails(field, value, expected_reason):
@@ -219,9 +225,7 @@ def test_missing_logits_metadata_fails(field, value, expected_reason):
         "teacher_answer": _valid_answer(),
         "teacher_tokens": [1, 2, 3],
         "teacher_logits": _logits(3),
-        "teacher_logits_format": "adaptive_topk",
-        "teacher_logits_vocab_size": 8,
-        "teacher_logits_aligned_to_answer": True,
+        **_teacher_logits_metadata([1, 2, 3]),
     }
     if value is None:
         row.pop(field)
@@ -255,9 +259,7 @@ def test_validate_teacher_cli_works(monkeypatch, tmp_path: Path, capsys: pytest.
                 "teacher_answer": _valid_answer(),
                 "teacher_tokens": [1, 2, 3],
                 "teacher_logits": _logits(3),
-                "teacher_logits_format": "adaptive_topk",
-                "teacher_logits_vocab_size": 8,
-                "teacher_logits_aligned_to_answer": True,
+                **_teacher_logits_metadata([1, 2, 3]),
             }
         )
         + "\n",

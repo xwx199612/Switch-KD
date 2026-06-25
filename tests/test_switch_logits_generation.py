@@ -35,12 +35,18 @@ def _make_config(tmp_path: Path) -> PipelineConfig:
 class _FakeProjector(torch.nn.Module):
     def __init__(self, in_features: int, out_features: int):
         super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
         self.linear = torch.nn.Linear(in_features, out_features, bias=False)
+        self.last_input_device = None
+        self.last_input_dtype = None
 
     def forward(self, x=None, hidden_states=None, inputs_embeds=None):
         tensor = x if x is not None else hidden_states if hidden_states is not None else inputs_embeds
         if tensor is None:
             raise ValueError("expected tensor input")
+        self.last_input_device = tensor.device
+        self.last_input_dtype = tensor.dtype
         return self.linear(tensor)
 
 
@@ -104,7 +110,67 @@ def test_switch_logits_are_answer_only(tmp_path: Path):
 
     assert row["switch_logits_prompt_len"] == 0
     assert row["switch_logits_aligned_to_answer"] is True
+    assert row["switch_logits_token_identity_match"] is True
+    assert row["switch_logits_answer_token_ids"] == row["teacher_tokens"]
     assert row["switch_logits"]["shape"][1] == len(row["teacher_tokens"])
+
+
+def test_switch_logits_generation_enforces_teacher_token_identity_match(tmp_path: Path):
+    config = _make_config(tmp_path)
+    distiller = VisualSwitchDistiller(config)
+    sample = VlmSample(id="sample-1", image="screen.jpg", task="parsing", query="hello world")
+
+    def _teacher_text_inputs(text: str):
+        token_ids = [101, 102, 103] if text == "prompt" else [101, 102, 103, 10, 11]
+        return {"input_ids": torch.tensor([token_ids], dtype=torch.long)}
+
+    def _splice_visual_embeds(*, teacher_inputs, projected_visual):
+        seq_len = int(teacher_inputs["input_ids"].shape[1])
+        return torch.zeros(1, seq_len, 4), torch.ones(1, seq_len, dtype=torch.long)
+
+    distiller._teacher_text_inputs = _teacher_text_inputs
+    distiller._splice_visual_embeds = _splice_visual_embeds
+    distiller._apply_visual_switch_projection = lambda student_visual, student_inputs: student_visual
+    distiller._teacher_lm_forward = lambda *, inputs_embeds, attention_mask: torch.zeros(1, 5, 8)
+
+    row = distiller._generate_for_sample_from_student_visual(
+        sample=sample,
+        prompt="prompt",
+        student_visual=torch.zeros(1, 2, 4),
+        base_row={"teacher_tokens": [10, 11], "teacher_answer": "{}"},
+        student_inputs={},
+    )
+
+    assert row["switch_logits_answer_token_ids"] == [10, 11]
+    assert row["switch_logits_token_identity_match"] is True
+
+
+def test_switch_logits_generation_fails_on_same_length_wrong_token_ids(tmp_path: Path):
+    config = _make_config(tmp_path)
+    distiller = VisualSwitchDistiller(config)
+    sample = VlmSample(id="sample-1", image="screen.jpg", task="parsing", query="hello world")
+
+    def _teacher_text_inputs(text: str):
+        token_ids = [101, 102, 103] if text == "prompt" else [101, 102, 103, 10, 99]
+        return {"input_ids": torch.tensor([token_ids], dtype=torch.long)}
+
+    def _splice_visual_embeds(*, teacher_inputs, projected_visual):
+        seq_len = int(teacher_inputs["input_ids"].shape[1])
+        return torch.zeros(1, seq_len, 4), torch.ones(1, seq_len, dtype=torch.long)
+
+    distiller._teacher_text_inputs = _teacher_text_inputs
+    distiller._splice_visual_embeds = _splice_visual_embeds
+    distiller._apply_visual_switch_projection = lambda student_visual, student_inputs: student_visual
+    distiller._teacher_lm_forward = lambda *, inputs_embeds, attention_mask: torch.zeros(1, 5, 8)
+
+    with pytest.raises(ValueError, match="Switch logits token identity mismatch"):
+        distiller._generate_for_sample_from_student_visual(
+            sample=sample,
+            prompt="prompt",
+            student_visual=torch.zeros(1, 2, 4),
+            base_row={"teacher_tokens": [10, 11], "teacher_answer": "{}"},
+            student_inputs={},
+        )
 
 
 def test_paper_mode_raises_on_shape_incompatibility(tmp_path: Path):
@@ -171,6 +237,32 @@ def test_paper_mode_rejects_full_teacher_visual_tower(tmp_path: Path):
 
     with pytest.raises(ValueError, match="full teacher visual tower"):
         distiller._paper_path_projection(torch.zeros(1, 2, 8))
+
+
+def test_paper_mode_moves_cached_student_visual_to_teacher_projector_device_and_dtype(tmp_path: Path):
+    config = _make_config(tmp_path)
+    distiller = VisualSwitchDistiller(config)
+    projector = _FakeProjector(8, 12)
+    if torch.cuda.is_available():
+        expected_device = torch.device("cuda:0")
+        expected_dtype = torch.float32
+        projector = projector.to(device=expected_device, dtype=expected_dtype)
+    else:
+        expected_device = torch.device("cpu")
+        expected_dtype = torch.bfloat16
+        projector = projector.to(dtype=expected_dtype)
+    distiller._teacher_model = SimpleNamespace(
+        config=SimpleNamespace(hidden_size=12),
+        model=SimpleNamespace(visual=projector),
+    )
+
+    student_visual = torch.zeros(1, 2, 8, device="cpu", dtype=torch.float32)
+
+    projected = distiller._paper_path_projection(student_visual)
+
+    assert tuple(projected.shape) == (1, 2, 12)
+    assert projector.last_input_device == expected_device
+    assert projector.last_input_dtype == expected_dtype
 
 
 def test_adapter_mode_requires_allow_fallback_adapter(tmp_path: Path):
@@ -287,6 +379,9 @@ def test_switch_logits_old_text_only_prompt_len_raises():
         "image": "screen.jpg",
         "teacher_tokens": list(range(477)),
         "switch_logits_prompt_len": 287,
+        "switch_logits_aligned_to_answer": True,
+        "switch_logits_token_identity_match": True,
+        "switch_logits_answer_token_ids": list(range(477)),
         "switch_logits": {
             "indices": [[[0]]],
             "values": [[[1.0]]],
@@ -317,7 +412,56 @@ def test_switch_logits_row_contains_valid_compact_payload(tmp_path: Path):
         visual_token_placeholder="<image>",
     )
     assert {"indices", "values", "vocab_size"}.issubset(row["switch_logits"])
+    assert row["switch_logits_token_identity_match"] is True
+    assert row["switch_logits_answer_token_ids"] == row["teacher_tokens"]
     assert row["switch_logits"]["shape"][1] == len(row["teacher_tokens"])
+
+
+def test_validate_switch_logits_row_fails_when_token_identity_flag_missing():
+    row = {
+        "id": "bad",
+        "image": "screen.jpg",
+        "teacher_tokens": [1, 2],
+        "switch_logits_aligned_to_answer": True,
+        "switch_logits_answer_token_ids": [1, 2],
+        "switch_logits": {
+            "indices": [[[0], [0]]],
+            "values": [[[1.0], [1.0]]],
+            "shape": [1, 2, 8],
+            "vocab_size": 8,
+        },
+    }
+
+    with pytest.raises(ValueError, match="switch_logits_token_identity_match"):
+        _validate_switch_logits_row(
+            row,
+            field_name="switch_logits",
+            visual_token_placeholder="<image>",
+        )
+
+
+def test_validate_switch_logits_row_fails_when_answer_token_ids_differ():
+    row = {
+        "id": "bad",
+        "image": "screen.jpg",
+        "teacher_tokens": [1, 2],
+        "switch_logits_aligned_to_answer": True,
+        "switch_logits_token_identity_match": True,
+        "switch_logits_answer_token_ids": [1, 3],
+        "switch_logits": {
+            "indices": [[[0], [0]]],
+            "values": [[[1.0], [1.0]]],
+            "shape": [1, 2, 8],
+            "vocab_size": 8,
+        },
+    }
+
+    with pytest.raises(ValueError, match="Switch logits token identity mismatch"):
+        _validate_switch_logits_row(
+            row,
+            field_name="switch_logits",
+            visual_token_placeholder="<image>",
+        )
 
 
 def test_switch_logits_reads_teacher_rows_from_label_path(tmp_path: Path):

@@ -31,6 +31,7 @@ from .logits_cache_utils import (
     vocab_sizes_compatible,
 )
 from .model_loading import apply_attn_implementation, resolve_model_path
+from .token_alignment import build_token_mismatch_details, coerce_token_ids
 
 
 class VlmTrainingDataset:
@@ -40,6 +41,7 @@ class VlmTrainingDataset:
         self.rows = rows
         self.config = config
         self.processor = processor
+        self._token_identity_debug_printed = False
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -71,6 +73,22 @@ class VlmTrainingDataset:
             mask_prompt_labels=self.config.training.mask_prompt_labels,
         )
         item = dict(encoded.model_inputs)
+        _validate_student_supervised_labels_against_teacher_tokens(
+            example=example,
+            labels=item["labels"],
+            config=self.config,
+        )
+        if not self._token_identity_debug_printed:
+            teacher_field = self.config.distillation.teacher_logits_field
+            switch_field = self.config.distillation.switch_logits_field
+            supervised_label_ids = [int(token_id) for token_id in item["labels"][item["labels"] != -100].tolist()]
+            print("Switch-KD first sample label debug:")
+            print(f"  teacher_tokens_len: {len(_extract_teacher_tokens(example))}")
+            print(f"  teacher_logits_answer_token_ids_len: {len(coerce_token_ids(example.get(f'{teacher_field}_answer_token_ids')))}")
+            print(f"  switch_logits_answer_token_ids_len: {len(coerce_token_ids(example.get(f'{switch_field}_answer_token_ids')))}")
+            print(f"  student_supervised_label_ids_len: {len(supervised_label_ids)}")
+            print(f"  token_identity_validation_passed: {supervised_label_ids == _extract_teacher_tokens(example)}")
+            self._token_identity_debug_printed = True
         item["prompt_token_len"] = encoded.prompt_token_len
 
         teacher_field = self.config.distillation.teacher_logits_field
@@ -91,6 +109,61 @@ class VlmTrainingDataset:
 @dataclass(frozen=True)
 class VocabAlignment:
     shared_token_vocab_size: int
+
+
+def _model_name_family(model_name: str | None) -> str:
+    return (model_name or "").lower().replace("_", "").replace("-", "").replace(".", "")
+
+
+def _student_label_alignment_required(config: PipelineConfig) -> bool:
+    teacher_family = _model_name_family(config.teacher.model_name)
+    student_family = _model_name_family(config.student.model_name)
+    return "qwen25vl" in teacher_family and "qwen25vl" in student_family
+
+
+def _validate_token_identity_metadata(
+    row: dict[str, Any],
+    *,
+    field_name: str,
+    label: str,
+    required: bool,
+) -> None:
+    payload = row.get(field_name)
+    if payload is None:
+        if required:
+            raise RuntimeError(f"{label} missing for id={row.get('id')}.")
+        return
+    teacher_tokens = _extract_teacher_tokens(row)
+    if row.get(f"{field_name}_token_identity_match") is not True:
+        raise ValueError(f"{label} token identity validation missing or false for id={row.get('id')}.")
+    answer_token_ids = row.get(f"{field_name}_answer_token_ids")
+    if answer_token_ids is None:
+        raise ValueError(f"{label}_answer_token_ids missing for id={row.get('id')}.")
+    answer_token_ids = coerce_token_ids(answer_token_ids)
+    if answer_token_ids != teacher_tokens:
+        raise ValueError(
+            f"{label} token identity mismatch for id={row.get('id')}: "
+            f"{build_token_mismatch_details(expected=teacher_tokens, actual=answer_token_ids, actual_field_name='actual_answer_token_id')}"
+        )
+
+
+def _validate_student_supervised_labels_against_teacher_tokens(
+    *,
+    example: dict[str, Any],
+    labels,
+    config: PipelineConfig,
+) -> None:
+    if not _student_label_alignment_required(config):
+        return
+    teacher_tokens = _extract_teacher_tokens(example)
+    if not teacher_tokens:
+        return
+    supervised_label_ids = [int(token_id) for token_id in labels[labels != -100].tolist()]
+    if supervised_label_ids != teacher_tokens:
+        raise ValueError(
+            f"Student label token identity mismatch. id={example.get('id')}, "
+            f"{build_token_mismatch_details(expected=teacher_tokens, actual=supervised_label_ids, actual_field_name='actual_student_label_id')}"
+        )
 
 
 def train_student(config: PipelineConfig) -> Path:
@@ -801,7 +874,26 @@ def _validate_switch_kd_training_rows(config: PipelineConfig, rows: list[dict]) 
 
     _warn_if_switch_logits_missing(config, rows)
 
-    for row in rows:
+    for row_index, row in enumerate(rows):
+        _validate_token_identity_metadata(
+            row,
+            field_name=teacher_field,
+            label="teacher_logits",
+            required=bool(config.distillation.teacher_logits),
+        )
+        _validate_token_identity_metadata(
+            row,
+            field_name=switch_field,
+            label="switch_logits",
+            required=True,
+        )
+        if row_index == 0:
+            print("Switch-KD token identity debug:")
+            print(f"  teacher_tokens_len: {len(_extract_teacher_tokens(row))}")
+            print(f"  teacher_logits_answer_token_ids_len: {len(coerce_token_ids(row.get(f'{teacher_field}_answer_token_ids')))}")
+            print(f"  switch_logits_answer_token_ids_len: {len(coerce_token_ids(row.get(f'{switch_field}_answer_token_ids')))}")
+            print("  student_supervised_label_ids_len: pending")
+            print("  token_identity_validation_passed: True")
         _validate_cached_logits_alignment(
             row,
             field_name=teacher_field,

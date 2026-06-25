@@ -10,6 +10,7 @@ from .stage_teacher_precompute import (
     _parse_json_object,
     _strip_special_tokens,
 )
+from .token_alignment import build_token_mismatch_details, coerce_token_ids
 
 
 DecodeTokens = Callable[[list[int]], str]
@@ -295,8 +296,32 @@ def _validate_teacher_logits_payload(
             False,
             False,
         )
+    if row.get(f"{metadata_prefix}_token_identity_match") is not True:
+        return _logits_report(
+            False,
+            f"{metadata_prefix}_token_identity_match is not true",
+            False,
+            False,
+            False,
+            False,
+        )
     if row.get(f"{metadata_prefix}_vocab_size") is None:
         return _logits_report(False, f"{metadata_prefix}_vocab_size is missing", False, False, False, False)
+    answer_token_ids = row.get(f"{metadata_prefix}_answer_token_ids")
+    if answer_token_ids is None:
+        return _logits_report(False, f"{metadata_prefix}_answer_token_ids is missing", False, False, False, False)
+    answer_token_ids = coerce_token_ids(answer_token_ids)
+    teacher_tokens = _extract_teacher_tokens(row)
+    if answer_token_ids != teacher_tokens:
+        return _logits_report(
+            False,
+            f"{metadata_prefix} token identity mismatch: "
+            f"{build_token_mismatch_details(expected=teacher_tokens, actual=answer_token_ids, actual_field_name='actual_answer_token_id')}",
+            False,
+            False,
+            False,
+            False,
+        )
 
     required_keys = ("indices", "values", "vocab_size", "shape")
     if not all(key in payload for key in required_keys):
