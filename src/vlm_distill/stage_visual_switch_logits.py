@@ -765,10 +765,16 @@ class VisualSwitchDistiller:
         )
         prompt_len = len(prompt_input_ids)
         prompt_embed_len = int(prompt_embeds.shape[1])
-        if prompt_embed_len != prompt_len:
+        full_embed_len = int(switched_embeds.shape[1])
+        visual_extra_prompt = prompt_embed_len - len(prompt_input_ids)
+        visual_extra_full = full_embed_len - len(full_input_ids)
+        if visual_extra_prompt != visual_extra_full:
             raise ValueError(
-                "Switch logits prompt length sanity check failed. "
-                f"id={sample.id}, image={sample.image}, prompt_len={prompt_len}, prompt_embed_len={prompt_embed_len}"
+                "Switch logits visual splice length mismatch. "
+                f"id={sample.id}, image={sample.image}, "
+                f"prompt_input_len={len(prompt_input_ids)}, prompt_embed_len={prompt_embed_len}, "
+                f"full_input_len={len(full_input_ids)}, full_embed_len={full_embed_len}, "
+                f"visual_extra_prompt={visual_extra_prompt}, visual_extra_full={visual_extra_full}"
             )
         teacher_tokens = _extract_teacher_tokens(base_row or {})
         answer_len = len(teacher_tokens)
@@ -781,12 +787,18 @@ class VisualSwitchDistiller:
                 f"id={sample.id}, image={sample.image}, "
                 f"{build_token_mismatch_details(expected=teacher_tokens, actual=answer_token_ids_from_forward, actual_field_name='actual_answer_token_id', extra={'prompt_len': prompt_len, 'full_input_len': len(full_input_ids)})}"
             )
-        answer_logits = switch_logits[:, prompt_len - 1 : prompt_len - 1 + answer_len, :]
+        answer_start_logit_index = prompt_embed_len - 1
+        answer_logits = switch_logits[
+            :,
+            answer_start_logit_index : answer_start_logit_index + answer_len,
+            :,
+        ]
         if int(answer_logits.shape[1]) != answer_len:
             raise ValueError(
                 "Switch logits answer slice length mismatch. "
                 f"id={sample.id}, answer_logits_len={int(answer_logits.shape[1])}, "
-                f"teacher_tokens_len={answer_len}, prompt_len={prompt_len}"
+                f"teacher_tokens_len={answer_len}, prompt_len={prompt_len}, "
+                f"prompt_embed_len={prompt_embed_len}, answer_start_logit_index={answer_start_logit_index}"
             )
         cached_logits = _compact_adaptive_sequence_logits(
             answer_logits,
@@ -795,6 +807,18 @@ class VisualSwitchDistiller:
             temperature=float(self.config.distillation.kd_temperature),
         )
         field = self.config.distillation.switch_logits_field
+        debug_info = {
+            "prompt_input_len": prompt_len,
+            "prompt_embed_len": prompt_embed_len,
+            "full_input_len": len(full_input_ids),
+            "full_embed_len": full_embed_len,
+            "visual_extra_prompt": visual_extra_prompt,
+            "visual_extra_full": visual_extra_full,
+            "answer_start_logit_index": answer_start_logit_index,
+            "teacher_tokens_len": answer_len,
+            "switch_logits_answer_token_ids_len": len(answer_token_ids_from_forward),
+            "token_identity_validation_passed": True,
+        }
         return {
             field: cached_logits,
             f"{field}_format": "switch_kd",
@@ -804,6 +828,7 @@ class VisualSwitchDistiller:
             f"{field}_token_identity_match": True,
             f"{field}_answer_token_ids": answer_token_ids_from_forward,
             f"{field}_temperature": float(self.config.distillation.kd_temperature),
+            f"{field}_debug": debug_info,
             "teacher_tokens": teacher_tokens,
         }
 
@@ -1052,6 +1077,7 @@ def _print_first_switch_logits_debug(row: dict[str, Any], *, field_name: str) ->
     teacher_tokens = _extract_teacher_tokens(row)
     teacher_answer_token_ids = coerce_token_ids(row.get("teacher_logits_answer_token_ids"))
     switch_answer_token_ids = coerce_token_ids(row.get(f"{field_name}_answer_token_ids"))
+    debug_info = row.get(f"{field_name}_debug") or {}
     effective_len = int(shape[1])
     top_k_first_token = None
     token_k = payload.get("token_k")
@@ -1065,11 +1091,19 @@ def _print_first_switch_logits_debug(row: dict[str, Any], *, field_name: str) ->
     print(f"  switch_logits_answer_token_ids_len: {len(switch_answer_token_ids)}")
     print("  student_supervised_label_ids_len: pending")
     print(f"  raw_seq_len_minus_prompt_len: {effective_len}")
+    if debug_info:
+        print(f"  prompt_input_len: {debug_info.get('prompt_input_len')}")
+        print(f"  prompt_embed_len: {debug_info.get('prompt_embed_len')}")
+        print(f"  full_input_len: {debug_info.get('full_input_len')}")
+        print(f"  full_embed_len: {debug_info.get('full_embed_len')}")
+        print(f"  visual_extra_prompt: {debug_info.get('visual_extra_prompt')}")
+        print(f"  visual_extra_full: {debug_info.get('visual_extra_full')}")
+        print(f"  answer_start_logit_index: {debug_info.get('answer_start_logit_index')}")
     print(f"  vocab_size: {payload.get('vocab_size')}")
     print(f"  top_k_first_token: {top_k_first_token}")
     print(
         "  token_identity_validation_passed: "
-        f"{teacher_answer_token_ids == teacher_tokens and switch_answer_token_ids == teacher_tokens if teacher_tokens else True}"
+        f"{debug_info.get('token_identity_validation_passed', teacher_answer_token_ids == teacher_tokens and switch_answer_token_ids == teacher_tokens if teacher_tokens else True)}"
     )
 
 
