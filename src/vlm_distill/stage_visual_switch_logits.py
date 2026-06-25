@@ -458,7 +458,13 @@ class VisualSwitchDistiller:
         return student_vision_hidden_states
 
     def _student_projector_outputs(self, visual_outputs, student_inputs):
-        projected_tensor = self._apply_visual_switch_projection(visual_outputs, student_inputs)
+        student_projector = self._student_component(
+            self.config.distillation.student_projector_path,
+            _STUDENT_PROJECTOR_CANDIDATES,
+            "student projector",
+        )
+        projector_kwargs = _build_projector_forward_kwargs(student_projector, visual_outputs, student_inputs or {})
+        projected_tensor = _first_tensor(student_projector(**projector_kwargs))
         return projected_tensor
 
     def _teacher_text_inputs(self, prompt: str):
@@ -587,9 +593,9 @@ class VisualSwitchDistiller:
         return self._teacher_projector_projection(adapted_visual)
 
     def _adapter_to_teacher_lm_projection(self, student_visual, student_inputs):
-        teacher_projected = self._paper_path_projection(student_visual)
+        student_projected = self._student_projector_outputs(student_visual, student_inputs)
         adapter = self._resolve_visual_switch_adapter()
-        adapter_kwargs = _build_visual_feature_forward_kwargs(adapter, teacher_projected)
+        adapter_kwargs = _build_visual_feature_forward_kwargs(adapter, student_projected)
         adapted_visual = _first_tensor(adapter(**adapter_kwargs))
         teacher_hidden_size = _infer_teacher_llm_hidden_size(self._teacher_model)
         if teacher_hidden_size is not None and int(adapted_visual.shape[-1]) != teacher_hidden_size:
@@ -598,6 +604,7 @@ class VisualSwitchDistiller:
                 f"={int(adapted_visual.shape[-1])} does not match teacher LLM hidden size "
                 f"={teacher_hidden_size}."
             )
+        self._last_visual_dim_before_projection = int(student_projected.shape[-1])
         self._last_visual_dim_after_projection = int(adapted_visual.shape[-1])
         self._last_visual_switch_projector_type = type(adapter).__name__
         return adapted_visual
@@ -1095,6 +1102,8 @@ def extract_student_vision_hidden_states(
     if vision_device is None:
         vision_device = student_input_device
     vision_inputs = batch_to_device(student_inputs, vision_device)
+    if _is_qwen2_5_vl_visual_encoder(student_model, vision_module):
+        return _extract_qwen2_5_vl_vision_hidden_states(vision_module, vision_inputs)
     vision_kwargs = _build_vision_forward_kwargs(vision_module, vision_inputs)
     outputs = vision_module(**vision_kwargs)
     return _first_tensor(outputs)
@@ -1121,7 +1130,48 @@ def _resolve_teacher_visual_projector_or_merger_with_path(teacher_model):
             "Set distillation.switch_kd.visual_switch.adapter_path for a project-specific adapter "
             "or ensure the teacher model exposes a native projector/merger."
         )
+    _validate_teacher_projector_or_merger(projector, resolved_path)
     return projector, resolved_path
+
+
+def _extract_qwen2_5_vl_vision_hidden_states(vision_module, vision_inputs):
+    vision_kwargs = _build_vision_forward_kwargs(vision_module, vision_inputs)
+    outputs = vision_module(**vision_kwargs)
+    hidden_states = getattr(outputs, "last_hidden_state", None)
+    if hidden_states is None:
+        raise ValueError(
+            "Switch-KD paper path incompatible: Qwen2.5-VL student vision path did not expose "
+            "pre-merger last_hidden_state. Set distillation.student_vision_path to a raw ViT "
+            "encoder path or use a model that exposes pre-merger vision hidden states."
+        )
+    return hidden_states
+
+
+def _is_qwen2_5_vl_visual_encoder(student_model, vision_module) -> bool:
+    config = getattr(student_model, "config", None)
+    model_type = str(getattr(config, "model_type", "") or "").lower()
+    class_name = type(vision_module).__name__.lower()
+    return "qwen2_5_vl" in model_type or "qwen2vl" in model_type or "qwen2_5" in class_name
+
+
+def _validate_teacher_projector_or_merger(projector, resolved_path: str | None) -> None:
+    if _looks_like_full_visual_tower(projector, resolved_path):
+        raise ValueError(
+            "Switch-KD paper path incompatible: resolved teacher projector/merger path "
+            f"{resolved_path!r} points to the full teacher visual tower, not the native "
+            "teacher projector/merger."
+        )
+
+
+def _looks_like_full_visual_tower(module, resolved_path: str | None) -> bool:
+    if resolved_path not in {"visual", "model.visual"}:
+        return False
+    if any(hasattr(module, attr) for attr in ("patch_embed", "blocks", "embeddings", "encoder", "vision_model")):
+        return True
+    if hasattr(module, "merger") and any(hasattr(module, attr) for attr in ("patch_embed", "blocks")):
+        return True
+    class_name = type(module).__name__.lower()
+    return "visiontransformer" in class_name or "visiontower" in class_name
 
 
 def _build_visual_feature_forward_kwargs(module, visual_outputs) -> dict[str, Any]:
@@ -1590,10 +1640,12 @@ _TEACHER_VISUAL_PROJECTOR_CANDIDATES = (
     "model.visual_projector",
     "projector",
     "model.projector",
-    "visual",
-    "model.visual",
+    "visual.merger",
+    "model.visual.merger",
     "merger",
     "model.merger",
+    "visual",
+    "model.visual",
 )
 
 _TEACHER_LM_CANDIDATES = (

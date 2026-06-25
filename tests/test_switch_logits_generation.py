@@ -5,6 +5,7 @@ from pathlib import Path
 
 import torch
 import pytest
+import yaml
 
 from vlm_distill.config_schema import DataConfig, DistillationConfig, PipelineConfig, StudentConfig, TeacherConfig, load_config
 from vlm_distill.data_manifest import VlmSample
@@ -12,6 +13,8 @@ from vlm_distill.stage_visual_switch_logits import (
     VisualSwitchDistiller,
     _load_switch_base_rows,
     _validate_switch_logits_row,
+    extract_student_vision_hidden_states,
+    get_teacher_visual_projector_or_merger,
 )
 
 
@@ -38,6 +41,33 @@ class _FakeProjector(torch.nn.Module):
         if tensor is None:
             raise ValueError("expected tensor input")
         return self.linear(tensor)
+
+
+class _FakeVisualTower(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.patch_embed = torch.nn.Identity()
+        self.blocks = torch.nn.ModuleList([])
+
+    def forward(self, *args, **kwargs):
+        return torch.zeros(1, 1, 8)
+
+
+class _FakeQwenVisual(torch.nn.Module):
+    def __init__(self, *, return_last_hidden_state: bool = True):
+        super().__init__()
+        self.patch_embed = torch.nn.Identity()
+        self.blocks = torch.nn.ModuleList([])
+        self.merger = _FakeProjector(8, 12)
+        self._return_last_hidden_state = return_last_hidden_state
+
+    def forward(self, hidden_states=None, grid_thw=None, **kwargs):
+        if self._return_last_hidden_state:
+            return SimpleNamespace(
+                last_hidden_state=torch.full((4, 8), 3.0),
+                pooler_output=torch.full((1, 12), 9.0),
+            )
+        return torch.full((1, 12), 9.0)
 
 
 def test_paper_mode_config_loads_correctly():
@@ -72,6 +102,29 @@ def test_paper_mode_raises_on_shape_incompatibility(tmp_path: Path):
 
     with pytest.raises(ValueError, match="Switch-KD paper path incompatible"):
         distiller._paper_path_projection(torch.zeros(1, 2, 7))
+
+
+def test_teacher_projector_resolution_prefers_qwen_visual_merger():
+    teacher_model = SimpleNamespace(
+        visual=_FakeVisualTower(),
+        model=SimpleNamespace(visual=SimpleNamespace(merger=_FakeProjector(8, 12))),
+    )
+
+    projector = get_teacher_visual_projector_or_merger(teacher_model)
+
+    assert projector is teacher_model.model.visual.merger
+
+
+def test_paper_mode_rejects_full_teacher_visual_tower(tmp_path: Path):
+    config = _make_config(tmp_path)
+    distiller = VisualSwitchDistiller(config)
+    distiller._teacher_model = SimpleNamespace(
+        config=SimpleNamespace(hidden_size=12),
+        visual=_FakeVisualTower(),
+    )
+
+    with pytest.raises(ValueError, match="full teacher visual tower"):
+        distiller._paper_path_projection(torch.zeros(1, 2, 8))
 
 
 def test_adapter_mode_requires_allow_fallback_adapter(tmp_path: Path):
@@ -120,6 +173,66 @@ def test_adapter_mode_logs_project_specific_variant(capsys, tmp_path: Path):
 
     assert component is not None
     assert "This is a project-specific Switch-KD variant, not the original paper path." in out
+
+
+def test_adapter_to_teacher_lm_uses_student_projector_output(tmp_path: Path):
+    config = _make_config(tmp_path)
+    config.distillation.switch_kd.visual_switch.mode = "adapter_to_teacher_lm"
+    config.distillation.switch_kd.visual_switch.allow_fallback_adapter = True
+    config.distillation.switch_kd.visual_switch.adapter_path = "connector"
+    distiller = VisualSwitchDistiller(config)
+    distiller._student_model = SimpleNamespace(
+        connector=_FakeProjector(12, 12),
+        model=SimpleNamespace(connector=_FakeProjector(12, 12)),
+    )
+    distiller._teacher_model = SimpleNamespace(
+        connector=_FakeProjector(12, 12),
+        config=SimpleNamespace(hidden_size=12),
+        model=SimpleNamespace(visual=SimpleNamespace(merger=_FakeProjector(99, 12))),
+    )
+
+    projected = distiller._adapter_to_teacher_lm_projection(
+        torch.zeros(1, 2, 12),
+        student_inputs={},
+    )
+
+    assert tuple(projected.shape) == (1, 2, 12)
+
+
+def test_extract_student_vision_hidden_states_uses_qwen_last_hidden_state():
+    student_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen2_5_vl"),
+        visual=_FakeQwenVisual(return_last_hidden_state=True),
+    )
+
+    hidden_states = extract_student_vision_hidden_states(
+        student_model,
+        student_processor=None,
+        student_inputs={
+            "pixel_values": torch.zeros(4, 8),
+            "image_grid_thw": torch.ones(1, 3, dtype=torch.long),
+        },
+    )
+
+    assert tuple(hidden_states.shape) == (4, 8)
+    assert torch.all(hidden_states == 3.0)
+
+
+def test_extract_student_vision_hidden_states_raises_when_qwen_raw_states_unavailable():
+    student_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen2_5_vl"),
+        visual=_FakeQwenVisual(return_last_hidden_state=False),
+    )
+
+    with pytest.raises(ValueError, match="pre-merger last_hidden_state"):
+        extract_student_vision_hidden_states(
+            student_model,
+            student_processor=None,
+            student_inputs={
+                "pixel_values": torch.zeros(4, 8),
+                "image_grid_thw": torch.ones(1, 3, dtype=torch.long),
+            },
+        )
 
 
 def test_switch_logits_old_text_only_prompt_len_raises():
@@ -184,3 +297,14 @@ def test_switch_logits_does_not_use_switch_logits_as_teacher_base_when_label_mis
     config.data.switch_logits_path = switch_path
 
     assert _load_switch_base_rows(config) == []
+
+
+def test_hf_vlm_has_single_distillation_block_and_preserves_visual_switch():
+    config_path = Path("configs/hf_vlm.yaml")
+    text = config_path.read_text(encoding="utf-8")
+    parsed = yaml.safe_load(text)
+
+    assert text.count("\ndistillation:") == 1
+    assert parsed["distillation"]["switch_kd"]["visual_switch"]["mode"] == "paper"
+    assert parsed["distillation"]["switch_kd"]["visual_switch"]["teacher_projector"] == "native"
+    assert parsed["distillation"]["switch_kd"]["visual_switch"]["allow_fallback_adapter"] is False
