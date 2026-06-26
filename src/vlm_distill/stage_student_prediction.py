@@ -72,6 +72,16 @@ class HuggingFaceStudent:
         model_path = resolve_model_path(
             config.student.inference_model_path or config.student.model_name
         )
+        adapter_path = _resolve_prediction_adapter_path(config)
+        should_load_adapter = _should_load_prediction_adapter(config)
+        print(
+            "Initializing Hugging Face student backend: "
+            f"model={model_path}, "
+            f"adapter={adapter_path if should_load_adapter else 'disabled'}, "
+            f"load_adapter={config.student.load_adapter}, "
+            f"merge_adapter={config.student.merge_adapter}, "
+            f"quantization={config.student.quantization}"
+        )
         self.processor = AutoProcessor.from_pretrained(
             model_path,
             trust_remote_code=True,
@@ -96,8 +106,8 @@ class HuggingFaceStudent:
 
         model_kwargs["local_files_only"] = True
         self.model = AutoModelForVLM.from_pretrained(model_path, **model_kwargs)
-        if _should_load_prediction_adapter(config):
-            adapter_path = _resolve_prediction_adapter_path(config)
+        if should_load_adapter:
+            _validate_prediction_adapter_path(adapter_path)
             self.model = PeftModel.from_pretrained(
                 self.model,
                 str(adapter_path),
@@ -163,6 +173,22 @@ def _should_load_prediction_adapter(config: PipelineConfig) -> bool:
 
 def _resolve_prediction_adapter_path(config: PipelineConfig) -> Path:
     return config.student.inference_adapter_path or config.student.adapter_dir
+
+
+def _validate_prediction_adapter_path(adapter_path: Path) -> None:
+    if not adapter_path.exists():
+        raise FileNotFoundError(
+            "Prediction adapter path does not exist: "
+            f"{adapter_path}. Set student.inference_adapter_path to a saved adapter directory "
+            "or disable adapter loading for prediction."
+        )
+
+    adapter_config = adapter_path / "adapter_config.json"
+    if not adapter_config.exists():
+        raise FileNotFoundError(
+            "Prediction adapter path is missing adapter_config.json: "
+            f"{adapter_config}. Ensure this path points to a PEFT adapter directory."
+        )
 
 
 def create_student_predictions(config: PipelineConfig, samples: list[VlmSample]) -> Path:

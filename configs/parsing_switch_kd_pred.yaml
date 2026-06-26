@@ -30,6 +30,7 @@ student:
   model_name: Qwen/Qwen2.5-VL-3B-Instruct
   output_dir: outputs/switch-kd/{task_name}_switch_kd_{response_profile}
   adapter_dir: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/adapter
+  inference_adapter_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/adapter
 
   # Optional. Leave empty to load from model_name.
   # Use this only if you already saved a merged full model somewhere.
