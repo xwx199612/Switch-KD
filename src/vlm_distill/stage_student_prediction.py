@@ -58,7 +58,6 @@ class HuggingFaceStudent:
         self.config = config
         try:
             import torch
-            from peft import PeftModel
             from transformers import AutoProcessor, BitsAndBytesConfig
             try:
                 from transformers import AutoModelForImageTextToText as AutoModelForVLM
@@ -108,12 +107,26 @@ class HuggingFaceStudent:
         self.model = AutoModelForVLM.from_pretrained(model_path, **model_kwargs)
         if should_load_adapter:
             _validate_prediction_adapter_path(adapter_path)
+            print(f"Loading prediction adapter from {adapter_path}")
+            try:
+                from peft import PeftModel
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Install peft to load prediction adapters, or disable adapter loading for prediction."
+                ) from exc
+
             self.model = PeftModel.from_pretrained(
                 self.model,
                 str(adapter_path),
                 local_files_only=True,
             )
             if config.student.merge_adapter:
+                if config.student.quantization in {"4bit", "8bit"}:
+                    print(
+                        "Warning: merge_adapter=true with 4bit/8bit quantization may be unsupported "
+                        "or produce incorrect behavior. Disable quantization or set merge_adapter=false "
+                        "if adapter merging fails."
+                    )
                 self.model = self.model.merge_and_unload()
         self.model.eval()
 
