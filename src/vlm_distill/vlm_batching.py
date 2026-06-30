@@ -6,6 +6,8 @@ from typing import Any
 
 from PIL import Image
 
+from .chat_spans import build_vlm_chat_answer_span
+
 
 @dataclass(frozen=True)
 class EncodedVlmSample:
@@ -68,21 +70,27 @@ def build_vlm_full_answer_span_inputs(
     max_length: int,
     mask_prompt_labels: bool = True,
 ) -> EncodedVlmSample:
-    prompt_text = _build_training_prompt_text(processor, prompt.strip())
-    full_text = _build_training_prompt_text(
+    span = build_vlm_chat_answer_span(
         processor,
-        _join_prompt_and_answer(prompt.strip(), target.strip()),
+        image,
+        prompt,
+        target,
+        return_tensors="pt",
+        truncation=True,
+        max_length=max_length,
     )
-    common_kwargs = {"return_tensors": "pt", "truncation": True, "max_length": max_length}
-    prompt_inputs = _processor_call(processor, image=image, text=prompt_text, **common_kwargs)
-    full_inputs = _processor_call(processor, image=image, text=full_text, **common_kwargs)
-
-    prompt_token_len = int(prompt_inputs["input_ids"].shape[1])
-    model_inputs = {key: value.squeeze(0) for key, value in full_inputs.items()}
-    answer_token_ids = [int(token_id) for token_id in full_inputs["input_ids"][0][prompt_token_len:].tolist()]
+    prompt_token_len = span.prompt_token_len
+    model_inputs = {key: value.squeeze(0) for key, value in span.full_inputs.items()}
+    answer_token_ids = span.answer_token_ids
     labels = model_inputs["input_ids"].clone()
     if mask_prompt_labels:
         labels[:prompt_token_len] = -100
+    supervised_label_ids = [int(token_id) for token_id in labels[labels != -100].tolist()]
+    if supervised_label_ids != answer_token_ids:
+        raise ValueError("Student supervised labels are not aligned to the assistant answer span.")
+    decoded_supervised = _decode_token_ids(processor, supervised_label_ids)
+    if decoded_supervised and decoded_supervised.strip() != target.strip():
+        raise ValueError("Student supervised labels do not decode to the answer-only span.")
     model_inputs["labels"] = labels
     return EncodedVlmSample(
         model_inputs=model_inputs,
@@ -197,17 +205,37 @@ def _build_training_prompt_text(processor, prompt: str) -> str:
     )
 
 
-def _join_prompt_and_answer(prompt: str, answer: str) -> str:
-    separator = "" if prompt.endswith((" ", "\n")) else " "
-    return f"{prompt}{separator}{answer}".strip()
-
-
 def _resolve_pad_token_id(processor) -> int:
     tokenizer = getattr(processor, "tokenizer", processor)
     pad_token_id = getattr(tokenizer, "pad_token_id", None)
     if pad_token_id is None:
         pad_token_id = getattr(tokenizer, "eos_token_id", 0)
     return int(pad_token_id or 0)
+
+
+def _decode_token_ids(processor, token_ids: list[int]) -> str:
+    if not token_ids:
+        return ""
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is not None and hasattr(tokenizer, "decode"):
+        return tokenizer.decode(
+            token_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+    if hasattr(processor, "decode"):
+        return processor.decode(
+            token_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+    if hasattr(processor, "batch_decode"):
+        return processor.batch_decode(
+            [token_ids],
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )[0]
+    return ""
 
 
 def _resize_training_image(image: Image.Image, resize_mode: str) -> Image.Image:

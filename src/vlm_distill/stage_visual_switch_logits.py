@@ -741,6 +741,30 @@ class VisualSwitchDistiller:
             return None
         return int(token_id)
 
+    def _decode_teacher_tokens(self, token_ids: list[int]) -> str:
+        if not token_ids:
+            return ""
+        tokenizer = getattr(self._teacher_processor, "tokenizer", None)
+        if tokenizer is not None and hasattr(tokenizer, "decode"):
+            return tokenizer.decode(
+                token_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )
+        if hasattr(self._teacher_processor, "decode"):
+            return self._teacher_processor.decode(
+                token_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )
+        if hasattr(self._teacher_processor, "batch_decode"):
+            return self._teacher_processor.batch_decode(
+                [token_ids],
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0]
+        return ""
+
     def _generate_for_sample_from_student_visual(
         self,
         *,
@@ -760,6 +784,7 @@ class VisualSwitchDistiller:
             teacher_inputs,
             prompt_input_ids,
             full_input_ids,
+            prompt_token_len,
             answer_token_ids_from_forward,
         ) = _build_teacher_forcing_inputs_and_answer_span(
             self._teacher_processor,
@@ -826,14 +851,17 @@ class VisualSwitchDistiller:
         field = self.config.distillation.switch_logits_field
         debug_info = {
             "prompt_input_len": prompt_len,
+            "prompt_token_len": prompt_token_len,
             "prompt_embed_len": prompt_embed_len,
             "full_input_len": len(full_input_ids),
             "full_embed_len": full_embed_len,
             "visual_extra_prompt": visual_extra_prompt,
             "visual_extra_full": visual_extra_full,
             "answer_start_logit_index": answer_start_logit_index,
+            "answer_len": answer_len,
             "teacher_tokens_len": answer_len,
             "switch_logits_answer_token_ids_len": len(answer_token_ids_from_forward),
+            "decoded_answer_head": self._decode_teacher_tokens(answer_token_ids_from_forward[: min(answer_len, 32)])[:160],
             "token_identity_validation_passed": True,
         }
         return {
@@ -1110,12 +1138,15 @@ def _print_first_switch_logits_debug(row: dict[str, Any], *, field_name: str) ->
     print(f"  raw_seq_len_minus_prompt_len: {effective_len}")
     if debug_info:
         print(f"  prompt_input_len: {debug_info.get('prompt_input_len')}")
+        print(f"  prompt_token_len: {debug_info.get('prompt_token_len')}")
         print(f"  prompt_embed_len: {debug_info.get('prompt_embed_len')}")
         print(f"  full_input_len: {debug_info.get('full_input_len')}")
         print(f"  full_embed_len: {debug_info.get('full_embed_len')}")
         print(f"  visual_extra_prompt: {debug_info.get('visual_extra_prompt')}")
         print(f"  visual_extra_full: {debug_info.get('visual_extra_full')}")
         print(f"  answer_start_logit_index: {debug_info.get('answer_start_logit_index')}")
+        print(f"  answer_len: {debug_info.get('answer_len')}")
+        print(f"  decoded_answer_head: {debug_info.get('decoded_answer_head')}")
     print(f"  vocab_size: {payload.get('vocab_size')}")
     print(f"  top_k_first_token: {top_k_first_token}")
     print(

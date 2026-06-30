@@ -77,6 +77,8 @@ class VlmTrainingDataset:
         _validate_student_supervised_labels_against_teacher_tokens(
             example=example,
             labels=item["labels"],
+            processor=self.processor,
+            prompt=prompt,
             config=self.config,
         )
         if not self._token_identity_debug_printed:
@@ -156,6 +158,8 @@ def _validate_student_supervised_labels_against_teacher_tokens(
     *,
     example: dict[str, Any],
     labels,
+    processor,
+    prompt: str,
     config: PipelineConfig,
 ) -> None:
     if not _student_label_alignment_required(config):
@@ -169,6 +173,28 @@ def _validate_student_supervised_labels_against_teacher_tokens(
             f"Student label token identity mismatch. id={example.get('id')}, "
             f"{build_token_mismatch_details(expected=teacher_tokens, actual=supervised_label_ids, actual_field_name='actual_student_label_id')}"
         )
+    decoded_supervised = _decode_token_ids(processor, supervised_label_ids)
+    teacher_answer = str(example.get("teacher_answer") or "").strip()
+    if decoded_supervised[: min(len(decoded_supervised), 80)] != teacher_answer[: min(len(teacher_answer), 80)]:
+        raise ValueError(
+            f"Student supervised label text head does not match teacher_answer. id={example.get('id')}"
+        )
+    prompt_head = prompt.strip()[:80]
+    if prompt_head and prompt_head in decoded_supervised:
+        raise ValueError(f"Student supervised labels contain prompt text. id={example.get('id')}")
+    if any(
+        marker in decoded_supervised
+        for marker in (
+            "<|im_start|>user",
+            "<|im_start|>assistant",
+            "<|im_end|>",
+            "<user>",
+            "</user>",
+            "<assistant>",
+            "</assistant>",
+        )
+    ):
+        raise ValueError(f"Student supervised labels contain chat role headers. id={example.get('id')}")
 
 
 def train_student(config: PipelineConfig) -> Path:
@@ -985,6 +1011,31 @@ def _extract_teacher_tokens(row: dict[str, Any]) -> list[int]:
     if isinstance(generated, list):
         return [int(value) for value in generated]
     return []
+
+
+def _decode_token_ids(processor, token_ids: list[int]) -> str:
+    if not token_ids:
+        return ""
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is not None and hasattr(tokenizer, "decode"):
+        return tokenizer.decode(
+            token_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+    if hasattr(processor, "decode"):
+        return processor.decode(
+            token_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+    if hasattr(processor, "batch_decode"):
+        return processor.batch_decode(
+            [token_ids],
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )[0]
+    return ""
 
 
 def _load_training_rows(config: PipelineConfig) -> list[dict[str, Any]]:

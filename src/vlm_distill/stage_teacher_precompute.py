@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 from urllib.parse import urljoin
 
+from .chat_spans import build_vlm_chat_answer_span
 from .config_schema import PipelineConfig, format_prompt, resolve_label_path
 from .data_manifest import VlmSample, read_jsonl, validate_manifest
 from .device_utils import (
@@ -1701,7 +1702,14 @@ def compute_teacher_forced_answer_logits(
 ) -> dict[str, Any]:
     import torch
 
-    prompt_inputs, full_inputs, prompt_input_ids, full_input_ids, answer_token_ids = _build_teacher_forcing_inputs_and_answer_span(
+    (
+        prompt_inputs,
+        full_inputs,
+        prompt_input_ids,
+        full_input_ids,
+        prompt_token_len,
+        answer_token_ids,
+    ) = _build_teacher_forcing_inputs_and_answer_span(
         processor,
         image,
         prompt,
@@ -1712,12 +1720,13 @@ def compute_teacher_forced_answer_logits(
     input_device = select_model_input_device(model, label="Teacher forcing")
     prompt_inputs = batch_to_device(prompt_inputs, input_device)
     full_inputs = batch_to_device(full_inputs, input_device)
-    prefix_len = len(prompt_input_ids)
     answer_len = len(answer_token_ids)
+    if [int(token_id) for token_id in teacher_tokens] != answer_token_ids:
+        raise ValueError("Teacher tokens do not match canonical assistant answer token ids.")
     with torch.no_grad():
         outputs = model(**full_inputs)
     full_logits = outputs.logits
-    answer_logits = full_logits[:, prefix_len - 1 : prefix_len - 1 + answer_len, :]
+    answer_logits = full_logits[:, prompt_token_len - 1 : prompt_token_len - 1 + answer_len, :]
     if int(answer_logits.shape[1]) != answer_len:
         raise ValueError(
             "Teacher-forced logits length mismatch: "
@@ -1747,50 +1756,25 @@ def compute_teacher_forced_answer_logits(
 
 
 def _build_teacher_forcing_inputs_and_answer_span(processor, image, prompt: str, teacher_answer: str):
-    prompt_inputs = _build_multimodal_inputs_for_processor(processor, image, prompt)
-    full_inputs = _build_multimodal_inputs_for_processor(
-        processor,
-        image,
-        _join_prompt_and_answer(prompt, teacher_answer),
+    span = build_vlm_chat_answer_span(processor, image, prompt, teacher_answer)
+    return (
+        span.prompt_inputs,
+        span.full_inputs,
+        span.prompt_input_ids,
+        span.full_input_ids,
+        span.prompt_token_len,
+        span.answer_token_ids,
     )
-    prompt_input_ids = [int(token_id) for token_id in prompt_inputs["input_ids"][0].tolist()]
-    full_input_ids = [int(token_id) for token_id in full_inputs["input_ids"][0].tolist()]
-    prefix_len = len(prompt_input_ids)
-    answer_token_ids = full_input_ids[prefix_len:]
-    return prompt_inputs, full_inputs, prompt_input_ids, full_input_ids, answer_token_ids
 
 
 def _extract_answer_token_ids_from_full_input(processor, image, prompt: str, teacher_answer: str) -> list[int]:
-    _, _, _, _, answer_token_ids = _build_teacher_forcing_inputs_and_answer_span(
+    _, _, _, _, _, answer_token_ids = _build_teacher_forcing_inputs_and_answer_span(
         processor,
         image,
         prompt,
         teacher_answer,
     )
     return answer_token_ids
-
-
-def _build_multimodal_inputs_for_processor(processor, image, text: str):
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image"},
-                {"type": "text", "text": text},
-            ],
-        }
-    ]
-    templated = processor.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    return processor(text=[templated], images=[image], return_tensors="pt")
-
-
-def _join_prompt_and_answer(prompt: str, answer: str) -> str:
-    separator = "" if prompt.endswith((" ", "\n")) else " "
-    return f"{prompt}{separator}{answer}".strip()
 
 
 def _assert_teacher_logits_answer_length(row: dict[str, Any], field_name: str) -> None:
