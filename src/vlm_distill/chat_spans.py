@@ -15,6 +15,7 @@ class VlmChatAnswerSpan:
     prompt_input_ids: list[int]
     full_input_ids: list[int]
     prompt_token_len: int
+    assistant_tail_ids: list[int]
     answer_token_ids: list[int]
 
 
@@ -76,7 +77,15 @@ def build_vlm_chat_answer_span(
     if full_input_ids[:prompt_token_len] != prompt_input_ids:
         raise ValueError("Full chat input does not preserve the prompt-only token prefix.")
 
-    answer_token_ids = full_input_ids[prompt_token_len:]
+    assistant_tail_ids = full_input_ids[prompt_token_len:]
+    tokenizer = getattr(processor, "tokenizer", processor)
+    raw_answer_token_ids = tokenizer(answer, add_special_tokens=False)["input_ids"]
+    answer_token_ids = [int(token_id) for token_id in raw_answer_token_ids]
+    if assistant_tail_ids[: len(answer_token_ids)] != answer_token_ids:
+        raise ValueError(
+            "Canonical assistant answer token span mismatch. "
+            f"{_build_assistant_tail_debug_details(processor, answer_token_ids, assistant_tail_ids)}"
+        )
     return VlmChatAnswerSpan(
         prompt_text=prompt_text,
         full_text=full_text,
@@ -85,6 +94,7 @@ def build_vlm_chat_answer_span(
         prompt_input_ids=prompt_input_ids,
         full_input_ids=full_input_ids,
         prompt_token_len=prompt_token_len,
+        assistant_tail_ids=assistant_tail_ids,
         answer_token_ids=answer_token_ids,
     )
 
@@ -107,3 +117,42 @@ def _processor_call(processor, *, image: Image.Image, text: str, **kwargs):
         return processor(images=[image], text=[text], **kwargs)
     except TypeError:
         return processor(text=[text], images=[image], **kwargs)
+
+
+def _decode_token_ids(processor, token_ids: list[int]) -> str:
+    if not token_ids:
+        return ""
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is not None and hasattr(tokenizer, "decode"):
+        return tokenizer.decode(
+            token_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+    if hasattr(processor, "decode"):
+        return processor.decode(
+            token_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+    if hasattr(processor, "batch_decode"):
+        return processor.batch_decode(
+            [token_ids],
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )[0]
+    return ""
+
+
+def _build_assistant_tail_debug_details(processor, raw_answer_token_ids: list[int], assistant_tail_ids: list[int]) -> str:
+    answer_len = len(raw_answer_token_ids)
+    assistant_tail_head = assistant_tail_ids[:answer_len]
+    trailing_tail_ids = assistant_tail_ids[answer_len:]
+    details = {
+        "decoded_raw_answer_token_ids": repr(_decode_token_ids(processor, raw_answer_token_ids)),
+        "decoded_assistant_tail_ids_head": repr(_decode_token_ids(processor, assistant_tail_head)),
+        "first_20_raw_answer_token_ids": raw_answer_token_ids[:20],
+        "first_20_assistant_tail_ids": assistant_tail_ids[:20],
+        "extra_trailing_assistant_tail_ids_after_raw_answer": trailing_tail_ids,
+    }
+    return ", ".join(f"{key}={value}" for key, value in details.items())

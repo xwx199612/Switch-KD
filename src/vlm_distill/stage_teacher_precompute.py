@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 from urllib.parse import urljoin
 
-from .chat_spans import build_vlm_chat_answer_span
 from .config_schema import PipelineConfig, format_prompt, resolve_label_path
 from .data_manifest import VlmSample, read_jsonl, validate_manifest
 from .device_utils import (
@@ -28,6 +27,7 @@ from .device_utils import (
 )
 from .model_loading import apply_attn_implementation, resolve_model_path
 from .stage_visual_switch_logits import _compact_adaptive_sequence_logits
+from .chat_spans import build_vlm_chat_answer_span
 
 
 class TeacherBackend(Protocol):
@@ -1708,6 +1708,7 @@ def compute_teacher_forced_answer_logits(
         prompt_input_ids,
         full_input_ids,
         prompt_token_len,
+        assistant_tail_ids,
         answer_token_ids,
     ) = _build_teacher_forcing_inputs_and_answer_span(
         processor,
@@ -1722,7 +1723,15 @@ def compute_teacher_forced_answer_logits(
     full_inputs = batch_to_device(full_inputs, input_device)
     answer_len = len(answer_token_ids)
     if [int(token_id) for token_id in teacher_tokens] != answer_token_ids:
-        raise ValueError("Teacher tokens do not match canonical assistant answer token ids.")
+        raise ValueError(
+            "Teacher tokens do not match canonical assistant answer token ids. "
+            f"first_20_teacher_tokens={teacher_tokens[:20]}, "
+            f"first_20_raw_answer_token_ids={answer_token_ids[:20]}, "
+            f"first_20_assistant_tail_ids={assistant_tail_ids[:20]}, "
+            f"decoded_raw_answer_token_ids={_decode_teacher_tokens(processor, answer_token_ids)!r}, "
+            f"decoded_assistant_tail_ids_head={_decode_teacher_tokens(processor, assistant_tail_ids[:answer_len])!r}, "
+            f"extra_trailing_assistant_tail_ids_after_raw_answer={assistant_tail_ids[answer_len:]}"
+        )
     with torch.no_grad():
         outputs = model(**full_inputs)
     full_logits = outputs.logits
@@ -1763,18 +1772,31 @@ def _build_teacher_forcing_inputs_and_answer_span(processor, image, prompt: str,
         span.prompt_input_ids,
         span.full_input_ids,
         span.prompt_token_len,
+        span.assistant_tail_ids,
         span.answer_token_ids,
     )
 
 
 def _extract_answer_token_ids_from_full_input(processor, image, prompt: str, teacher_answer: str) -> list[int]:
-    _, _, _, _, _, answer_token_ids = _build_teacher_forcing_inputs_and_answer_span(
+    _, _, _, _, _, _, answer_token_ids = _build_teacher_forcing_inputs_and_answer_span(
         processor,
         image,
         prompt,
         teacher_answer,
     )
     return answer_token_ids
+
+
+def _decode_teacher_tokens(processor, token_ids: list[int]) -> str:
+    if not token_ids:
+        return ""
+    tokenizer = getattr(processor, "tokenizer", None)
+    decoder = tokenizer if tokenizer is not None else processor
+    return decoder.decode(
+        token_ids,
+        skip_special_tokens=False,
+        clean_up_tokenization_spaces=False,
+    )
 
 
 def _assert_teacher_logits_answer_length(row: dict[str, Any], field_name: str) -> None:

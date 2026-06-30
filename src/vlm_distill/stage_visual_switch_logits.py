@@ -785,6 +785,7 @@ class VisualSwitchDistiller:
             prompt_input_ids,
             full_input_ids,
             prompt_token_len,
+            assistant_tail_ids,
             answer_token_ids_from_forward,
         ) = _build_teacher_forcing_inputs_and_answer_span(
             self._teacher_processor,
@@ -827,7 +828,12 @@ class VisualSwitchDistiller:
             raise ValueError(
                 "Switch logits token identity mismatch. "
                 f"id={sample.id}, image={sample.image}, "
-                f"{build_token_mismatch_details(expected=teacher_tokens, actual=answer_token_ids_from_forward, actual_field_name='actual_answer_token_id', extra={'prompt_len': prompt_len, 'full_input_len': len(full_input_ids)})}"
+                f"{build_token_mismatch_details(expected=teacher_tokens, actual=answer_token_ids_from_forward, actual_field_name='actual_answer_token_id', extra={'prompt_len': prompt_len, 'full_input_len': len(full_input_ids)})}, "
+                f"decoded_raw_answer_token_ids={self._decode_teacher_tokens(answer_token_ids_from_forward)!r}, "
+                f"decoded_assistant_tail_ids_head={self._decode_teacher_tokens(assistant_tail_ids[:answer_len])!r}, "
+                f"first_20_raw_answer_token_ids={answer_token_ids_from_forward[:20]}, "
+                f"first_20_assistant_tail_ids={assistant_tail_ids[:20]}, "
+                f"extra_trailing_assistant_tail_ids_after_raw_answer={assistant_tail_ids[answer_len:]}"
             )
         answer_start_logit_index = prompt_embed_len - 1
         answer_logits = switch_logits[

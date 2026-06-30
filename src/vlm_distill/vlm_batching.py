@@ -85,6 +85,8 @@ def build_vlm_full_answer_span_inputs(
     labels = model_inputs["input_ids"].clone()
     if mask_prompt_labels:
         labels[:prompt_token_len] = -100
+    answer_end = prompt_token_len + len(answer_token_ids)
+    labels[answer_end:] = -100
     supervised_label_ids = [int(token_id) for token_id in labels[labels != -100].tolist()]
     if supervised_label_ids != answer_token_ids:
         raise ValueError("Student supervised labels are not aligned to the assistant answer span.")
