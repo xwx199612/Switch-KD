@@ -461,10 +461,7 @@ def resolve_prediction_path(data: DataConfig) -> Path:
 
 
 def resolve_training_manifest_path(data: DataConfig) -> Path:
-    path = data.training_manifest_path or data.manifest_path
-    if path is None:
-        raise ValueError("data.training_manifest_path or legacy data.manifest_path must be set.")
-    return path
+    return data.training_manifest_path
 
 
 def resolve_inference_manifest_path(data: DataConfig) -> Path:

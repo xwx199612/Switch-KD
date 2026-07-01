@@ -52,6 +52,12 @@ def main() -> None:
     ):
         command_parser = subparsers.add_parser(command)
         command_parser.add_argument("--config", type=Path, required=True)
+        if command == "validate-manifest":
+            command_parser.add_argument(
+                "--split",
+                choices=("training", "inference"),
+                default="training",
+            )
     validate_teacher_parser = subparsers.add_parser("validate-teacher")
     validate_teacher_parser.add_argument("--config", type=Path, required=True)
     teacher_stats_parser = subparsers.add_parser("teacher-label-stats")
@@ -80,13 +86,19 @@ def main() -> None:
     config = load_config(args.config)
 
     if args.command == "validate-manifest":
-        manifest_path = resolve_training_manifest_path(config.data)
+        if args.split == "inference":
+            manifest_path = resolve_inference_manifest_path(config.data)
+        else:
+            manifest_path = resolve_training_manifest_path(config.data)
         samples = validate_manifest(
             manifest_path,
             image_root=config.data.image_root,
             max_samples=config.data.max_samples,
         )
-        print(f"OK validated manifest samples={len(samples)} path={manifest_path}")
+        print(
+            "OK validated manifest "
+            f"split={args.split} samples={len(samples)} path={manifest_path}"
+        )
         return
 
     if args.command == "validate-teacher":

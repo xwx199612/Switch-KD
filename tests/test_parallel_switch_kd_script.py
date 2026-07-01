@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import os
 import subprocess
 from pathlib import Path
@@ -18,6 +19,17 @@ GENERATED_CONFIGS = [
     Path(f"configs/generated/parsing_switch_kd_switch_logits_gpu{gpu}.yaml")
     for gpu in range(4)
 ]
+
+
+def _import_workspace_cli(monkeypatch):
+    monkeypatch.syspath_prepend(str(Path("src").resolve()))
+    for module_name in (
+        "vlm_distill.cli",
+        "vlm_distill.config_schema",
+        "vlm_distill",
+    ):
+        sys.modules.pop(module_name, None)
+    return importlib.import_module("vlm_distill.cli")
 
 
 def _read_yaml(path: Path) -> dict:
@@ -252,6 +264,109 @@ distillation:
     cli.main()
 
     assert calls == ["teacher_precompute"]
+
+
+def test_cli_validate_manifest_defaults_to_training_split(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    cli = _import_workspace_cli(monkeypatch)
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+data:
+  manifest_path: manifest.jsonl
+  inference_manifest_path: inference.jsonl
+  distill_path: distill.jsonl
+  label_path: labels.jsonl
+teacher:
+  model_name: mock-teacher
+student:
+  model_name: mock-student
+  output_dir: out
+  adapter_dir: adapter
+distillation:
+  method: switch_kd
+""".strip(),
+        encoding="utf-8",
+    )
+    seen_paths: list[Path] = []
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["vlm-distill", "validate-manifest", "--config", str(config_path)],
+    )
+    monkeypatch.setattr(
+        cli,
+        "validate_manifest",
+        lambda path, **kwargs: seen_paths.append(path) or ["sample"],
+    )
+
+    cli.main()
+
+    assert seen_paths == [Path("manifest.jsonl")]
+    assert (
+        "OK validated manifest split=training samples=1 path=manifest.jsonl"
+        in capsys.readouterr().out
+    )
+
+
+def test_cli_validate_manifest_supports_inference_split(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    cli = _import_workspace_cli(monkeypatch)
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+data:
+  manifest_path: manifest.jsonl
+  inference_manifest_path: inference.jsonl
+  distill_path: distill.jsonl
+  label_path: labels.jsonl
+teacher:
+  model_name: mock-teacher
+student:
+  model_name: mock-student
+  output_dir: out
+  adapter_dir: adapter
+distillation:
+  method: switch_kd
+""".strip(),
+        encoding="utf-8",
+    )
+    seen_paths: list[Path] = []
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vlm-distill",
+            "validate-manifest",
+            "--config",
+            str(config_path),
+            "--split",
+            "inference",
+        ],
+    )
+    monkeypatch.setattr(
+        cli,
+        "validate_manifest",
+        lambda path, **kwargs: seen_paths.append(path) or ["sample"],
+    )
+
+    cli.main()
+
+    assert seen_paths == [Path("inference.jsonl")]
+    assert (
+        "OK validated manifest split=inference samples=1 path=inference.jsonl"
+        in capsys.readouterr().out
+    )
 
 
 def test_cli_teacher_logits_is_not_a_compute_command(monkeypatch, tmp_path):
