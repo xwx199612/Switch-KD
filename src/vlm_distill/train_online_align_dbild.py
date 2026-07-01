@@ -298,28 +298,33 @@ def align_logits_to_supervised_positions(teacher_logits, student_logits, teacher
     if teacher_logits.shape[0] != 1:
         raise ValueError(
             "align_logits_to_supervised_positions currently requires batch_size == 1 "
-            "for strict teacher/student answer-logit alignment."
+            "for strict causal shifted teacher/student answer-logit alignment."
         )
 
-    teacher_mask = teacher_labels != -100
-    student_mask = student_labels != -100
+    teacher_shift_logits = teacher_logits[:, :-1, :]
+    teacher_shift_labels = teacher_labels[:, 1:]
+    student_shift_logits = student_logits[:, :-1, :]
+    student_shift_labels = student_labels[:, 1:]
+
+    teacher_mask = teacher_shift_labels != -100
+    student_mask = student_shift_labels != -100
     teacher_count = int(teacher_mask[0].sum().item())
     student_count = int(student_mask[0].sum().item())
 
     if teacher_count <= 0 or student_count <= 0:
         raise ValueError(
-            "No supervised answer tokens found for strict alignment: "
+            "No supervised answer tokens found after causal shifted alignment: "
             f"teacher_count={teacher_count}, student_count={student_count}."
         )
     if teacher_count != student_count:
         raise ValueError(
-            "Teacher/student supervised token count mismatch during strict alignment: "
+            "Teacher/student supervised token count mismatch during causal shifted alignment: "
             f"teacher_count={teacher_count}, student_count={student_count}."
         )
 
     vocab = student_logits.shape[-1]
-    teacher_answer_logits = teacher_logits[teacher_mask].view(1, teacher_count, vocab)
-    student_answer_logits = student_logits[student_mask].view(1, student_count, vocab)
+    teacher_answer_logits = teacher_shift_logits[teacher_mask].view(1, teacher_count, vocab)
+    student_answer_logits = student_shift_logits[student_mask].view(1, student_count, vocab)
     aligned_attention_mask = torch.ones(
         (1, teacher_count),
         device=student_logits.device,
@@ -412,7 +417,7 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
     if config.training.batch_size != 1:
         raise ValueError(
             "This online full-logits DBiLD script currently requires training.batch_size == 1 "
-            "for safe supervised suffix alignment."
+            "for strict causal shifted teacher/student answer-logit alignment."
         )
 
     rows = _validate_rows(config)
@@ -495,6 +500,8 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
                 print(f"student_logits.shape={tuple(student_logits.shape)}")
                 print(f"teacher_labels.shape={tuple(teacher_labels.shape)}")
                 print(f"student_labels.shape={tuple(labels.shape)}")
+                print(f"teacher_shift_seq_len={int(teacher_logits.shape[1] - 1)}")
+                print(f"student_shift_seq_len={int(student_logits.shape[1] - 1)}")
                 print(f"teacher_supervised_count={teacher_supervised_count}")
                 print(f"student_supervised_count={student_supervised_count}")
                 print(f"aligned_teacher_logits.shape={tuple(aligned_teacher_logits.shape)}")
