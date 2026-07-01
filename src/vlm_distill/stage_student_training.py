@@ -34,6 +34,47 @@ from .model_loading import apply_attn_implementation, resolve_model_path
 from .token_alignment import build_token_mismatch_details, coerce_token_ids
 
 
+def _count_model_parameters(model) -> dict[str, int | float]:
+    total = sum(parameter.numel() for parameter in model.parameters())
+    trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+    frozen = total - trainable
+    ratio = float(trainable / total) if total else 0.0
+    return {
+        "total_parameter_count": int(total),
+        "trainable_parameter_count": int(trainable),
+        "frozen_parameter_count": int(frozen),
+        "trainable_ratio": ratio,
+    }
+
+
+def _to_float(value) -> float | None:
+    if value is None:
+        return None
+    if hasattr(value, "detach"):
+        return float(value.detach().float().item())
+    return float(value)
+
+
+def _reference_kind(reference) -> str:
+    if isinstance(reference, dict):
+        return "compact"
+    if reference is None:
+        return "none"
+    return "dense"
+
+
+def _reference_vocab_size(reference) -> int | None:
+    if isinstance(reference, dict):
+        value = reference.get("vocab_size")
+        return int(value) if value is not None else None
+    if reference is None:
+        return None
+    shape = getattr(reference, "shape", None)
+    if shape is None or len(shape) <= 0:
+        return None
+    return int(shape[-1])
+
+
 class VlmTrainingDataset:
     """Tokenize multimodal samples lazily to avoid Arrow overflows on image tensors."""
 
@@ -415,6 +456,7 @@ def _build_switch_kd_trainer():
                 lm_weight=distill.lm_loss_weight,
                 dbild_weight=distill.dbild_loss_weight,
                 vsd_weight=distill.vsd_loss_weight,
+                inactive_logit_margin=distill.inactive_logit_margin,
                 temperature=distill.kd_temperature,
                 top_k=distill.dbild_top_k,
                 top_k_mode=distill.dbild_top_k_mode,
@@ -424,8 +466,25 @@ def _build_switch_kd_trainer():
                 kl_mode=distill.dbild_kl_mode,
                 min_prob=distill.dbild_min_prob,
             )
-            self._switch_kd_last_losses: dict[str, float] | None = None
+            self._switch_kd_last_losses: dict[str, Any] | None = None
             self._switch_kd_last_logged_step = -1
+            self._switch_kd_last_grad_norm: float | None = None
+            self._switch_kd_parameter_stats = _count_model_parameters(self.model)
+            self._switch_kd_loss_trace_path = self.switch_kd_config.student.output_dir / "loss_trace.jsonl"
+            self._switch_kd_loss_trace_path.parent.mkdir(parents=True, exist_ok=True)
+            self._switch_kd_loss_trace_handle = self._switch_kd_loss_trace_path.open(
+                "a",
+                encoding="utf-8",
+                buffering=1,
+            )
+            print(
+                "Switch-KD parameter stats:",
+                f"total_parameter_count={self._switch_kd_parameter_stats['total_parameter_count']}",
+                f"trainable_parameter_count={self._switch_kd_parameter_stats['trainable_parameter_count']}",
+                f"frozen_parameter_count={self._switch_kd_parameter_stats['frozen_parameter_count']}",
+                f"trainable_ratio={self._switch_kd_parameter_stats['trainable_ratio']:.6f}",
+                f"loss_trace_path={self._switch_kd_loss_trace_path}",
+            )
 
         def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
             distill = self.switch_kd_config.distillation
@@ -497,6 +556,9 @@ def _build_switch_kd_trainer():
             )
 
             supervision_mask = build_supervision_mask(labels)
+            sequence_length = int(labels.shape[-1])
+            batch_size = int(labels.shape[0])
+            supervised_token_count = int(supervision_mask.detach().sum().item())
             loss_output = self.switch_kd_loss(
                 student_logits=student_logits,
                 labels=labels,
@@ -512,11 +574,34 @@ def _build_switch_kd_trainer():
                 "lm_loss": float(loss_output.lm_loss.detach().float().item()),
                 "dbild_loss": float(loss_output.dbild_loss.detach().float().item()),
                 "vsd_loss": float(loss_output.vsd_loss.detach().float().item()),
+                "batch_size": batch_size,
+                "gradient_accumulation_steps": int(self.args.gradient_accumulation_steps),
+                "sequence_length": sequence_length,
+                "supervised_token_count": supervised_token_count,
+                "prompt_token_len": int(student_prompt_len) if student_prompt_len is not None else None,
+                "student_vocab_size": student_vocab_size,
+                "teacher_reference_kind": _reference_kind(teacher_logits),
+                "switch_reference_kind": _reference_kind(switch_logits),
+                "teacher_reference_vocab_size": _reference_vocab_size(teacher_logits),
+                "switch_reference_vocab_size": _reference_vocab_size(switch_logits),
+                "dbild_top_k": int(distill.dbild_top_k),
+                "dbild_top_k_mode": str(distill.dbild_top_k_mode),
+                "dbild_kneedle_candidate_k": int(distill.dbild_kneedle_candidate_k),
+                "dbild_min_top_k": int(distill.dbild_min_top_k),
+                "dbild_max_top_k": (
+                    int(distill.dbild_max_top_k) if distill.dbild_max_top_k is not None else None
+                ),
+                "kd_temperature": float(distill.kd_temperature),
+                "dbild_kl_mode": str(distill.dbild_kl_mode),
+                "lm_loss_weight": float(distill.lm_loss_weight),
+                "dbild_loss_weight": float(distill.dbild_loss_weight),
+                "vsd_loss_weight": float(distill.vsd_loss_weight),
             }
             return (loss_output.loss, outputs) if return_outputs else loss_output.loss
 
         def log(self, logs, *args, **kwargs):
             super().log(logs, *args, **kwargs)
+            self._switch_kd_last_grad_norm = _to_float(logs.get("grad_norm")) if isinstance(logs, dict) else None
             self._maybe_log_switch_kd_progress()
 
         def _maybe_log_switch_kd_progress(self) -> None:
@@ -536,6 +621,7 @@ def _build_switch_kd_trainer():
             lr = 0.0
             if self.optimizer is not None and self.optimizer.param_groups:
                 lr = float(self.optimizer.param_groups[0].get("lr", 0.0))
+            epoch = _to_float(self.state.epoch)
 
             gpu_mem_allocated = 0
             gpu_mem_reserved = 0
@@ -544,13 +630,50 @@ def _build_switch_kd_trainer():
                 gpu_mem_reserved = int(torch.cuda.memory_reserved())
 
             loss_values = self._switch_kd_last_losses
+            trace_row = {
+                "step": global_step,
+                "global_step": global_step,
+                "epoch": epoch,
+                "total_loss": loss_values["total_loss"],
+                "lm_loss": loss_values["lm_loss"],
+                "dbild_loss": loss_values["dbild_loss"],
+                "vsd_loss": loss_values["vsd_loss"],
+                "learning_rate": lr,
+                "grad_norm": self._switch_kd_last_grad_norm,
+                "batch_size": loss_values["batch_size"],
+                "gradient_accumulation_steps": loss_values["gradient_accumulation_steps"],
+                "sequence_length": loss_values["sequence_length"],
+                "supervised_token_count": loss_values["supervised_token_count"],
+                "prompt_token_len": loss_values["prompt_token_len"],
+                "student_vocab_size": loss_values["student_vocab_size"],
+                "teacher_reference_kind": loss_values["teacher_reference_kind"],
+                "switch_reference_kind": loss_values["switch_reference_kind"],
+                "teacher_reference_vocab_size": loss_values["teacher_reference_vocab_size"],
+                "switch_reference_vocab_size": loss_values["switch_reference_vocab_size"],
+                "dbild_top_k": loss_values["dbild_top_k"],
+                "dbild_top_k_mode": loss_values["dbild_top_k_mode"],
+                "dbild_kneedle_candidate_k": loss_values["dbild_kneedle_candidate_k"],
+                "dbild_min_top_k": loss_values["dbild_min_top_k"],
+                "dbild_max_top_k": loss_values["dbild_max_top_k"],
+                "kd_temperature": loss_values["kd_temperature"],
+                "dbild_kl_mode": loss_values["dbild_kl_mode"],
+                "lm_loss_weight": loss_values["lm_loss_weight"],
+                "dbild_loss_weight": loss_values["dbild_loss_weight"],
+                "vsd_loss_weight": loss_values["vsd_loss_weight"],
+                **self._switch_kd_parameter_stats,
+            }
+            self._switch_kd_loss_trace_handle.write(json.dumps(trace_row, ensure_ascii=True) + "\n")
+            self._switch_kd_loss_trace_handle.flush()
             print(
-                f"[train] step={global_step}/{max_steps} "
-                f"total_loss={loss_values['total_loss']:.6f} "
-                f"lm_loss={loss_values['lm_loss']:.6f} "
-                f"dbild_loss={loss_values['dbild_loss']:.6f} "
-                f"vsd_loss={loss_values['vsd_loss']:.6f} "
+                f"[loss-trace] step={global_step}/{max_steps} "
+                f"total={loss_values['total_loss']:.6f} "
+                f"lm={loss_values['lm_loss']:.6f} "
+                f"dbild={loss_values['dbild_loss']:.6f} "
+                f"vsd={loss_values['vsd_loss']:.6f} "
                 f"lr={lr:.8g} "
+                f"supervised_tokens={loss_values['supervised_token_count']} "
+                f"seq_len={loss_values['sequence_length']} "
+                f"trainable_params={self._switch_kd_parameter_stats['trainable_parameter_count']} "
                 f"gpu_mem_allocated={gpu_mem_allocated} "
                 f"gpu_mem_reserved={gpu_mem_reserved}"
             )

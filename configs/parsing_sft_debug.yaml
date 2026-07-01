@@ -3,32 +3,39 @@ seed: 42
 options:
   task_name: parsing
   quality: 1080p
-  teacher_quantization: 8bit
+  teacher_quantization: 4bit
   student_quantization: 4bit
   # Derived automatically:
   # label_profile = {quality}_{teacher_quantization}
   # response_profile = {quality}_{teacher_quantization}_student_{student_quantization}
 
+# This config is intended for Qwen3-VL-32B-Instruct -> Qwen3-VL-8B-Instruct.
+# The current loaders resolve local model paths and load with local_files_only=True internally.
+# Do not add local_files_only / trust_remote_code here unless config_schema.py is updated.
+
 data:
-  manifest_path: outputs/switch-kd_debug/{task_name}_manifest.jsonl
-  distill_path: outputs/switch-kd_debug/{task_name}_switch_kd_{response_profile}.jsonl
+  training_manifest_path: outputs/switch-kd/{task_name}_training_manifest.jsonl
+  inference_manifest_path: outputs/switch-kd/{task_name}_inference_manifest.jsonl
+  distill_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}.jsonl
   # Canonical unified teacher output. Rows contain teacher_answer,
   # teacher_tokens, and teacher_logits when distillation.teacher_logits=true.
-  label_path: outputs/switch-kd_debug/{task_name}_teacher_labels_{label_profile}.jsonl
+  label_path: outputs/switch-kd/{task_name}_teacher_labels_{label_profile}.jsonl
   # Deprecated: teacher_logits_path is intentionally omitted from this workflow.
   # Legacy configs may still set it, but Switch-KD now reads teacher logits from label_path.
-  switch_logits_path: outputs/switch-kd_debug/{task_name}_switch_logits_{response_profile}.jsonl
-  eval_path: outputs/switch-kd_debug/{task_name}_switch_kd_{response_profile}.jsonl
-  prediction_path: outputs/switch-kd_debug/{task_name}_switch_kd_{response_profile}/student_predictions.jsonl
-  image_dir: /home/phison/vlm_distill/TV_data
+  switch_logits_path: outputs/switch-kd/{task_name}_switch_logits_{response_profile}.jsonl
+  eval_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}.jsonl
+  prediction_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/student_predictions.jsonl
+  training_image_dir: /mnt/nvme0/vlm_distill/TV_data
+  inference_image_dir: /mnt/nvme0/vlm_distill/validation_data
   image_root: .
-  max_samples: 2
+  # Keep this small for the first smoke test. Set to empty/null for full training.
+  max_samples: 
 
 teacher:
   backend: hf
-  model_name: /home/phison/vlm_distill/models/Qwen2.5-VL-7B-Instruct
+  model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-32B-Instruct
   device_map: auto
-  torch_dtype: float161
+  torch_dtype: bfloat16
   quantization: "{teacher_quantization}"
   attn_implementation: sdpa
   temperature: 0.0
@@ -36,11 +43,11 @@ teacher:
   image_resize: "{quality}"
 
 student:
-  backend: hf
-  model_name: /home/phison/vlm_distill/models/Qwen2.5-VL-3B-Instruct
-  output_dir: outputs/switch-kd_debug/{task_name}_switch_kd_{response_profile}
-  adapter_dir: outputs/switch-kd_debug/{task_name}_switch_kd_{response_profile}/adapter
-  merged_model_path: outputs/switch-kd_debug/{task_name}_switch_kd_{response_profile}/merged_model
+  model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-8B-Instruct
+  output_dir: outputs/switch-kd/parsing_sft_debug
+  adapter_dir: outputs/switch-kd/parsing_sft_debug/adapter
+  merged_model_path: 
+  #outputs/switch-kd/{task_name}_switch_kd_{response_profile}/merged_model
 
   # Prediction-time model/adapter controls.
   # Leave inference_model_path empty to let predict prefer merged_model_path when it exists,
@@ -52,8 +59,8 @@ student:
 
   device_map: auto
   use_lora: true
-  lora_rank: 16
-  lora_alpha: 32
+  lora_rank: 32
+  lora_alpha: 64
   lora_dropout: 0.05
   target_modules:
     - q_proj
@@ -66,14 +73,15 @@ student:
 training:
   epochs: 3
   batch_size: 1
-  gradient_accumulation_steps: 16
-  learning_rate: 0.0001
+  gradient_accumulation_steps: 8
+  learning_rate: 1.0e-4
   warmup_ratio: 0.03
   max_steps:
   log_every: 50
   save_every: 1000
-  mixed_precision: bf16           # 伺服器 GPU 支援 bf16 時 否則為 fp16
-  gradient_checkpointing: false   # 只有 VRAM 夠時才關
+  mixed_precision: bf16
+  # Safer default for Qwen3-VL-8B + 1080p + max_length=4096.
+  gradient_checkpointing: true
   image_resize: "{quality}"
   max_length: 4096
   freeze_vision_tower: true
@@ -81,10 +89,11 @@ training:
 
 
 distillation:
-  method: switch_kd
+  method: sft
+  #switch_kd
   # Unified teacher precompute: label writes teacher_answer, teacher_tokens,
   # and answer-only teacher_logits together. Set false for answer/tokens only.
-  teacher_logits: true
+  teacher_logits: false
   confidence_weighting: true
   min_teacher_confidence: 0.35
   prompt_template: |
@@ -92,11 +101,11 @@ distillation:
 
     Task:
     {query}
-    
+
     Identify all visible interactive UI elements in this screenshot.
-    
+
     Interactive elements include:
-    
+
     * tabs
     * buttons
     * app icons
@@ -108,17 +117,17 @@ distillation:
     * search boxes or text inputs
     * clickable text links
     * settings, account, search, or navigation icons
-    
+
     Exclude:
-    
+
     * movie descriptions
     * recommendation summaries
     * long informational text
     * advertisements
     * decorative or non-interactive text
-    
+
     Rules:
-    
+
     * Prefer recall over brevity.
     * Do not return only the top navigation bar.
     * Include every visible app icon, tile, card, tab, button, menu item, and focused item.
@@ -131,17 +140,17 @@ distillation:
     * If unsure between `"unknown"` and `"other"`, use `"other"`.
     * Each element must be an object with exactly these fields: `"text"`, `"type"`, and `"focused"`.
     * Never output schema words as UI elements: `"text"`, `"type"`, `"focused"`, `"true"`, `"false"`, `"elements"`.
-    
+
     The `"type"` field is a closed enum.
     For every element, `"type"` MUST be exactly one of:
     ["tab", "button", "app_icon", "app_tile", "menu_item", "tile", "toggle", "input", "icon", "link", "other", "unknown"]
-    
+
     Do not invent new type names.
     Do not output values such as:
     "card", "movie", "navigation", "nav", "search_bar", "setting", "settings", "text", "label", "image", "poster", "banner", or "carousel".
-    
+
     Map ambiguous UI elements to the closest allowed type:
-    
+
     * card, movie, poster, banner, recommendation, content, carousel -> "tile"
     * app, application -> "app_icon"
     * navigation, nav -> "tab"
@@ -156,13 +165,13 @@ distillation:
     * Recommended, Popular, Top selling, movie cards, show cards -> "tile"
     * settings rows, channel, setup, program, labels, adjustment, type -> "menu_item"
     * if unsure -> "other"
-    
+
     Return raw JSON only.
     Do not explain.
     Do not use markdown.
     Do not include comments.
     Do not include trailing commas.
-    
+
     Use this schema:
     {{
     "elements": [
@@ -174,9 +183,8 @@ distillation:
     ]
     }}
   lm_loss_weight: 1.0
-  dbild_loss_weight: 0.5
-  vsd_loss_weight: 0.5
-  inactive_logit_margin: 30.0
+  dbild_loss_weight: 0.0
+  vsd_loss_weight: 0.0
   kd_temperature: 2.0
   dbild_top_k: 64
   dbild_top_k_mode: kneedle
@@ -193,7 +201,7 @@ distillation:
   teacher_token_embedding_path: model.language_model.embed_tokens
   teacher_lm_head_path: lm_head
   switch_cache_student_visual: true
-  student_visual_cache_dir: outputs/switch-kd_debug/{task_name}_student_visual_cache_{response_profile}
+  student_visual_cache_dir: outputs/switch-kd/{task_name}_student_visual_cache_{response_profile}
   keep_student_visual_cache_on_cpu: true
   visual_token_placeholder: "<|image_pad|>"
   max_cached_logits_vocab: 4096
@@ -207,7 +215,7 @@ distillation:
       allow_fallback_adapter: false
 
 evaluation:
-  output_path: outputs/switch-kd_debug/{task_name}_switch_kd_{response_profile}/eval_report.json
+  output_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/eval_report.json
   metrics:
     - exact_match
     - token_f1

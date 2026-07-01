@@ -9,6 +9,7 @@ from .config_schema import (
     resolve_inference_manifest_path,
     resolve_label_path,
     resolve_prediction_path,
+    resolve_switch_logits_path,
     resolve_training_manifest_path,
 )
 from .data_manifest import validate_manifest
@@ -21,6 +22,7 @@ from .stage_student_prediction import create_student_predictions
 from .stage_teacher_precompute import create_teacher_precompute_dataset
 from .stage_student_training import train_student
 from .stage_visual_switch_logits import create_visual_switch_dataset
+from .switch_logits_validation import validate_switch_logits_file
 from .teacher_label_stats import format_teacher_label_summary, summarize_teacher_label_file
 
 
@@ -45,6 +47,7 @@ def main() -> None:
         "teacher-precompute",
         "predict",
         "switch-logits",
+        "validate-switch-logits",
         "train",
         "merge-adapter",
         "evaluate",
@@ -169,6 +172,18 @@ def main() -> None:
         print(f"OK visual-switch logits written: {output_path}")
         return
 
+    if args.command == "validate-switch-logits":
+        summary = validate_switch_logits_file(
+            resolve_switch_logits_path(config.data),
+            max_samples=config.data.max_samples,
+            switch_logits_field=config.distillation.switch_logits_field,
+            teacher_logits_field=config.distillation.teacher_logits_field,
+        )
+        _print_switch_logits_validation_summary(summary)
+        if summary["invalid_rows"]:
+            raise SystemExit(1)
+        return
+
     if args.command == "train":
         artifact = train_student(config)
         print(f"OK student artifact written: {artifact}")
@@ -210,6 +225,24 @@ def _print_teacher_validation_summary(summary: dict[str, object]) -> None:
     print(f"logits_length_match_rows={summary['logits_length_match_rows']}")
     print(f"logits_length_mismatch_rows={summary['logits_length_mismatch_rows']}")
     print(f"full_sequence_logits_rows={summary['full_sequence_logits_rows']}")
+    print(f"vocab_mismatch_rows={summary['vocab_mismatch_rows']}")
+    print(f"invalid_rows={summary['invalid_rows']}")
+    bad_rows = summary.get("bad_rows") or []
+    if bad_rows:
+        print("first_bad_rows:")
+        for bad_row in bad_rows:
+            print(f"  id={bad_row['id']} reason={bad_row['reason']}")
+
+
+def _print_switch_logits_validation_summary(summary: dict[str, object]) -> None:
+    print(f"OK validated switch logits path={summary['path']}")
+    print(f"total_rows={summary['total_rows']}")
+    print(f"rows_with_switch_logits={summary['rows_with_switch_logits']}")
+    print(f"valid_switch_logits_rows={summary['valid_switch_logits_rows']}")
+    print(f"token_identity_match_rows={summary['token_identity_match_rows']}")
+    print(f"token_identity_mismatch_rows={summary['token_identity_mismatch_rows']}")
+    print(f"length_match_rows={summary['length_match_rows']}")
+    print(f"length_mismatch_rows={summary['length_mismatch_rows']}")
     print(f"vocab_mismatch_rows={summary['vocab_mismatch_rows']}")
     print(f"invalid_rows={summary['invalid_rows']}")
     bad_rows = summary.get("bad_rows") or []

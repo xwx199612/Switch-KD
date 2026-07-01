@@ -154,6 +154,7 @@ distillation:
   lm_loss_weight: 1.0
   dbild_loss_weight: 0.5
   vsd_loss_weight: 0.5
+  inactive_logit_margin: 30.0
   kd_temperature: 2.0
   dbild_top_k: 64
   dbild_top_k_mode: kneedle

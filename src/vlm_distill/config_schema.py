@@ -107,6 +107,7 @@ class DistillationConfig:
     lm_loss_weight: float = 1.0
     dbild_loss_weight: float = 0.5
     vsd_loss_weight: float = 0.5
+    inactive_logit_margin: float = 30.0
     kd_temperature: float = 2.0
     dbild_top_k: int = 64
     dbild_top_k_mode: str = "fixed"

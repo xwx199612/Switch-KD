@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-_INACTIVE_LOGIT = -1.0e4
-
 
 @dataclass
 class SwitchKDLossOutput:
@@ -33,6 +31,7 @@ class SwitchKDLoss:
         max_top_k: int | None = None,
         kl_mode: str = "symmetric",
         min_prob: float = 0.0,
+        inactive_logit_margin: float = 30.0,
     ) -> None:
         self.lm_weight = lm_weight
         self.dbild_weight = dbild_weight
@@ -45,6 +44,7 @@ class SwitchKDLoss:
         self.max_top_k = max_top_k
         self.kl_mode = kl_mode
         self.min_prob = min_prob
+        self.inactive_logit_margin = inactive_logit_margin
         self._debug_emitted = False
 
     def __call__(
@@ -88,6 +88,7 @@ class SwitchKDLoss:
                 max_top_k=self.max_top_k,
                 kl_mode=self.kl_mode,
                 min_prob=self.min_prob,
+                inactive_logit_margin=self.inactive_logit_margin,
                 token_weight=teacher_token_weight,
                 sample_weight=sample_weight,
                 debug_enabled=debug_enabled,
@@ -108,6 +109,7 @@ class SwitchKDLoss:
                 max_top_k=self.max_top_k,
                 kl_mode=self.kl_mode,
                 min_prob=self.min_prob,
+                inactive_logit_margin=self.inactive_logit_margin,
                 token_weight=switch_token_weight,
                 sample_weight=sample_weight,
                 debug_enabled=debug_enabled,
@@ -115,8 +117,36 @@ class SwitchKDLoss:
             )
 
         loss = self.lm_weight * lm_loss + self.dbild_weight * dbild_loss + self.vsd_weight * vsd_loss
+        if debug_enabled:
+            print(
+                "Switch-KD first loss values:",
+                f"lm_loss={float(lm_loss.detach().float().item()):.6f}",
+                f"dbild_loss={float(dbild_loss.detach().float().item()):.6f}",
+                f"vsd_loss={float(vsd_loss.detach().float().item()):.6f}",
+                f"total_loss={float(loss.detach().float().item()):.6f}",
+            )
         self._debug_emitted = True
-        return SwitchKDLossOutput(loss=loss, lm_loss=lm_loss, dbild_loss=dbild_loss, vsd_loss=vsd_loss)
+        return SwitchKDLossOutput(
+            loss=loss,
+            lm_loss=lm_loss,
+            dbild_loss=dbild_loss,
+            vsd_loss=vsd_loss,
+        )
+
+
+def _finite_inactive_floor(values, active_mask, *, margin, fallback):
+    import torch
+
+    if values.is_floating_point():
+        inactive_sentinel = torch.finfo(values.dtype).max
+    else:
+        inactive_sentinel = torch.iinfo(values.dtype).max
+    safe_values = torch.where(active_mask, values, values.new_full((), inactive_sentinel))
+    active_min = safe_values.min(dim=-1, keepdim=True).values
+    has_active = active_mask.any(dim=-1, keepdim=True)
+    floor = active_min - values.new_full((), margin)
+    fallback_floor = values.new_full(active_min.shape, fallback)
+    return torch.where(has_active, floor, fallback_floor)
 
 
 def _emit_reference_debug(
@@ -236,7 +266,9 @@ def _apply_candidate_min_prob(
     scaled_reference,
     candidate_active,
     min_prob: float,
+    inactive_logit_margin: float,
 ):
+    import torch
     import torch.nn.functional as F
 
     if min_prob <= 0:
@@ -247,9 +279,20 @@ def _apply_candidate_min_prob(
     informative = candidate_active & (
         (student_log_probs.exp() > min_prob) | (reference_log_probs.exp() > min_prob)
     )
-    fill_value = scaled_student.new_full((), _INACTIVE_LOGIT)
-    scaled_student = scaled_student.masked_fill(~informative, fill_value)
-    scaled_reference = scaled_reference.masked_fill(~informative, fill_value)
+    student_floor = _finite_inactive_floor(
+        scaled_student,
+        informative,
+        margin=inactive_logit_margin,
+        fallback=-30.0,
+    )
+    reference_floor = _finite_inactive_floor(
+        scaled_reference,
+        informative,
+        margin=inactive_logit_margin,
+        fallback=-30.0,
+    )
+    scaled_student = torch.where(informative, scaled_student, student_floor)
+    scaled_reference = torch.where(informative, scaled_reference, reference_floor)
     return scaled_student, scaled_reference, informative
 
 
@@ -265,6 +308,7 @@ def dynamic_bidirectional_logits_difference(
     max_top_k: int | None = None,
     kl_mode: str = "symmetric",
     min_prob: float = 0.0,
+    inactive_logit_margin: float = 30.0,
     token_weight=None,
     sample_weight: float | None = None,
     debug_enabled: bool = False,
@@ -287,6 +331,7 @@ def dynamic_bidirectional_logits_difference(
             max_top_k=max_top_k,
             kl_mode=kl_mode,
             min_prob=min_prob,
+            inactive_logit_margin=inactive_logit_margin,
             token_weight=token_weight,
             sample_weight=sample_weight,
             debug_enabled=debug_enabled,
@@ -347,14 +392,34 @@ def dynamic_bidirectional_logits_difference(
             reference_token_k_stats=_token_k_stats(reference_token_k),
         )
 
-    fill_value = student_candidate_logits.new_full((), _INACTIVE_LOGIT)
-    scaled_student = (student_candidate_logits / safe_temperature).masked_fill(~candidate_active, fill_value)
-    scaled_reference = (reference_candidate_logits / safe_temperature).masked_fill(~candidate_active, fill_value)
+    student_floor = _finite_inactive_floor(
+        student_candidate_logits,
+        candidate_active,
+        margin=inactive_logit_margin,
+        fallback=-30.0,
+    )
+    reference_floor = _finite_inactive_floor(
+        reference_candidate_logits,
+        candidate_active,
+        margin=inactive_logit_margin,
+        fallback=-30.0,
+    )
+    scaled_student = torch.where(
+        candidate_active,
+        student_candidate_logits / safe_temperature,
+        student_floor / safe_temperature,
+    )
+    scaled_reference = torch.where(
+        candidate_active,
+        reference_candidate_logits / safe_temperature,
+        reference_floor / safe_temperature,
+    )
     scaled_student, scaled_reference, candidate_active = _apply_candidate_min_prob(
         scaled_student=scaled_student,
         scaled_reference=scaled_reference,
         candidate_active=candidate_active,
         min_prob=min_prob,
+        inactive_logit_margin=inactive_logit_margin,
     )
 
     student_log_probs = F.log_softmax(scaled_student, dim=-1)
@@ -399,6 +464,7 @@ def visual_switch_divergence(
     max_top_k: int | None = None,
     kl_mode: str = "symmetric",
     min_prob: float = 0.0,
+    inactive_logit_margin: float = 30.0,
     token_weight=None,
     sample_weight: float | None = None,
     debug_enabled: bool = False,
@@ -416,6 +482,7 @@ def visual_switch_divergence(
         max_top_k=max_top_k,
         kl_mode=kl_mode,
         min_prob=min_prob,
+        inactive_logit_margin=inactive_logit_margin,
         token_weight=token_weight,
         sample_weight=sample_weight,
         debug_enabled=debug_enabled,
@@ -436,6 +503,7 @@ def _compact_bidirectional_logits_difference(
     max_top_k: int | None = None,
     kl_mode: str = "symmetric",
     min_prob: float = 0.0,
+    inactive_logit_margin: float = 30.0,
     token_weight=None,
     sample_weight: float | None = None,
     debug_enabled: bool = False,
@@ -491,10 +559,15 @@ def _compact_bidirectional_logits_difference(
 
     matches = candidate_indices.unsqueeze(-1) == reference_indices.unsqueeze(-2)
     matches = matches & reference_active.unsqueeze(-2)
-    reference_fill = reference_values.new_full((), _INACTIVE_LOGIT)
+    reference_fill = _finite_inactive_floor(
+        reference_values,
+        reference_active,
+        margin=inactive_logit_margin,
+        fallback=-30.0,
+    )
     reference_candidate_logits = torch.where(
         matches.any(dim=-1),
-        reference_values.unsqueeze(-2).masked_fill(~matches, reference_fill).max(dim=-1).values,
+        torch.where(matches, reference_values.unsqueeze(-2), reference_fill.unsqueeze(-2)).max(dim=-1).values,
         reference_fill,
     )
 
@@ -512,14 +585,34 @@ def _compact_bidirectional_logits_difference(
             reference_token_k_stats=_token_k_stats(token_k),
         )
 
-    fill_value = student_candidate_logits.new_full((), _INACTIVE_LOGIT)
-    scaled_student = (student_candidate_logits / safe_temperature).masked_fill(~candidate_active, fill_value)
-    scaled_reference = (reference_candidate_logits / safe_temperature).masked_fill(~candidate_active, fill_value)
+    student_floor = _finite_inactive_floor(
+        student_candidate_logits,
+        candidate_active,
+        margin=inactive_logit_margin,
+        fallback=-30.0,
+    )
+    reference_floor = _finite_inactive_floor(
+        reference_candidate_logits,
+        candidate_active,
+        margin=inactive_logit_margin,
+        fallback=-30.0,
+    )
+    scaled_student = torch.where(
+        candidate_active,
+        student_candidate_logits / safe_temperature,
+        student_floor / safe_temperature,
+    )
+    scaled_reference = torch.where(
+        candidate_active,
+        reference_candidate_logits / safe_temperature,
+        reference_floor / safe_temperature,
+    )
     scaled_student, scaled_reference, candidate_active = _apply_candidate_min_prob(
         scaled_student=scaled_student,
         scaled_reference=scaled_reference,
         candidate_active=candidate_active,
         min_prob=min_prob,
+        inactive_logit_margin=inactive_logit_margin,
     )
 
     student_log_probs = F.log_softmax(scaled_student, dim=-1)

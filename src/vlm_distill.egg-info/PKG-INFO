@@ -151,18 +151,27 @@ vlm-distill validate-manifest \
 
 ---
 
-## Validate Labels
+## Validate Teacher
 
 ```powershell
 vlm-distill validate-teacher \
   --config configs/parsing_response_distillation.yaml
 ```
 
-This reads `data.distill_path` and reports:
+This reads the canonical teacher output at `data.label_path` and reports:
 
 - `total_rows`
-- `teacher_answer_rows`
-- `non_empty_teacher_answer_rows`
+- `valid_json_rows`
+- `schema_valid_rows`
+- `string_list_rows`
+- `answer_token_match_rows`
+- `answer_token_mismatch_rows`
+- `rows_with_teacher_logits` when `distillation.teacher_logits: true`
+- `valid_teacher_logits_rows`
+- `logits_length_match_rows`
+- `logits_length_mismatch_rows`
+- `full_sequence_logits_rows`
+- `vocab_mismatch_rows`
 
 ---
 
@@ -173,9 +182,15 @@ vlm-distill label \
   --config configs/parsing_labeling.yaml
 ```
 
-`label` now runs unified teacher precompute. For Switch-KD configs with
-`distillation.teacher_logits: true`, this writes `teacher_answer`,
-`teacher_tokens`, and answer-only `teacher_logits` to `data.label_path`.
+`label` now runs unified teacher precompute. By default
+`distillation.teacher_logits: true`, so Switch-KD configs write
+`teacher_answer`, `teacher_tokens`, and answer-only `teacher_logits` from the
+same final normalized answer to `data.label_path`. `data.label_path` is the
+canonical teacher precompute output. `data.teacher_logits_path` is deprecated
+and is not used by the main Switch-KD workflow.
+
+Use `vlm-distill teacher-precompute --config ...` for the same stage with an
+explicit name.
 
 ---
 
@@ -186,7 +201,7 @@ vlm-distill predict \
   --config configs/parsing_response_distillation.yaml
 ```
 
-This reads `data.manifest_path` and writes predictions to `data.prediction_path` when set, otherwise `data.distill_path`.
+This reads `data.inference_manifest_path` and writes predictions to `data.prediction_path` when set, otherwise `data.distill_path`. It does not read the training manifest.
 
 ---
 
@@ -205,6 +220,26 @@ vlm-distill switch-logits \
 vlm-distill train \
   --config configs/switch_kd_4060ti.yaml
 ```
+
+Single-process single-GPU training with model sharding:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m vlm_distill.cli train --config configs/parsing_switch_kd.yaml
+```
+
+Multi-GPU DDP training with Accelerate:
+
+```bash
+accelerate launch --num_processes 4 -m vlm_distill.cli train --config configs/parsing_switch_kd_ddp.yaml
+```
+
+Notes:
+
+- `student.device_map: auto` means Hugging Face model sharding, not data parallel training.
+- For multi-GPU DDP, use `student.device_map: null` so `from_pretrained()` does not shard the student model.
+- `effective_batch = batch_size * gradient_accumulation_steps * num_gpus`
+- Single GPU example: `batch_size=1`, `gradient_accumulation_steps=16`, `effective_batch=16`
+- 4-GPU DDP example: `batch_size=1`, `gradient_accumulation_steps=4`, `effective_batch=1 * 4 * 4 = 16`
 
 ---
 
@@ -321,7 +356,7 @@ Expected teacher response:
 Validate generated labels:
 
 ```powershell
-vlm-distill validate-teacher \
+  vlm-distill validate-teacher \
   --config configs/parsing_labeling.yaml
 ```
 
@@ -412,7 +447,7 @@ D:\TV_data\teacher_parsing\grounding_teacher_labels.jsonl
 Validate generated labels:
 
 ```powershell
-vlm-distill validate-teacher \
+  vlm-distill validate-teacher \
   --config configs/grounding_test.yaml
 ```
 
@@ -601,11 +636,73 @@ Adapter / merge guidance:
 * Only merge for deployment, and always write the merged weights into a new directory such as `outputs/.../merged-*`.
 * Do not write merged weights back into the base model directory. Keeping the original student base untouched lets you merge other adapters later.
 
+Export a standalone merged student model for inference:
+
+```bash
+vlm-distill merge-adapter --config configs/parsing_switch_kd.yaml
+```
+
+Use one main YAML for both training and inference. The recommended customer-facing flow is:
+
+```bash
+vlm-distill create-manifest --config configs/parsing_switch_kd.yaml --split training
+vlm-distill create-manifest --config configs/parsing_switch_kd.yaml --split inference
+
+vlm-distill label --config configs/parsing_switch_kd.yaml
+vlm-distill switch-logits --config configs/parsing_switch_kd.yaml
+vlm-distill train --config configs/parsing_switch_kd.yaml
+vlm-distill predict --config configs/parsing_switch_kd.yaml
+```
+
+Do not maintain separate merge and inference configs such as `parsing_switch_kd_merge.yaml` and `parsing_switch_kd_infer.yaml`.
+
+`merge-adapter` always loads the base model from `student.model_name`, loads the PEFT adapter from `student.inference_adapter_path` or `student.adapter_dir`, and writes the merged model to `student.merged_model_path` or `student.output_dir/merged_model`.
+
+`predict` chooses the model source automatically:
+
+```text
+if student.inference_model_path is set:
+    use inference_model_path
+    adapter behavior follows load_adapter / merge_adapter
+
+elif student.merged_model_path exists:
+    use merged_model_path
+    disable adapter loading
+
+else:
+    use student.model_name
+    adapter behavior follows load_adapter / merge_adapter
+```
+
+When `predict` uses `student.merged_model_path`, it disables adapter loading to avoid applying the adapter twice.
+
+Recommended single-YAML student section:
+
+```yaml
+student:
+  model_name: /home/phison/vlm_distill/models/Qwen3-VL-8B-Instruct
+  output_dir: outputs/switch-kd/{task_name}_switch_kd_{response_profile}
+  adapter_dir: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/adapter
+  merged_model_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/merged_model
+  inference_model_path:
+  inference_adapter_path:
+  load_adapter: true
+  merge_adapter: false
+```
+
+Parallel teacher precompute helper:
+
+```bash
+bash scripts/run_parallel_switch_kd_precompute_4gpu.sh --clean-outputs teacher-precompute
+```
+
+This helper splits `outputs/switch-kd/parsing_manifest.jsonl` into four shard manifests, generates temporary configs in `configs/generated/`, launches four `teacher-precompute` workers with `CUDA_VISIBLE_DEVICES=0..3`, then merges shard teacher outputs back into `outputs/switch-kd/parsing_teacher_labels_480p_8bit.jsonl` after all workers succeed.
+
 ## Step 8
 
 Batch test a merged student model.
 
-Instead of using `infer_merged.py` one sample at a time, you can run the merged model on the whole manifest like `label`.
+Instead of using `infer_merged.py` one sample at a time, you can run the merged model on the whole manifest like `teacher-precompute`.
 
 Example config:
 
@@ -623,9 +720,13 @@ teacher:
 
 student:
   model_name: Qwen/Qwen2.5-VL-3B-Instruct
-  inference_model_path: outputs/student/merged_response_KD_480p_8bit
   output_dir: outputs/parsing_response_480p_8bit_student_4bit
   adapter_dir: outputs/parsing_response_480p_8bit_student_4bit/adapter
+  merged_model_path: outputs/student/merged_response_KD_480p_8bit
+  inference_model_path:
+  inference_adapter_path:
+  load_adapter: true
+  merge_adapter: false
   quantization: none
 
 distillation:
@@ -640,6 +741,14 @@ Run batch prediction:
 ```powershell
 vlm-distill predict \
   --config your_merged_eval_config.yaml
+```
+
+If `outputs/student/merged_response_KD_480p_8bit` already exists and `inference_model_path` is empty, `predict` will load that merged model automatically and log:
+
+```text
+prediction_model_source=merged_model_path
+model_path=outputs/student/merged_response_KD_480p_8bit
+adapter=disabled
 ```
 
 Typical output:
@@ -686,25 +795,33 @@ Notes for Qwen2.5-VL:
 
 Switch-KD training pipeline:
 
-```powershell
-vlm-distill validate-manifest \
-  --config configs/switch_kd_4060ti.yaml
-
-vlm-distill label \
-  --config configs/switch_kd_4060ti.yaml
-
-vlm-distill validate-teacher \
-  --config configs/switch_kd_4060ti.yaml
-
-vlm-distill switch-logits \
-  --config configs/switch_kd_4060ti.yaml
-
-vlm-distill train \
-  --config configs/switch_kd_4060ti.yaml
-
-vlm-distill evaluate \
-  --config configs/switch_kd_4060ti.yaml
+```bash
+python -m vlm_distill.cli teacher-precompute --config configs/parsing_switch_kd.yaml
+python -m vlm_distill.cli validate-teacher --config configs/parsing_switch_kd.yaml
+python -m vlm_distill.cli switch-logits --config configs/parsing_switch_kd.yaml
+python -m vlm_distill.cli train --config configs/parsing_switch_kd.yaml
 ```
+
+For Switch-KD, use `teacher-precompute`, followed by `validate-teacher`,
+`switch-logits`, and `train`. `distillation.teacher_logits: true` means teacher
+logits are generated during `teacher-precompute` into `data.label_path`, the
+canonical unified teacher output.
+
+4-GPU precompute:
+
+```bash
+bash scripts/run_parallel_switch_kd_precompute_4gpu.sh --clean-outputs teacher-precompute
+python -m vlm_distill.cli validate-teacher --config configs/parsing_switch_kd.yaml
+bash scripts/run_parallel_switch_kd_precompute_4gpu.sh --clean-outputs switch-logits
+```
+
+Or:
+
+```bash
+bash scripts/run_parallel_switch_kd_precompute_4gpu.sh --clean-outputs all
+```
+
+Here `all` means `teacher-precompute` then `switch-logits`.
 
 Training objective:
 

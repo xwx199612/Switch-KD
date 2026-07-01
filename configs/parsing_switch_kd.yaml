@@ -25,8 +25,8 @@ data:
   switch_logits_path: outputs/switch-kd/{task_name}_switch_logits_{response_profile}.jsonl
   eval_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}.jsonl
   prediction_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/student_predictions.jsonl
-  training_image_dir: /mnt/nvme0/vlm_distill/TV_data/train
-  inference_image_dir: /mnt/nvme0/vlm_distill/TV_data/inference
+  training_image_dir: /mnt/nvme0/vlm_distill/TV_data
+  inference_image_dir: /mnt/nvme0/vlm_distill/validation_data
   image_root: .
   # Keep this small for the first smoke test. Set to empty/null for full training.
   max_samples: 
@@ -46,7 +46,8 @@ student:
   model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-8B-Instruct
   output_dir: outputs/switch-kd/{task_name}_switch_kd_{response_profile}
   adapter_dir: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/adapter
-  merged_model_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/merged_model
+  merged_model_path: 
+  #outputs/switch-kd/{task_name}_switch_kd_{response_profile}/merged_model
 
   # Prediction-time model/adapter controls.
   # Leave inference_model_path empty to let predict prefer merged_model_path when it exists,
@@ -181,8 +182,9 @@ distillation:
     ]
     }}
   lm_loss_weight: 1.0
-  dbild_loss_weight: 0.5
-  vsd_loss_weight: 0.5
+  dbild_loss_weight: 1.0
+  vsd_loss_weight: 1.0
+  inactive_logit_margin: 30.0
   kd_temperature: 2.0
   dbild_top_k: 64
   dbild_top_k_mode: kneedle
