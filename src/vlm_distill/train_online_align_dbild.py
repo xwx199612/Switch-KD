@@ -12,7 +12,7 @@ from .device_utils import batch_to_device, resolve_requested_device_map, resolve
 from .loss_switch_kd import _causal_lm_loss, full_dynamic_bidirectional_logits_difference
 from .model_loading import apply_attn_implementation, resolve_model_path
 from .stage_student_training import VlmTrainingDataset
-from .vlm_batching import build_supervision_mask, build_vlm_data_collator, encode_vlm_training_sample, load_training_image
+from .vlm_batching import build_vlm_data_collator, encode_vlm_training_sample, load_training_image
 
 
 VISION_FREEZE_KEYWORDS = (
@@ -256,55 +256,76 @@ def _build_teacher_inputs(batch, teacher_processor, config):
         mask_prompt_labels=True,
         canonical_answer_span=True,
     )
+    teacher_labels = encoded.model_inputs.get("labels")
+    if teacher_labels is None:
+        raise ValueError("Teacher sample encoding did not produce labels for alignment.")
+    if not torch.is_tensor(teacher_labels) or teacher_labels.ndim != 1:
+        raise ValueError(
+            "Teacher labels must be a rank-1 tensor before batching, "
+            f"got {type(teacher_labels)!r} with shape {getattr(teacher_labels, 'shape', None)}."
+        )
+
     teacher_inputs = {
         key: value.unsqueeze(0) if torch.is_tensor(value) and value.ndim >= 1 else value
         for key, value in encoded.model_inputs.items()
         if key != "labels"
     }
-    return teacher_inputs
+    return teacher_inputs, teacher_labels.unsqueeze(0)
 
 
-def align_logits_to_supervised_positions(teacher_logits, student_logits, labels):
+def align_logits_to_supervised_positions(teacher_logits, student_logits, teacher_labels, student_labels):
     import torch
 
     if teacher_logits.ndim != 3 or student_logits.ndim != 3:
         raise ValueError("teacher_logits and student_logits must have shape [batch, seq, vocab].")
-    if labels.ndim != 2:
-        raise ValueError("labels must have shape [batch, seq].")
-    if teacher_logits.shape[0] != student_logits.shape[0] or student_logits.shape[0] != labels.shape[0]:
+    if teacher_labels.ndim != 2 or student_labels.ndim != 2:
+        raise ValueError("teacher_labels and student_labels must have shape [batch, seq].")
+    if (
+        teacher_logits.shape[0] != student_logits.shape[0]
+        or teacher_logits.shape[0] != teacher_labels.shape[0]
+        or student_logits.shape[0] != student_labels.shape[0]
+    ):
         raise ValueError(
-            "Batch size mismatch among teacher_logits, student_logits, and labels: "
-            f"{tuple(teacher_logits.shape)}, {tuple(student_logits.shape)}, {tuple(labels.shape)}."
+            "Batch size mismatch among teacher_logits, student_logits, teacher_labels, and student_labels: "
+            f"{tuple(teacher_logits.shape)}, {tuple(student_logits.shape)}, "
+            f"{tuple(teacher_labels.shape)}, {tuple(student_labels.shape)}."
         )
     if teacher_logits.shape[-1] != student_logits.shape[-1]:
         raise ValueError(
             "Teacher/student vocab size mismatch: "
             f"{teacher_logits.shape[-1]} vs {student_logits.shape[-1]}."
         )
-    if labels.shape[0] != 1:
+    if teacher_logits.shape[0] != 1:
         raise ValueError(
             "align_logits_to_supervised_positions currently requires batch_size == 1 "
-            "to avoid ambiguous per-sample answer-length alignment."
+            "for strict teacher/student answer-logit alignment."
         )
 
-    supervised_mask = labels != -100
-    supervised_count = int(supervised_mask[0].sum().item())
-    if supervised_count <= 0:
-        raise ValueError("No supervised answer tokens found in labels.")
-    if supervised_count > int(student_logits.shape[1]) or supervised_count > int(teacher_logits.shape[1]):
+    teacher_mask = teacher_labels != -100
+    student_mask = student_labels != -100
+    teacher_count = int(teacher_mask[0].sum().item())
+    student_count = int(student_mask[0].sum().item())
+
+    if teacher_count <= 0 or student_count <= 0:
         raise ValueError(
-            "Reliable suffix alignment is not possible because supervised_count exceeds sequence length. "
-            f"supervised_count={supervised_count}, teacher_seq={teacher_logits.shape[1]}, student_seq={student_logits.shape[1]}."
+            "No supervised answer tokens found for strict alignment: "
+            f"teacher_count={teacher_count}, student_count={student_count}."
+        )
+    if teacher_count != student_count:
+        raise ValueError(
+            "Teacher/student supervised token count mismatch during strict alignment: "
+            f"teacher_count={teacher_count}, student_count={student_count}."
         )
 
-    student_answer_logits = student_logits[supervised_mask].view(1, supervised_count, student_logits.shape[-1])
-    teacher_answer_logits = teacher_logits[:, -supervised_count:, :]
+    vocab = student_logits.shape[-1]
+    teacher_answer_logits = teacher_logits[teacher_mask].view(1, teacher_count, vocab)
+    student_answer_logits = student_logits[student_mask].view(1, student_count, vocab)
     aligned_attention_mask = torch.ones(
-        (1, supervised_count),
+        (1, teacher_count),
         device=student_logits.device,
         dtype=torch.float32,
     )
-    return teacher_answer_logits, student_answer_logits, aligned_attention_mask, supervised_count
+    return teacher_answer_logits, student_answer_logits, aligned_attention_mask, teacher_count, student_count
 
 
 def _validate_rows(config) -> list[dict[str, Any]]:
@@ -429,7 +450,7 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
             if total_target_steps is not None and global_step >= total_target_steps:
                 break
 
-            teacher_inputs = _build_teacher_inputs(batch, teacher_processor, config)
+            teacher_inputs, teacher_labels = _build_teacher_inputs(batch, teacher_processor, config)
             teacher_inputs = batch_to_device(teacher_inputs, teacher_input_device)
 
             student_batch = {
@@ -444,14 +465,14 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
                 with _autocast_context(config.training.mixed_precision):
                     teacher_outputs = teacher_model(**teacher_inputs)
                     teacher_logits = teacher_outputs.logits
+            teacher_labels = teacher_labels.to(device=teacher_logits.device)
 
             with _autocast_context(config.training.mixed_precision):
                 student_outputs = student_model(**student_batch)
                 student_logits = student_outputs.logits
                 lm_loss = _causal_lm_loss(student_logits, labels)
-                supervision_mask = build_supervision_mask(labels)
-                aligned_teacher_logits, aligned_student_logits, aligned_attention_mask, supervised_count = (
-                    align_logits_to_supervised_positions(teacher_logits, student_logits, labels)
+                aligned_teacher_logits, aligned_student_logits, aligned_attention_mask, teacher_supervised_count, student_supervised_count = (
+                    align_logits_to_supervised_positions(teacher_logits, student_logits, teacher_labels, labels)
                 )
                 align_loss = full_dynamic_bidirectional_logits_difference(
                     reference_logits=aligned_teacher_logits,
@@ -472,9 +493,10 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
             if not first_batch_debug_printed:
                 print(f"teacher_logits.shape={tuple(teacher_logits.shape)}")
                 print(f"student_logits.shape={tuple(student_logits.shape)}")
-                print(f"labels.shape={tuple(labels.shape)}")
-                print(f"supervised_count={supervised_count}")
-                print(f"supervision_mask.sum()={float(supervision_mask.sum().item())}")
+                print(f"teacher_labels.shape={tuple(teacher_labels.shape)}")
+                print(f"student_labels.shape={tuple(labels.shape)}")
+                print(f"teacher_supervised_count={teacher_supervised_count}")
+                print(f"student_supervised_count={student_supervised_count}")
                 print(f"aligned_teacher_logits.shape={tuple(aligned_teacher_logits.shape)}")
                 print(f"aligned_student_logits.shape={tuple(aligned_student_logits.shape)}")
                 print(f"aligned_attention_mask.shape={tuple(aligned_attention_mask.shape)}")

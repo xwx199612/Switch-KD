@@ -776,4 +776,4 @@ def full_dynamic_bidirectional_logits_difference(
 
     reference_guided = _branch_loss(reference_logits, reference_logits, target_logits)
     target_guided = _branch_loss(target_logits, reference_logits, target_logits)
-    return 0.5 * (reference_guided + target_guided)
+    return reference_guided + target_guided
