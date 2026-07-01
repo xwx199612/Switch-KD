@@ -296,6 +296,25 @@ def _apply_candidate_min_prob(
     return scaled_student, scaled_reference, informative
 
 
+def _internal_pairwise_logits_differences(selected_logits, active_mask=None):
+    import torch
+
+    k = int(selected_logits.shape[-1])
+    if k < 2:
+        raise ValueError(
+            "Pairwise logits differences require at least two selected logits. "
+            f"Got k={k}."
+        )
+
+    row_idx, col_idx = torch.triu_indices(k, k, offset=1, device=selected_logits.device)
+    diffs = selected_logits[..., row_idx] - selected_logits[..., col_idx]
+    if active_mask is None:
+        diff_active = torch.ones_like(diffs, dtype=torch.bool)
+    else:
+        diff_active = active_mask[..., row_idx] & active_mask[..., col_idx]
+    return diffs, diff_active
+
+
 def dynamic_bidirectional_logits_difference(
     student_logits,
     reference_logits,
@@ -702,12 +721,14 @@ def full_dynamic_bidirectional_logits_difference(
         vocab_size = int(selector_logits.shape[-1])
         if top_k_mode == "fixed":
             effective_top_k = min(int(top_k), vocab_size)
-            if effective_top_k < 1:
-                raise ValueError("top_k must be >= 1 for full DBiLD.")
+            if effective_top_k < 2:
+                raise ValueError("full DBiLD requires top_k >= 2 for pairwise logits differences.")
             indices = torch.topk(selector_logits, k=effective_top_k, dim=-1).indices
             active = torch.ones_like(indices, dtype=torch.bool)
             return indices, active
         if top_k_mode == "kneedle":
+            if int(min_top_k) < 2:
+                raise ValueError("full DBiLD requires min_top_k >= 2 for pairwise logits differences.")
             indices, active, _token_k = _kneedle_topk_indices(
                 selector_logits,
                 candidate_k=kneedle_candidate_k,
@@ -722,26 +743,38 @@ def full_dynamic_bidirectional_logits_difference(
         reference_selected = torch.gather(reference_source_logits, dim=-1, index=branch_indices)
         target_selected = torch.gather(target_source_logits, dim=-1, index=branch_indices)
 
-        reference_floor = _finite_inactive_floor(
+        reference_diffs, diff_active = _internal_pairwise_logits_differences(
             reference_selected,
             branch_active,
+        )
+        target_diffs, target_diff_active = _internal_pairwise_logits_differences(
+            target_selected,
+            branch_active,
+        )
+        if not torch.equal(diff_active, target_diff_active):
+            raise ValueError("Reference and target pairwise active masks must match in full DBiLD.")
+        diff_active = diff_active & target_diff_active
+
+        reference_floor = _finite_inactive_floor(
+            reference_diffs,
+            diff_active,
             margin=30.0,
             fallback=-30.0,
         )
         target_floor = _finite_inactive_floor(
-            target_selected,
-            branch_active,
+            target_diffs,
+            diff_active,
             margin=30.0,
             fallback=-30.0,
         )
         scaled_reference = torch.where(
-            branch_active,
-            reference_selected / safe_temperature,
+            diff_active,
+            reference_diffs / safe_temperature,
             reference_floor / safe_temperature,
         )
         scaled_target = torch.where(
-            branch_active,
-            target_selected / safe_temperature,
+            diff_active,
+            target_diffs / safe_temperature,
             target_floor / safe_temperature,
         )
 
@@ -761,7 +794,7 @@ def full_dynamic_bidirectional_logits_difference(
         else:
             raise ValueError(f"Unsupported kl_mode: {kl_mode}")
 
-        active_tokens = branch_active.any(dim=-1).to(token_loss.dtype)
+        active_tokens = diff_active.any(dim=-1).to(token_loss.dtype)
         token_loss = token_loss * active_tokens
         if attention_mask is not None:
             if attention_mask.shape != token_loss.shape:
