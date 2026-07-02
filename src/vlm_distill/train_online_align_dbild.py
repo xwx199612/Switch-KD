@@ -440,6 +440,52 @@ def _gpu_mem_stats() -> tuple[int, int]:
     return int(torch.cuda.memory_allocated()), int(torch.cuda.memory_reserved())
 
 
+def _check_no_quantized_cpu_offload(
+    model,
+    *,
+    role: str,
+    quantization: str | None,
+    resolved_device_map: str | None = None,
+    input_device: Any | None = None,
+):
+    if quantization not in {"4bit", "8bit"}:
+        return
+
+    device_map = getattr(model, "hf_device_map", None)
+    if device_map:
+        bad_entries = {
+            name: device
+            for name, device in device_map.items()
+            if str(device).lower() in {"cpu", "disk"}
+        }
+        if bad_entries:
+            preview = list(bad_entries.items())[:20]
+            raise RuntimeError(
+                f"{role} model is quantized with bitsandbytes ({quantization}) but some modules were placed on CPU/disk "
+                f"by device_map. This can trigger bitsandbytes CPU packing errors such as "
+                f"'N must be divisible by block_n'. Move the quantized {role} fully onto CUDA devices, reduce model size, "
+                f"free GPU memory, or use offline teacher logits. Offloaded modules preview: {preview}"
+            )
+
+    if input_device is not None and not str(input_device).lower().startswith("cuda"):
+        raise RuntimeError(
+            f"{role} model is quantized with bitsandbytes ({quantization}) but resolved to non-CUDA input device "
+            f"{input_device!r}. This can trigger bitsandbytes CPU packing errors such as "
+            f"'N must be divisible by block_n'. Resolved device_map={resolved_device_map!r}, "
+            f"hf_device_map={_format_device_map_summary(device_map)}. Move the quantized {role} fully onto CUDA "
+            f"devices, reduce model size, free GPU memory, or use offline teacher logits."
+        )
+
+
+def _format_device_map_summary(device_map: Any) -> str:
+    if not device_map:
+        return "None"
+    items = list(device_map.items())
+    preview = items[:20]
+    suffix = "" if len(items) <= 20 else f" ... ({len(items)} entries total)"
+    return f"{preview}{suffix}"
+
+
 def run_training(config, *, max_steps_override: int | None = None) -> Path:
     import torch
 
@@ -451,6 +497,13 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
 
     rows = _validate_rows(config)
     teacher_model, teacher_processor, teacher_model_path, _teacher_device_map, teacher_input_device = _load_teacher(config)
+    _check_no_quantized_cpu_offload(
+        teacher_model,
+        role="teacher",
+        quantization=config.teacher.quantization,
+        resolved_device_map=_teacher_device_map,
+        input_device=teacher_input_device,
+    )
     student_model, student_processor, student_model_path, _student_device_map = _load_student(config)
     student_model, trainable_summary = _apply_student_train_setup(config, student_model)
     student_input_device = select_model_input_device(student_model, label="student")
@@ -470,6 +523,9 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
     print(f"student_model_path={student_model_path}")
     print(f"teacher_quantization={config.teacher.quantization}")
     print(f"student_quantization={config.student.quantization}")
+    print(f"teacher_resolved_device_map={_teacher_device_map}")
+    print(f"teacher_hf_device_map={_format_device_map_summary(getattr(teacher_model, 'hf_device_map', None))}")
+    print(f"teacher_input_device={teacher_input_device}")
     print(f"mixed_precision={config.training.mixed_precision}")
     print("student vision frozen: true")
     print("VSD enabled: false")
@@ -486,6 +542,11 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
 
             teacher_inputs, teacher_labels = _build_teacher_inputs(batch, teacher_processor, config)
             teacher_inputs = batch_to_device(teacher_inputs, teacher_input_device)
+            teacher_forward_inputs = {
+                key: value
+                for key, value in teacher_inputs.items()
+                if key != "labels"
+            }
 
             student_batch = {
                 key: value
@@ -494,15 +555,20 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
             }
             student_batch = batch_to_device(student_batch, student_input_device)
             labels = student_batch["labels"]
+            student_forward_inputs = {
+                key: value
+                for key, value in student_batch.items()
+                if key != "labels"
+            }
 
             with torch.no_grad():
                 with _autocast_context(config.training.mixed_precision):
-                    teacher_outputs = teacher_model(**teacher_inputs)
+                    teacher_outputs = teacher_model(**teacher_forward_inputs)
                     teacher_logits = teacher_outputs.logits
             teacher_labels = teacher_labels.to(device=teacher_logits.device)
 
             with _autocast_context(config.training.mixed_precision):
-                student_outputs = student_model(**student_batch)
+                student_outputs = student_model(**student_forward_inputs)
                 student_logits = student_outputs.logits
                 lm_loss = _causal_lm_loss(student_logits, labels)
                 aligned_teacher_logits, aligned_student_logits, aligned_attention_mask, teacher_supervised_count, student_supervised_count = (
