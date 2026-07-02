@@ -25,17 +25,6 @@ VISION_FREEZE_KEYWORDS = (
     "visual.window_index",
 )
 
-TRAINABLE_KEYWORDS = (
-    "merger",
-    "projector",
-    "connector",
-    "language_model",
-    "model.layers",
-    "lm_head",
-    "lora",
-)
-
-
 @dataclass(frozen=True)
 class TrainableSummary:
     count: int
@@ -202,26 +191,63 @@ def _load_student(config):
     return model, processor, student_model_path, resolved_device_map
 
 
-def freeze_student_vision_keep_merger_lm_trainable(model) -> TrainableSummary:
+def _can_require_grad(parameter) -> bool:
+    return parameter.is_floating_point() or parameter.is_complex()
+
+
+def freeze_student_vision_keep_merger_lm_trainable(model, *, use_lora: bool) -> TrainableSummary:
+    trainable_names: list[str] = []
+
     for name, parameter in model.named_parameters():
         lowered = name.lower()
         if any(keyword in lowered for keyword in VISION_FREEZE_KEYWORDS):
             parameter.requires_grad_(False)
-        if any(keyword in lowered for keyword in TRAINABLE_KEYWORDS):
-            parameter.requires_grad_(True)
+            continue
 
-    trainable_names = [name for name, parameter in model.named_parameters() if parameter.requires_grad]
-    trainable_count = sum(parameter.numel() for _, parameter in model.named_parameters() if parameter.requires_grad)
-    total_count = sum(parameter.numel() for parameter in model.parameters())
-    ratio = float(trainable_count / total_count) if total_count else 0.0
+        if use_lora:
+            should_train = any(
+                keyword in lowered
+                for keyword in ("lora", "merger", "projector", "connector")
+            )
+        else:
+            should_train = any(
+                keyword in lowered
+                for keyword in (
+                    "merger",
+                    "projector",
+                    "connector",
+                    "language_model",
+                    "model.layers",
+                    "lm_head",
+                )
+            )
+
+        if should_train and _can_require_grad(parameter):
+            parameter.requires_grad_(True)
+            trainable_names.append(name)
+        else:
+            parameter.requires_grad_(False)
+
+    trainable_count = 0
+    total_count = 0
+    for parameter in model.parameters():
+        numel = parameter.numel()
+        total_count += numel
+        if parameter.requires_grad:
+            trainable_count += numel
+
+    ratio = float(trainable_count / max(total_count, 1))
+    first_trainable_names = trainable_names[:20]
+    print("Student trainable parameter summary:")
     print(f"trainable_param_count={trainable_count}")
+    print(f"total_param_count={total_count}")
     print(f"trainable_param_ratio={ratio:.6f}")
-    print("first_trainable_parameter_names=", trainable_names[:30])
+    print("first_trainable_parameter_names=", first_trainable_names)
     return TrainableSummary(
         count=int(trainable_count),
         total=int(total_count),
         ratio=ratio,
-        names=trainable_names[:30],
+        names=first_trainable_names,
     )
 
 
@@ -380,7 +406,10 @@ def _apply_student_train_setup(config, model):
         if hasattr(model, "config"):
             model.config.use_cache = False
     model = _maybe_enable_student_lora(config, model)
-    summary = freeze_student_vision_keep_merger_lm_trainable(model)
+    summary = freeze_student_vision_keep_merger_lm_trainable(
+        model,
+        use_lora=config.student.use_lora,
+    )
     model.train()
     return model, summary
 
