@@ -121,7 +121,6 @@ def main() -> None:
             rows = _run_model_on_samples(
                 loaded=loaded,
                 samples=samples,
-                output_jsonl=args.output_jsonl,
                 max_new_tokens=args.max_new_tokens,
             )
             raw_rows_by_role[spec.role] = rows
@@ -132,6 +131,11 @@ def main() -> None:
         raw_rows_by_role=raw_rows_by_role,
         match_threshold=args.match_threshold,
     )
+    _attach_bbox_eval_to_raw_rows(
+        raw_rows_by_role=raw_rows_by_role,
+        comparison_rows=comparison_rows,
+    )
+    write_jsonl(args.output_jsonl, _flatten_raw_rows(raw_rows_by_role))
     write_jsonl(args.comparison_output_jsonl, comparison_rows)
 
     summary = build_summary(
@@ -295,23 +299,20 @@ def _run_model_on_samples(
     *,
     loaded: LoadedInferenceModel,
     samples: list[dict[str, Any]],
-    output_jsonl: Path,
     max_new_tokens: int,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    with output_jsonl.open("a", encoding="utf-8") as handle:
-        for index, sample in enumerate(samples, start=1):
-            print(
-                f"[{loaded.role}] sample {index}/{len(samples)} "
-                f"id={sample['id']} image={sample['image']}"
-            )
-            row = _infer_single_sample(
-                loaded=loaded,
-                sample=sample,
-                max_new_tokens=max_new_tokens,
-            )
-            rows.append(row)
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    for index, sample in enumerate(samples, start=1):
+        print(
+            f"[{loaded.role}] sample {index}/{len(samples)} "
+            f"id={sample['id']} image={sample['image']}"
+        )
+        row = _infer_single_sample(
+            loaded=loaded,
+            sample=sample,
+            max_new_tokens=max_new_tokens,
+        )
+        rows.append(row)
     return rows
 
 
@@ -344,6 +345,7 @@ def _infer_single_sample(
         "adapter_path": loaded.adapter_path,
         "raw_output": raw_output,
         "parsed": parsed,
+        "bbox_eval_against_teacher32b": None,
     }
     if error is not None:
         row["error"] = error
@@ -525,10 +527,31 @@ def _normalize_bbox(value: Any) -> list[float] | None:
         return None
     bbox: list[float] = []
     for item in value:
-        if not isinstance(item, (int, float)):
+        numeric = _normalize_float(item)
+        if numeric is None:
             return None
-        bbox.append(float(item))
-    return bbox
+        bbox.append(numeric)
+    x1, y1, x2, y2 = bbox
+    if x2 < x1:
+        x1, x2 = x2, x1
+    if y2 < y1:
+        y1, y2 = y2, y1
+    width = x2 - x1
+    height = y2 - y1
+    if width <= 0 or height <= 0:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def _normalize_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_confidence(value: Any) -> float | None:
@@ -700,6 +723,11 @@ def _compare_single_sample(
                 ),
                 "name_similarity": max(best_similarity, 0.0),
                 "match_threshold": match_threshold,
+                "bbox_metrics": _build_bbox_metrics(
+                    reference_element=reference_element,
+                    candidate_element=candidate_element,
+                    matched=matched,
+                ),
             }
         )
     return rows
@@ -707,7 +735,7 @@ def _compare_single_sample(
 
 def build_summary(*, comparison_rows: list[dict[str, Any]], match_threshold: float) -> dict[str, Any]:
     summary: dict[str, Any] = {}
-    role_stats: dict[str, dict[str, float | int]] = {}
+    role_stats: dict[str, dict[str, Any]] = {}
 
     for role in COMPARISON_ROLES:
         rows = [row for row in comparison_rows if row["candidate_role"] == role]
@@ -727,11 +755,14 @@ def build_summary(*, comparison_rows: list[dict[str, Any]], match_threshold: flo
             "mean_name_similarity_matched_only": (
                 sum(matched_scores) / len(matched_scores) if matched_scores else 0.0
             ),
+            "bbox_metrics": _aggregate_bbox_metrics(rows),
         }
         summary[role] = role_stats[role]
 
     base = role_stats.get("base8b", {})
     distill = role_stats.get("distill32to8", {})
+    base_bbox = base.get("bbox_metrics") if isinstance(base, dict) else {}
+    distill_bbox = distill.get("bbox_metrics") if isinstance(distill, dict) else {}
     summary["distill_vs_base8b"] = {
         "recall_delta": float(distill.get("element_recall_against_32b", 0.0))
         - float(base.get("element_recall_against_32b", 0.0)),
@@ -743,6 +774,20 @@ def build_summary(*, comparison_rows: list[dict[str, Any]], match_threshold: flo
             distill.get("mean_name_similarity_matched_only", 0.0)
         )
         - float(base.get("mean_name_similarity_matched_only", 0.0)),
+        "bbox_metric_delta": {
+            "mean_center_error_px_delta": _metric_delta(
+                distill_bbox, base_bbox, "mean_center_error_px"
+            ),
+            "mean_area_error_ratio_delta": _metric_delta(
+                distill_bbox, base_bbox, "mean_area_error_ratio"
+            ),
+            "mean_bbox_l1_error_delta": _metric_delta(
+                distill_bbox, base_bbox, "mean_bbox_l1_error"
+            ),
+            "mean_bbox_iou_delta": _metric_delta(
+                distill_bbox, base_bbox, "mean_bbox_iou"
+            ),
+        },
     }
     summary["notes"] = {
         "reference": "teacher32b element names are used as reference.",
@@ -752,9 +797,205 @@ def build_summary(*, comparison_rows: list[dict[str, Any]], match_threshold: flo
             "max(token_jaccard, character_f1)."
         ),
         "fallback": "Only name fallback is used. Type, bbox, IoU, and center distance are not used.",
+        "bbox_metrics": (
+            "BBox metrics are computed only after a name-based match is made and never affect "
+            "matched=true/false."
+        ),
+        "bbox_metric_delta": (
+            "For center_error_px, area_error_ratio, and bbox_l1_error, lower is better so a "
+            "negative distill_vs_base8b delta means improvement. For bbox_iou, higher is better "
+            "so a positive delta means improvement."
+        ),
         "match_threshold": match_threshold,
     }
     return summary
+
+
+def _build_bbox_metrics(
+    *,
+    reference_element: dict[str, Any],
+    candidate_element: dict[str, Any] | None,
+    matched: bool,
+) -> dict[str, Any]:
+    reference_bbox = _normalize_bbox(reference_element.get("bbox"))
+    candidate_bbox = _normalize_bbox(candidate_element.get("bbox")) if candidate_element else None
+    if not matched:
+        return _empty_bbox_metrics(
+            reason="unmatched",
+            reference_bbox=reference_bbox,
+            candidate_bbox=candidate_bbox,
+        )
+    if reference_bbox is None:
+        return _empty_bbox_metrics(
+            reason="missing_or_invalid_reference_bbox",
+            reference_bbox=None,
+            candidate_bbox=candidate_bbox,
+        )
+    if candidate_bbox is None:
+        return _empty_bbox_metrics(
+            reason="missing_or_invalid_candidate_bbox",
+            reference_bbox=reference_bbox,
+            candidate_bbox=None,
+        )
+
+    ref_x1, ref_y1, ref_x2, ref_y2 = reference_bbox
+    cand_x1, cand_y1, cand_x2, cand_y2 = candidate_bbox
+    ref_cx = (ref_x1 + ref_x2) / 2.0
+    ref_cy = (ref_y1 + ref_y2) / 2.0
+    cand_cx = (cand_x1 + cand_x2) / 2.0
+    cand_cy = (cand_y1 + cand_y2) / 2.0
+    dx = cand_cx - ref_cx
+    dy = cand_cy - ref_cy
+    reference_area = (ref_x2 - ref_x1) * (ref_y2 - ref_y1)
+    candidate_area = (cand_x2 - cand_x1) * (cand_y2 - cand_y1)
+    area_delta = candidate_area - reference_area
+    return {
+        "valid": True,
+        "reference_bbox": reference_bbox,
+        "candidate_bbox": candidate_bbox,
+        "reference_center": [ref_cx, ref_cy],
+        "candidate_center": [cand_cx, cand_cy],
+        "center_offset_dx": dx,
+        "center_offset_dy": dy,
+        "center_error_px": (dx * dx + dy * dy) ** 0.5,
+        "reference_area": reference_area,
+        "candidate_area": candidate_area,
+        "area_error_abs": abs(area_delta),
+        "area_error_ratio": abs(area_delta) / reference_area,
+        "signed_area_error_ratio": area_delta / reference_area,
+        "bbox_l1_error": (
+            abs(cand_x1 - ref_x1)
+            + abs(cand_y1 - ref_y1)
+            + abs(cand_x2 - ref_x2)
+            + abs(cand_y2 - ref_y2)
+        )
+        / 4.0,
+        "bbox_iou": _compute_bbox_iou(reference_bbox, candidate_bbox),
+    }
+
+
+def _empty_bbox_metrics(
+    *,
+    reason: str,
+    reference_bbox: list[float] | None,
+    candidate_bbox: list[float] | None,
+) -> dict[str, Any]:
+    return {
+        "valid": False,
+        "reason": reason,
+        "reference_bbox": reference_bbox,
+        "candidate_bbox": candidate_bbox,
+        "reference_center": None,
+        "candidate_center": None,
+        "center_offset_dx": None,
+        "center_offset_dy": None,
+        "center_error_px": None,
+        "reference_area": None,
+        "candidate_area": None,
+        "area_error_abs": None,
+        "area_error_ratio": None,
+        "signed_area_error_ratio": None,
+        "bbox_l1_error": None,
+        "bbox_iou": None,
+    }
+
+
+def _compute_bbox_iou(reference_bbox: list[float], candidate_bbox: list[float]) -> float:
+    ref_x1, ref_y1, ref_x2, ref_y2 = reference_bbox
+    cand_x1, cand_y1, cand_x2, cand_y2 = candidate_bbox
+    inter_x1 = max(ref_x1, cand_x1)
+    inter_y1 = max(ref_y1, cand_y1)
+    inter_x2 = min(ref_x2, cand_x2)
+    inter_y2 = min(ref_y2, cand_y2)
+    inter_width = max(0.0, inter_x2 - inter_x1)
+    inter_height = max(0.0, inter_y2 - inter_y1)
+    intersection = inter_width * inter_height
+    reference_area = (ref_x2 - ref_x1) * (ref_y2 - ref_y1)
+    candidate_area = (cand_x2 - cand_x1) * (cand_y2 - cand_y1)
+    union = reference_area + candidate_area - intersection
+    if union <= 0:
+        return 0.0
+    return intersection / union
+
+
+def _aggregate_bbox_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    matched_rows = [row for row in rows if row.get("matched")]
+    valid_metrics = [
+        metrics
+        for row in matched_rows
+        for metrics in [row.get("bbox_metrics")]
+        if isinstance(metrics, dict) and metrics.get("valid") is True
+    ]
+    return {
+        "num_matched_pairs": len(matched_rows),
+        "num_valid_bbox_pairs": len(valid_metrics),
+        "valid_bbox_rate_among_matched": (
+            len(valid_metrics) / len(matched_rows) if matched_rows else 0.0
+        ),
+        "mean_center_error_px": _mean_metric(valid_metrics, "center_error_px"),
+        "mean_abs_center_offset_dx": _mean_abs_metric(valid_metrics, "center_offset_dx"),
+        "mean_abs_center_offset_dy": _mean_abs_metric(valid_metrics, "center_offset_dy"),
+        "mean_area_error_abs": _mean_metric(valid_metrics, "area_error_abs"),
+        "mean_area_error_ratio": _mean_metric(valid_metrics, "area_error_ratio"),
+        "mean_signed_area_error_ratio": _mean_metric(valid_metrics, "signed_area_error_ratio"),
+        "mean_bbox_l1_error": _mean_metric(valid_metrics, "bbox_l1_error"),
+        "mean_bbox_iou": _mean_metric(valid_metrics, "bbox_iou"),
+    }
+
+
+def _mean_metric(metrics_list: list[dict[str, Any]], key: str) -> float | None:
+    values = [float(metrics[key]) for metrics in metrics_list if metrics.get(key) is not None]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _mean_abs_metric(metrics_list: list[dict[str, Any]], key: str) -> float | None:
+    values = [abs(float(metrics[key])) for metrics in metrics_list if metrics.get(key) is not None]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _attach_bbox_eval_to_raw_rows(
+    *,
+    raw_rows_by_role: dict[str, list[dict[str, Any]]],
+    comparison_rows: list[dict[str, Any]],
+) -> None:
+    comparison_by_role_and_id: dict[str, dict[str, list[dict[str, Any]]]] = {
+        role: {} for role in COMPARISON_ROLES
+    }
+    for row in comparison_rows:
+        role = row.get("candidate_role")
+        sample_id = row.get("id")
+        if role not in comparison_by_role_and_id or not isinstance(sample_id, str):
+            continue
+        comparison_by_role_and_id[role].setdefault(sample_id, []).append(row)
+
+    for row in raw_rows_by_role.get("teacher32b", []):
+        row["bbox_eval_against_teacher32b"] = None
+
+    for role in COMPARISON_ROLES:
+        for row in raw_rows_by_role.get(role, []):
+            sample_rows = comparison_by_role_and_id.get(role, {}).get(row["id"], [])
+            row["bbox_eval_against_teacher32b"] = _aggregate_bbox_metrics(sample_rows)
+
+
+def _flatten_raw_rows(raw_rows_by_role: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for role in MODEL_ROLE_ORDER:
+        rows.extend(raw_rows_by_role.get(role, []))
+    return rows
+
+
+def _metric_delta(left_metrics: Any, right_metrics: Any, key: str) -> float | None:
+    if not isinstance(left_metrics, dict) or not isinstance(right_metrics, dict):
+        return None
+    left_value = left_metrics.get(key)
+    right_value = right_metrics.get(key)
+    if left_value is None or right_value is None:
+        return None
+    return float(left_value) - float(right_value)
 
 
 def _release_model(loaded: LoadedInferenceModel | None) -> None:
