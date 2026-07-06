@@ -457,17 +457,20 @@ def parse_model_output(raw_output: str) -> dict[str, Any]:
 
     candidate = _extract_json_candidate(text)
     if candidate is None:
-        return {"elements": [], "parse_error": "could_not_find_json_object"}
+        return {"elements": [], "parse_error": "could_not_find_json_payload"}
 
     try:
         payload = json.loads(candidate)
     except json.JSONDecodeError as exc:
         return {"elements": [], "parse_error": f"json_decode_error: {exc}"}
 
-    if not isinstance(payload, dict):
-        return {"elements": [], "parse_error": "top_level_json_is_not_object"}
+    if isinstance(payload, list):
+        elements = payload
+    elif isinstance(payload, dict):
+        elements = payload.get("elements")
+    else:
+        return {"elements": [], "parse_error": "top_level_json_is_not_object_or_array"}
 
-    elements = payload.get("elements")
     if not isinstance(elements, list):
         return {"elements": [], "parse_error": "missing_or_invalid_elements_list"}
 
@@ -493,20 +496,20 @@ def parse_model_output(raw_output: str) -> dict[str, Any]:
 def _extract_json_candidate(text: str) -> str | None:
     fenced_blocks = re.findall(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
     for block in fenced_blocks:
-        candidate = _extract_first_json_object(block)
+        candidate = _extract_first_json_value(block)
         if candidate is not None:
             return candidate
-    return _extract_first_json_object(text)
+    return _extract_first_json_value(text)
 
 
-def _extract_first_json_object(text: str) -> str | None:
+def _extract_first_json_value(text: str) -> str | None:
     decoder = json.JSONDecoder()
-    for match in re.finditer(r"\{", text):
+    for match in re.finditer(r"[\[{]", text):
         try:
             obj, end = decoder.raw_decode(text[match.start():])
         except json.JSONDecodeError:
             continue
-        if isinstance(obj, dict):
+        if isinstance(obj, (dict, list)):
             return text[match.start(): match.start() + end]
     return None
 
