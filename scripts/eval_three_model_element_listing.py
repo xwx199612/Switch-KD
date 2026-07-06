@@ -454,6 +454,7 @@ def parse_model_output(raw_output: str) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         return {"elements": [], "parse_error": f"json_decode_error: {exc}"}
 
+    has_top_level_named_elements_list = False
     if isinstance(payload, list):
         elements = payload
         schema = "legacy_list"
@@ -461,9 +462,11 @@ def parse_model_output(raw_output: str) -> dict[str, Any]:
         if isinstance(payload.get("e"), list):
             elements = payload.get("e")
             schema = "compact"
+            has_top_level_named_elements_list = True
         else:
             elements = payload.get("elements")
             schema = "legacy_object"
+            has_top_level_named_elements_list = isinstance(elements, list)
     else:
         return {"elements": [], "parse_error": "top_level_json_is_not_object_or_array"}
 
@@ -480,19 +483,28 @@ def parse_model_output(raw_output: str) -> dict[str, Any]:
         if normalized is not None:
             normalized_elements.append(normalized)
     result: dict[str, Any] = {"elements": normalized_elements}
+    if has_top_level_named_elements_list and elements and not normalized_elements:
+        result["parse_error"] = "all_elements_invalid_after_normalization"
     return result
 
 
 def _normalize_compact_element(index: int, element: Any) -> dict[str, Any] | None:
-    if not isinstance(element, (list, tuple)) or len(element) != 2:
+    if not isinstance(element, (list, tuple)):
         return None
-    name = _safe_string(element[0])
+    if len(element) == 2:
+        name = _safe_string(element[0])
+        bbox = element[1]
+    elif len(element) == 5:
+        name = _safe_string(element[0])
+        bbox = element[1:5]
+    else:
+        return None
     return {
         "element_index": index,
         "name": name,
         "name_norm": normalize_text(name),
         "type": None,
-        "bbox": _normalize_bbox(element[1]),
+        "bbox": _normalize_bbox(bbox),
         "confidence": None,
     }
 
