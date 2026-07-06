@@ -445,7 +445,9 @@ def parse_model_output(raw_output: str) -> dict[str, Any]:
     if not text:
         return {"elements": [], "parse_error": "empty_output"}
 
-    candidate = _extract_json_candidate(text)
+    candidate, candidate_error = _extract_json_candidate(text)
+    if candidate_error is not None:
+        return {"elements": [], "parse_error": candidate_error}
     if candidate is None:
         return {"elements": [], "parse_error": "could_not_find_json_payload"}
 
@@ -485,6 +487,8 @@ def parse_model_output(raw_output: str) -> dict[str, Any]:
     result: dict[str, Any] = {"elements": normalized_elements}
     if has_top_level_named_elements_list and elements and not normalized_elements:
         result["parse_error"] = "all_elements_invalid_after_normalization"
+    elif not normalized_elements:
+        result["parse_error"] = "empty_elements_from_nonempty_output"
     return result
 
 
@@ -523,13 +527,24 @@ def _normalize_legacy_element(index: int, element: Any) -> dict[str, Any] | None
     }
 
 
-def _extract_json_candidate(text: str) -> str | None:
+def _extract_json_candidate(text: str) -> tuple[str | None, str | None]:
     fenced_blocks = re.findall(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
     for block in fenced_blocks:
-        candidate = _extract_first_json_value(block)
-        if candidate is not None:
-            return candidate
-    return _extract_first_json_value(text)
+        candidate, error = _extract_json_candidate_from_source(block)
+        if candidate is not None or error is not None:
+            return candidate, error
+    return _extract_json_candidate_from_source(text)
+
+
+def _extract_json_candidate_from_source(text: str) -> tuple[str | None, str | None]:
+    stripped = text.strip()
+    if not stripped:
+        return None, None
+    if _looks_like_named_top_level_object_payload(stripped):
+        return _decode_json_value_at_start(stripped, "top_level")
+    if stripped.startswith("["):
+        return _decode_json_value_at_start(stripped, "top_level")
+    return _extract_first_json_value(stripped), None
 
 
 def _extract_first_json_value(text: str) -> str | None:
@@ -542,6 +557,26 @@ def _extract_first_json_value(text: str) -> str | None:
         if isinstance(obj, (dict, list)):
             return text[match.start(): match.start() + end]
     return None
+
+
+def _looks_like_named_top_level_object_payload(text: str) -> bool:
+    return bool(re.match(r'^\{\s*"(?:e|elements)"\s*:', text))
+
+
+def _decode_json_value_at_start(text: str, context: str) -> tuple[str | None, str | None]:
+    decoder = json.JSONDecoder()
+    try:
+        obj, end = decoder.raw_decode(text)
+    except json.JSONDecodeError as exc:
+        if context == "top_level" and text.startswith("{"):
+            message = f"json_decode_error_top_level: {exc}"
+            if re.match(r'^\{\s*"(?:e|elements)"\s*:', text):
+                return None, message or "truncated_or_malformed_top_level_json"
+            return None, message
+        return None, f"json_decode_error: {exc}"
+    if not isinstance(obj, (dict, list)):
+        return None, "top_level_json_is_not_object_or_array"
+    return text[:end], None
 
 
 def _safe_string(value: Any) -> str | None:
