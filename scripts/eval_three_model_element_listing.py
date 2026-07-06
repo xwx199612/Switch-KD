@@ -28,33 +28,20 @@ from vlm_distill.device_utils import (
 from vlm_distill.model_loading import apply_attn_implementation, resolve_model_path
 
 
-PROMPT = """You are evaluating Android TV / Smart TV UI understanding.
+PROMPT = """List visible clickable/focusable UI elements in this TV screenshot.
 
-Task:
-List all visible interactive UI elements on this screen.
+Return ONLY minified JSON. No markdown. No explanation.
 
-Requirements:
-Return ONLY valid JSON.
-Do not include markdown.
-Do not include explanation.
+Schema:
+{"e":[["name",[x1,y1,x2,y2]]]}
 
-JSON schema:
-{
-  "elements": [
-    {
-      "name": "visible text or short visual description",
-      "type": "app_icon | button | menu_item | tab | input | setting | navigation | other",
-      "bbox": [x1, y1, x2, y2],
-      "confidence": 0.0
-    }
-  ]
-}
-
-Coordinate rules:
-- Use pixel coordinates relative to the original image.
-- x1,y1 is top-left. x2,y2 is bottom-right.
-- If you are not sure about an element bbox, still estimate it.
-- Include all visible clickable or focusable UI elements.
+Rules:
+- Use short names.
+- Use original image pixel coordinates.
+- Include at most 40 elements.
+- Do not repeat the same element.
+- Do not include background, decorative graphics, long descriptions, or non-clickable text.
+- If unsure, omit the element.
 """
 
 
@@ -139,6 +126,7 @@ def main() -> None:
     write_jsonl(args.comparison_output_jsonl, comparison_rows)
 
     summary = build_summary(
+        raw_rows_by_role=raw_rows_by_role,
         comparison_rows=comparison_rows,
         match_threshold=args.match_threshold,
     )
@@ -198,6 +186,7 @@ def _load_model(spec: ModelRunSpec, args: argparse.Namespace) -> LoadedInference
         quantization="4bit" if args.load_in_4bit else "none",
         role=spec.role,
     )
+    torch_dtype = _resolve_torch_dtype(args.torch_dtype)
 
     processor = AutoProcessor.from_pretrained(
         model_path,
@@ -212,17 +201,16 @@ def _load_model(spec: ModelRunSpec, args: argparse.Namespace) -> LoadedInference
     }
     apply_attn_implementation(model_kwargs, "sdpa")
     if args.load_in_4bit:
-        compute_dtype = _resolve_torch_dtype(args.torch_dtype)
         model_kwargs["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=compute_dtype,
+            bnb_4bit_compute_dtype=torch_dtype,
             bnb_4bit_use_double_quant=True,
         )
     else:
-        model_kwargs["torch_dtype"] = _resolve_torch_dtype(args.torch_dtype)
+        model_kwargs["torch_dtype"] = torch_dtype
 
-    print(f"Loading {spec.role} model from {model_path}")
+    print(f"Loading {spec.role} model from {model_path} with 4bit={args.load_in_4bit}")
     model = AutoModelForVLM.from_pretrained(model_path, **model_kwargs)
     if adapter_path is not None:
         _validate_adapter_path(adapter_path)
@@ -468,8 +456,14 @@ def parse_model_output(raw_output: str) -> dict[str, Any]:
 
     if isinstance(payload, list):
         elements = payload
+        schema = "legacy_list"
     elif isinstance(payload, dict):
-        elements = payload.get("elements")
+        if isinstance(payload.get("e"), list):
+            elements = payload.get("e")
+            schema = "compact"
+        else:
+            elements = payload.get("elements")
+            schema = "legacy_object"
     else:
         return {"elements": [], "parse_error": "top_level_json_is_not_object_or_array"}
 
@@ -478,21 +472,43 @@ def parse_model_output(raw_output: str) -> dict[str, Any]:
 
     normalized_elements: list[dict[str, Any]] = []
     for index, element in enumerate(elements):
-        if not isinstance(element, dict):
-            continue
-        name = _safe_string(element.get("name"))
-        normalized_elements.append(
-            {
-                "element_index": index,
-                "name": name,
-                "name_norm": normalize_text(name),
-                "type": _safe_string(element.get("type")),
-                "bbox": _normalize_bbox(element.get("bbox")),
-                "confidence": _normalize_confidence(element.get("confidence")),
-            }
+        normalized = (
+            _normalize_compact_element(index, element)
+            if schema == "compact"
+            else _normalize_legacy_element(index, element)
         )
+        if normalized is not None:
+            normalized_elements.append(normalized)
     result: dict[str, Any] = {"elements": normalized_elements}
     return result
+
+
+def _normalize_compact_element(index: int, element: Any) -> dict[str, Any] | None:
+    if not isinstance(element, (list, tuple)) or len(element) != 2:
+        return None
+    name = _safe_string(element[0])
+    return {
+        "element_index": index,
+        "name": name,
+        "name_norm": normalize_text(name),
+        "type": None,
+        "bbox": _normalize_bbox(element[1]),
+        "confidence": None,
+    }
+
+
+def _normalize_legacy_element(index: int, element: Any) -> dict[str, Any] | None:
+    if not isinstance(element, dict):
+        return None
+    name = _safe_string(element.get("name"))
+    return {
+        "element_index": index,
+        "name": name,
+        "name_norm": normalize_text(name),
+        "type": _safe_string(element.get("type")),
+        "bbox": _normalize_bbox(element.get("bbox")),
+        "confidence": _normalize_confidence(element.get("confidence")),
+    }
 
 
 def _extract_json_candidate(text: str) -> str | None:
@@ -733,7 +749,12 @@ def _compare_single_sample(
     return rows
 
 
-def build_summary(*, comparison_rows: list[dict[str, Any]], match_threshold: float) -> dict[str, Any]:
+def build_summary(
+    *,
+    raw_rows_by_role: dict[str, list[dict[str, Any]]],
+    comparison_rows: list[dict[str, Any]],
+    match_threshold: float,
+) -> dict[str, Any]:
     summary: dict[str, Any] = {}
     role_stats: dict[str, dict[str, Any]] = {}
 
@@ -758,6 +779,8 @@ def build_summary(*, comparison_rows: list[dict[str, Any]], match_threshold: flo
             "bbox_metrics": _aggregate_bbox_metrics(rows),
         }
         summary[role] = role_stats[role]
+
+    summary["parse_stats"] = _build_parse_stats(raw_rows_by_role)
 
     base = role_stats.get("base8b", {})
     distill = role_stats.get("distill32to8", {})
@@ -808,7 +831,48 @@ def build_summary(*, comparison_rows: list[dict[str, Any]], match_threshold: flo
         ),
         "match_threshold": match_threshold,
     }
+    warnings: list[str] = []
+    teacher_parse_stats = summary["parse_stats"].get("teacher32b", {})
+    if int(teacher_parse_stats.get("total_parsed_elements", 0)) == 0:
+        warnings.append(
+            "teacher32b parsed zero reference elements, so comparison metrics are invalid."
+        )
+    if warnings:
+        summary["warnings"] = warnings
     return summary
+
+
+def _build_parse_stats(raw_rows_by_role: dict[str, list[dict[str, Any]]]) -> dict[str, dict[str, Any]]:
+    stats: dict[str, dict[str, Any]] = {}
+    for role in MODEL_ROLE_ORDER:
+        rows = raw_rows_by_role.get(role, [])
+        parse_errors = Counter()
+        total_parsed_elements = 0
+        for row in rows:
+            parsed = row.get("parsed")
+            if not isinstance(parsed, dict):
+                parse_errors["missing_parsed_object"] += 1
+                continue
+            parse_error = parsed.get("parse_error")
+            if parse_error:
+                parse_errors[str(parse_error)] += 1
+            elements = parsed.get("elements")
+            if isinstance(elements, list):
+                total_parsed_elements += sum(1 for element in elements if isinstance(element, dict))
+
+        num_rows = len(rows)
+        num_parse_errors = sum(parse_errors.values())
+        stats[role] = {
+            "num_rows": num_rows,
+            "num_parse_errors": num_parse_errors,
+            "parse_error_rate": (num_parse_errors / num_rows if num_rows else 0.0),
+            "total_parsed_elements": total_parsed_elements,
+            "mean_parsed_elements_per_row": (
+                total_parsed_elements / num_rows if num_rows else 0.0
+            ),
+            "parse_error_counts": dict(parse_errors),
+        }
+    return stats
 
 
 def _build_bbox_metrics(
