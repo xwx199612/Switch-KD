@@ -28,19 +28,23 @@ from vlm_distill.device_utils import (
 from vlm_distill.model_loading import apply_attn_implementation, resolve_model_path
 
 
-PROMPT = """List visible clickable/focusable UI elements in this TV screenshot.
+def build_prompt(max_elements: int) -> str:
+    return f"""List visible clickable/focusable UI elements in this TV screenshot.
 
-Return ONLY minified JSON. No markdown. No explanation.
+Return ONLY one complete minified JSON object.
+No markdown. No explanation.
 
 Schema:
-{"e":[["name",[x1,y1,x2,y2]]]}
+{{"e":[["name",[x1,y1,x2,y2]]]}}
 
 Rules:
 - Use short names.
 - Use original image pixel coordinates.
-- Include at most 40 elements.
-- Do not repeat the same element.
+- Include at most {max_elements} elements.
+- Each element name may appear only once.
+- Do not repeat elements.
 - Do not include background, decorative graphics, long descriptions, or non-clickable text.
+- After the JSON object is complete, stop immediately.
 - If unsure, omit the element.
 """
 
@@ -75,11 +79,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--comparison_output_jsonl", required=True, type=Path)
     parser.add_argument("--summary_output_json", required=True, type=Path)
     parser.add_argument("--teacher32b_path", required=True)
+    parser.add_argument("--reuse_teacher_raw_jsonl", type=Path)
     parser.add_argument("--base8b_path", required=True)
     parser.add_argument("--distill_model_path", required=True)
     parser.add_argument("--distill_adapter_path")
     parser.add_argument("--max_samples", type=int)
     parser.add_argument("--max_new_tokens", type=int, default=1024)
+    parser.add_argument("--repetition_penalty", type=float, default=1.05)
+    parser.add_argument("--no_repeat_ngram_size", type=int, default=0)
+    parser.add_argument("--max_elements", type=int, default=30)
     parser.add_argument("--load_in_4bit", action="store_true")
     parser.add_argument(
         "--torch_dtype",
@@ -100,15 +108,24 @@ def main() -> None:
 
     samples = _load_input_rows(args.input_jsonl, max_samples=args.max_samples)
     model_specs = _build_model_specs(args)
+    teacher_reuse = _load_reused_teacher_rows(
+        args.reuse_teacher_raw_jsonl,
+        samples=samples,
+    )
 
     raw_rows_by_role: dict[str, list[dict[str, Any]]] = {role: [] for role in MODEL_ROLE_ORDER}
+    raw_rows_by_role["teacher32b"] = teacher_reuse["rows"]
+    prompt = build_prompt(args.max_elements)
     for spec in model_specs:
         loaded = _load_model(spec, args)
         try:
             rows = _run_model_on_samples(
                 loaded=loaded,
                 samples=samples,
+                prompt=prompt,
                 max_new_tokens=args.max_new_tokens,
+                repetition_penalty=args.repetition_penalty,
+                no_repeat_ngram_size=args.no_repeat_ngram_size,
             )
             raw_rows_by_role[spec.role] = rows
         finally:
@@ -129,6 +146,13 @@ def main() -> None:
         raw_rows_by_role=raw_rows_by_role,
         comparison_rows=comparison_rows,
         match_threshold=args.match_threshold,
+        teacher_reuse=teacher_reuse["summary"],
+        generation_settings={
+            "max_new_tokens": args.max_new_tokens,
+            "repetition_penalty": args.repetition_penalty,
+            "no_repeat_ngram_size": args.no_repeat_ngram_size,
+            "max_elements": args.max_elements,
+        },
     )
     args.summary_output_json.parent.mkdir(parents=True, exist_ok=True)
     args.summary_output_json.write_text(
@@ -159,8 +183,7 @@ def _load_input_rows(path: Path, *, max_samples: int | None) -> list[dict[str, A
 
 
 def _build_model_specs(args: argparse.Namespace) -> list[ModelRunSpec]:
-    return [
-        ModelRunSpec(role="teacher32b", model_path=args.teacher32b_path),
+    specs = [
         ModelRunSpec(role="base8b", model_path=args.base8b_path),
         ModelRunSpec(
             role="distill32to8",
@@ -168,6 +191,91 @@ def _build_model_specs(args: argparse.Namespace) -> list[ModelRunSpec]:
             adapter_path=args.distill_adapter_path,
         ),
     ]
+    if args.reuse_teacher_raw_jsonl is None:
+        specs.insert(0, ModelRunSpec(role="teacher32b", model_path=args.teacher32b_path))
+    return specs
+
+
+def _load_reused_teacher_rows(
+    path: Path | None,
+    *,
+    samples: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if path is None:
+        return {
+            "rows": [],
+            "summary": {
+                "enabled": False,
+                "source_path": None,
+                "num_reused_rows": 0,
+            },
+        }
+
+    rows = read_jsonl(path)
+    teacher_rows_by_id: dict[str, dict[str, Any]] = {}
+    selected_ids = [sample["id"] for sample in samples]
+    selected_id_set = set(selected_ids)
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise ValueError(f"{path}:{index} is not a JSON object.")
+        if row.get("model_role") != "teacher32b":
+            continue
+        sample_id = row.get("id")
+        if sample_id is None:
+            raise ValueError(f"{path}:{index} teacher32b row is missing 'id'.")
+        sample_id = str(sample_id)
+        if sample_id not in selected_id_set:
+            continue
+        if sample_id in teacher_rows_by_id:
+            raise ValueError(f"{path} contains duplicate teacher32b rows for id={sample_id}.")
+        teacher_rows_by_id[sample_id] = row
+
+    selected_rows: list[dict[str, Any]] = []
+    missing_ids: list[str] = []
+    for sample in samples:
+        sample_id = sample["id"]
+        row = teacher_rows_by_id.get(sample_id)
+        if row is None:
+            missing_ids.append(sample_id)
+            continue
+        if str(row.get("image")) != sample["image"]:
+            raise ValueError(
+                f"Reused teacher row image mismatch for id={sample_id}: "
+                f"{row.get('image')} != {sample['image']}"
+            )
+        parsed = row.get("parsed")
+        if not isinstance(parsed, dict):
+            raise ValueError(f"Reused teacher row for id={sample_id} is missing parsed object.")
+        elements = parsed.get("elements")
+        num_elements = (
+            sum(1 for element in elements if isinstance(element, dict))
+            if isinstance(elements, list)
+            else 0
+        )
+        if num_elements <= 0:
+            raise ValueError(
+                f"Reused teacher row for id={sample_id} has empty parsed.elements."
+            )
+        selected_rows.append(row)
+
+    if missing_ids:
+        raise ValueError(
+            f"Reused teacher rows do not cover all selected samples; missing ids: {missing_ids}"
+        )
+    if len(selected_rows) != len(samples):
+        raise ValueError(
+            "Number of reused teacher rows does not match selected input samples: "
+            f"{len(selected_rows)} != {len(samples)}"
+        )
+
+    return {
+        "rows": selected_rows,
+        "summary": {
+            "enabled": True,
+            "source_path": str(path),
+            "num_reused_rows": len(selected_rows),
+        },
+    }
 
 
 def _load_model(spec: ModelRunSpec, args: argparse.Namespace) -> LoadedInferenceModel:
@@ -287,7 +395,10 @@ def _run_model_on_samples(
     *,
     loaded: LoadedInferenceModel,
     samples: list[dict[str, Any]],
+    prompt: str,
     max_new_tokens: int,
+    repetition_penalty: float,
+    no_repeat_ngram_size: int,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for index, sample in enumerate(samples, start=1):
@@ -298,7 +409,10 @@ def _run_model_on_samples(
         row = _infer_single_sample(
             loaded=loaded,
             sample=sample,
+            prompt=prompt,
             max_new_tokens=max_new_tokens,
+            repetition_penalty=repetition_penalty,
+            no_repeat_ngram_size=no_repeat_ngram_size,
         )
         rows.append(row)
     return rows
@@ -308,7 +422,10 @@ def _infer_single_sample(
     *,
     loaded: LoadedInferenceModel,
     sample: dict[str, Any],
+    prompt: str,
     max_new_tokens: int,
+    repetition_penalty: float,
+    no_repeat_ngram_size: int,
 ) -> dict[str, Any]:
     raw_output = ""
     error: str | None = None
@@ -318,8 +435,10 @@ def _infer_single_sample(
             model=loaded.model,
             input_device=loaded.input_device,
             image_path=Path(sample["image"]),
-            prompt=PROMPT,
+            prompt=prompt,
             max_new_tokens=max_new_tokens,
+            repetition_penalty=repetition_penalty,
+            no_repeat_ngram_size=no_repeat_ngram_size,
         )
         parsed = parse_model_output(raw_output)
     except Exception as exc:  # noqa: BLE001
@@ -348,6 +467,8 @@ def _generate_for_image(
     image_path: Path,
     prompt: str,
     max_new_tokens: int,
+    repetition_penalty: float,
+    no_repeat_ngram_size: int,
 ) -> str:
     if not image_path.exists():
         raise FileNotFoundError(f"Image not found: {image_path}")
@@ -369,11 +490,15 @@ def _generate_for_image(
         image_path=image_path,
     )
     inputs = inputs.to(input_device)
-    output_ids = model.generate(
+    generate_kwargs: dict[str, Any] = {
         **inputs,
-        do_sample=False,
-        max_new_tokens=max_new_tokens,
-    )
+        "do_sample": False,
+        "max_new_tokens": max_new_tokens,
+        "repetition_penalty": repetition_penalty,
+    }
+    if no_repeat_ngram_size > 0:
+        generate_kwargs["no_repeat_ngram_size"] = no_repeat_ngram_size
+    output_ids = model.generate(**generate_kwargs)
     generated_ids = output_ids[:, inputs["input_ids"].shape[1]:]
     answer = processor.batch_decode(
         generated_ids,
@@ -801,6 +926,8 @@ def build_summary(
     raw_rows_by_role: dict[str, list[dict[str, Any]]],
     comparison_rows: list[dict[str, Any]],
     match_threshold: float,
+    teacher_reuse: dict[str, Any],
+    generation_settings: dict[str, Any],
 ) -> dict[str, Any]:
     summary: dict[str, Any] = {}
     role_stats: dict[str, dict[str, Any]] = {}
@@ -828,6 +955,8 @@ def build_summary(
         summary[role] = role_stats[role]
 
     summary["parse_stats"] = _build_parse_stats(raw_rows_by_role)
+    summary["teacher_reuse"] = teacher_reuse
+    summary["generation_settings"] = generation_settings
 
     base = role_stats.get("base8b", {})
     distill = role_stats.get("distill32to8", {})
