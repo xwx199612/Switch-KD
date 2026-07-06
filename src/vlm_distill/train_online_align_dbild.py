@@ -35,9 +35,13 @@ class TrainableSummary:
 
 class OnlineAlignDataset(VlmTrainingDataset):
     def __getitem__(self, index: int) -> dict[str, Any]:
-        item = dict(super().__getitem__(index))
         row = self.rows[index]
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        image = load_training_image(
+            self.config.data.image_root,
+            row["image"],
+            resize_mode=self.config.training.image_resize,
+        )
         prompt = format_prompt(
             self.config.distillation.prompt_template,
             query=row.get("query") or metadata.get("query"),
@@ -45,10 +49,32 @@ class OnlineAlignDataset(VlmTrainingDataset):
             target_type=row.get("target_type") or metadata.get("target_type"),
             task=row.get("task", "vqa"),
         )
+        target = str(row["teacher_answer"])
+        encoded = encode_vlm_training_sample(
+            self.processor,
+            image=image,
+            prompt=prompt,
+            target=target,
+            max_length=self.config.training.max_length,
+            mask_prompt_labels=self.config.training.mask_prompt_labels,
+            canonical_answer_span=True,
+        )
+        item = dict(encoded.model_inputs)
+        item["prompt_token_len"] = encoded.prompt_token_len
+        if not self._token_identity_debug_printed:
+            student_supervised_label_count = int((item["labels"] != -100).sum().item())
+            cached_teacher_tokens = row.get("teacher_tokens")
+            cached_teacher_tokens_len = len(cached_teacher_tokens) if cached_teacher_tokens is not None else 0
+            print("Online DBiLD first sample label debug:")
+            print(f"  sample_id={row['id']}")
+            print(f"  student_supervised_label_count={student_supervised_label_count}")
+            print(f"  cached_teacher_tokens_len={cached_teacher_tokens_len}")
+            print("  note=cached teacher_tokens are not used for token identity validation in online DBiLD")
+            self._token_identity_debug_printed = True
         item["sample_id"] = str(row["id"])
         item["image_path"] = str(row["image"])
         item["teacher_prompt"] = prompt
-        item["teacher_answer"] = str(row["teacher_answer"])
+        item["teacher_answer"] = target
         return item
 
 
@@ -316,20 +342,27 @@ def align_logits_to_supervised_positions(teacher_logits, student_logits, teacher
             f"{tuple(teacher_logits.shape)}, {tuple(student_logits.shape)}, "
             f"{tuple(teacher_labels.shape)}, {tuple(student_labels.shape)}."
         )
-    if teacher_logits.shape[-1] != student_logits.shape[-1]:
-        raise ValueError(
-            "Teacher/student vocab size mismatch: "
-            f"{teacher_logits.shape[-1]} vs {student_logits.shape[-1]}."
-        )
     if teacher_logits.shape[0] != 1:
         raise ValueError(
             "align_logits_to_supervised_positions currently requires batch_size == 1 "
             "for strict causal shifted teacher/student answer-logit alignment."
         )
 
-    teacher_shift_logits = teacher_logits[:, :-1, :]
+    teacher_vocab = int(teacher_logits.shape[-1])
+    student_vocab = int(student_logits.shape[-1])
+    shared_vocab = min(teacher_vocab, student_vocab)
+    vocab_prefix_alignment_used = teacher_vocab != student_vocab
+    if vocab_prefix_alignment_used:
+        print(
+            "Online DBiLD vocab mismatch detected; using shared vocab prefix for alignment: "
+            f"teacher_vocab={teacher_vocab}, student_vocab={student_vocab}, shared_vocab={shared_vocab}"
+        )
+    teacher_logits_for_align = teacher_logits[..., :shared_vocab]
+    student_logits_for_align = student_logits[..., :shared_vocab]
+
+    teacher_shift_logits = teacher_logits_for_align[:, :-1, :]
     teacher_shift_labels = teacher_labels[:, 1:]
-    student_shift_logits = student_logits[:, :-1, :]
+    student_shift_logits = student_logits_for_align[:, :-1, :]
     student_shift_labels = student_labels[:, 1:]
 
     teacher_mask = teacher_shift_labels != -100
@@ -348,15 +381,37 @@ def align_logits_to_supervised_positions(teacher_logits, student_logits, teacher
             f"teacher_count={teacher_count}, student_count={student_count}."
         )
 
-    vocab = student_logits.shape[-1]
-    teacher_answer_logits = teacher_shift_logits[teacher_mask].view(1, teacher_count, vocab)
-    student_answer_logits = student_shift_logits[student_mask].view(1, student_count, vocab)
+    teacher_supervised_ids = teacher_shift_labels[teacher_mask]
+    student_supervised_ids = student_shift_labels[student_mask]
+    if int(teacher_supervised_ids.max().item()) >= teacher_vocab:
+        raise ValueError("Teacher supervised label id exceeds teacher vocab size.")
+    if int(student_supervised_ids.max().item()) >= student_vocab:
+        raise ValueError("Student supervised label id exceeds student vocab size.")
+    if (
+        int(teacher_supervised_ids.max().item()) >= shared_vocab
+        or int(student_supervised_ids.max().item()) >= shared_vocab
+    ):
+        print(
+            "Warning: supervised answer labels include token ids outside shared_vocab. "
+            "LM loss remains valid, but DBiLD compares only shared-vocab logits."
+        )
+
+    teacher_answer_logits = teacher_shift_logits[teacher_mask].view(1, teacher_count, shared_vocab)
+    student_answer_logits = student_shift_logits[student_mask].view(1, student_count, shared_vocab)
     aligned_attention_mask = torch.ones(
         (1, teacher_count),
         device=student_logits.device,
         dtype=torch.float32,
     )
-    return teacher_answer_logits, student_answer_logits, aligned_attention_mask, teacher_count, student_count
+    return (
+        teacher_answer_logits,
+        student_answer_logits,
+        aligned_attention_mask,
+        teacher_count,
+        student_count,
+        shared_vocab,
+        vocab_prefix_alignment_used,
+    )
 
 
 def _validate_rows(config) -> list[dict[str, Any]]:
@@ -517,6 +572,15 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
     grad_accum_steps = int(config.training.gradient_accumulation_steps)
     global_step = 0
     first_batch_debug_printed = False
+    last_step_log_values: dict[str, float | int | None] = {
+        "lm_loss": None,
+        "align_loss": None,
+        "total_loss": None,
+        "teacher_supervised_count": None,
+        "student_supervised_count": None,
+        "shared_vocab_size": None,
+        "vocab_prefix_alignment_used": 0,
+    }
 
     print("Online Align DBiLD training")
     print(f"teacher_model_path={teacher_model_path}")
@@ -571,9 +635,20 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
                 student_outputs = student_model(**student_forward_inputs)
                 student_logits = student_outputs.logits
                 lm_loss = _causal_lm_loss(student_logits, labels)
-                aligned_teacher_logits, aligned_student_logits, aligned_attention_mask, teacher_supervised_count, student_supervised_count = (
-                    align_logits_to_supervised_positions(teacher_logits, student_logits, teacher_labels, labels)
-                )
+                (
+                    aligned_teacher_logits,
+                    aligned_student_logits,
+                    aligned_attention_mask,
+                    teacher_supervised_count,
+                    student_supervised_count,
+                    shared_vocab_size,
+                    vocab_prefix_alignment_used,
+                ) = align_logits_to_supervised_positions(teacher_logits, student_logits, teacher_labels, labels)
+                dbild_device = aligned_student_logits.device
+                if aligned_teacher_logits.device != dbild_device:
+                    aligned_teacher_logits = aligned_teacher_logits.to(dbild_device)
+                if aligned_attention_mask.device != dbild_device:
+                    aligned_attention_mask = aligned_attention_mask.to(dbild_device)
                 align_loss = full_dynamic_bidirectional_logits_difference(
                     reference_logits=aligned_teacher_logits,
                     target_logits=aligned_student_logits,
@@ -589,6 +664,15 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
                 # VSD is intentionally disabled because teacher and student share the same vision backbone.
                 # This script targets online full-logits DBiLD L_Align reproduction, not full Switch-KD with VSD.
                 total_loss = lm_loss + align_loss
+                last_step_log_values = {
+                    "lm_loss": float(lm_loss.detach().float().item()),
+                    "align_loss": float(align_loss.detach().float().item()),
+                    "total_loss": float(total_loss.detach().float().item()),
+                    "teacher_supervised_count": teacher_supervised_count,
+                    "student_supervised_count": student_supervised_count,
+                    "shared_vocab_size": shared_vocab_size,
+                    "vocab_prefix_alignment_used": int(vocab_prefix_alignment_used),
+                }
 
             if not first_batch_debug_printed:
                 print(f"teacher_logits.shape={tuple(teacher_logits.shape)}")
@@ -602,6 +686,13 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
                 print(f"aligned_teacher_logits.shape={tuple(aligned_teacher_logits.shape)}")
                 print(f"aligned_student_logits.shape={tuple(aligned_student_logits.shape)}")
                 print(f"aligned_attention_mask.shape={tuple(aligned_attention_mask.shape)}")
+                print("Online DBiLD tensor devices:")
+                print(f"  teacher_logits_device={teacher_logits.device}")
+                print(f"  student_logits_device={student_logits.device}")
+                print(f"  aligned_teacher_logits_device={aligned_teacher_logits.device}")
+                print(f"  aligned_student_logits_device={aligned_student_logits.device}")
+                print(f"  aligned_attention_mask_device={aligned_attention_mask.device}")
+                print(f"  dbild_loss_device={dbild_device}")
                 first_batch_debug_printed = True
 
             loss_for_backward = total_loss / grad_accum_steps
@@ -611,18 +702,20 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
                 global_step += 1
-                if config.training.log_every > 0 and global_step % int(config.training.log_every) == 0:
-                    gpu_mem_allocated, gpu_mem_reserved = _gpu_mem_stats()
-                    lr = float(optimizer.param_groups[0]["lr"])
-                    print(
-                        f"step={global_step} "
-                        f"lm_loss={float(lm_loss.detach().float().item()):.6f} "
-                        f"align_loss={float(align_loss.detach().float().item()):.6f} "
-                        f"total_loss={float(total_loss.detach().float().item()):.6f} "
-                        f"lr={lr:.8g} "
-                        f"gpu_mem_allocated={gpu_mem_allocated} "
-                        f"gpu_mem_reserved={gpu_mem_reserved}"
+                step_message = (
+                    f"Online DBiLD step={global_step} "
+                    f"lm_loss={last_step_log_values['lm_loss']:.6f} "
+                    f"align_loss={last_step_log_values['align_loss']:.6f} "
+                    f"total_loss={last_step_log_values['total_loss']:.6f}"
+                )
+                if last_step_log_values["teacher_supervised_count"] is not None:
+                    step_message += (
+                        f" teacher_supervised_count={last_step_log_values['teacher_supervised_count']}"
+                        f" student_supervised_count={last_step_log_values['student_supervised_count']}"
                     )
+                if last_step_log_values["vocab_prefix_alignment_used"]:
+                    step_message += f" shared_vocab_size={last_step_log_values['shared_vocab_size']}"
+                print(step_message)
 
                 if total_target_steps is not None and global_step >= total_target_steps:
                     break
@@ -631,10 +724,25 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             global_step += 1
+            step_message = (
+                f"Online DBiLD step={global_step} "
+                f"lm_loss={last_step_log_values['lm_loss']:.6f} "
+                f"align_loss={last_step_log_values['align_loss']:.6f} "
+                f"total_loss={last_step_log_values['total_loss']:.6f}"
+            )
+            if last_step_log_values["teacher_supervised_count"] is not None:
+                step_message += (
+                    f" teacher_supervised_count={last_step_log_values['teacher_supervised_count']}"
+                    f" student_supervised_count={last_step_log_values['student_supervised_count']}"
+                )
+            if last_step_log_values["vocab_prefix_alignment_used"]:
+                step_message += f" shared_vocab_size={last_step_log_values['shared_vocab_size']}"
+            print(step_message)
 
     config.student.adapter_dir.mkdir(parents=True, exist_ok=True)
     student_model.save_pretrained(config.student.adapter_dir)
     student_processor.save_pretrained(config.student.adapter_dir)
+    print(f"OK online DBiLD training completed: optimizer_steps={global_step}")
     return config.student.adapter_dir
 
 

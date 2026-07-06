@@ -21,7 +21,7 @@ data:
   # teacher_tokens, and teacher_logits when distillation.teacher_logits=true.
   label_path: outputs/switch-kd/{task_name}_teacher_labels_{label_profile}.jsonl
   # Deprecated: teacher_logits_path is intentionally omitted from this workflow.
-  # Legacy configs may still set it, but Switch-KD now reads teacher logits from label_path.
+  # Legacy configs may still set it, but switch-kd now reads teacher logits from label_path.
   switch_logits_path: outputs/switch-kd/{task_name}_switch_logits_{response_profile}.jsonl
   eval_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}.jsonl
   prediction_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/student_predictions.jsonl
@@ -39,7 +39,7 @@ teacher:
   quantization: "{teacher_quantization}"
   attn_implementation: sdpa
   temperature: 0.0
-  max_new_tokens: 512
+  max_new_tokens: 384
   image_resize: "{quality}"
 
 student:
@@ -52,7 +52,7 @@ student:
   # Prediction-time model/adapter controls.
   # Leave inference_model_path empty to let predict prefer merged_model_path when it exists,
   # otherwise fall back to model_name.
-  inference_model_path:
+  inference_model_path: outputs/switch-kd/parsing_switch_kd_1080p_4bit_student_4bit/merged_hf_bf16
   inference_adapter_path:
   load_adapter: true
   merge_adapter: false
@@ -183,7 +183,7 @@ distillation:
     }}
   lm_loss_weight: 1.0
   dbild_loss_weight: 1.0
-  vsd_loss_weight: 1.0
+  vsd_loss_weight: 0.0
   inactive_logit_margin: 30.0
   kd_temperature: 2.0
   dbild_top_k: 64
