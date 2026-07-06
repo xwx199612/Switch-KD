@@ -789,9 +789,9 @@ if __name__ == "__main__":
 #   --output_jsonl outputs/eval_list_elements_raw.jsonl \
 #   --comparison_output_jsonl outputs/eval_list_elements_comparison.jsonl \
 #   --summary_output_json outputs/eval_list_elements_summary.json \
-#   --teacher32b_path /home/phison/vlm_distill/models/Qwen3-VL-32B-Instruct \
-#   --base8b_path /home/phison/vlm_distill/models/Qwen3-VL-8B-Instruct \
-#   --distill_model_path /home/phison/vlm_distill/outputs/qwen3vl-32to8-merged \
+#   --teacher32b_path /mnt/nvme0/vlm_distill/models/Qwen3-VL-32B-Instruct \
+#   --base8b_path /mnt/nvme0/vlm_distill/models/Qwen3-VL-8B-Instruct \
+#   --distill_model_path /mnt/nvme0/vlm_distill/outputs/qwen3vl-32to8-merged \
 #   --torch_dtype bfloat16 \
 #   --load_in_4bit \
 #   --match_threshold 0.70
@@ -802,10 +802,10 @@ if __name__ == "__main__":
 #   --output_jsonl outputs/eval_list_elements_raw_lora.jsonl \
 #   --comparison_output_jsonl outputs/eval_list_elements_comparison_lora.jsonl \
 #   --summary_output_json outputs/eval_list_elements_summary_lora.json \
-#   --teacher32b_path /home/phison/vlm_distill/models/Qwen3-VL-32B-Instruct \
-#   --base8b_path /home/phison/vlm_distill/models/Qwen3-VL-8B-Instruct \
-#   --distill_model_path /home/phison/vlm_distill/models/Qwen3-VL-8B-Instruct \
-#   --distill_adapter_path /home/phison/vlm_distill/outputs/student/adapter \
+#   --teacher32b_path /mnt/nvme0/vlm_distill/models/Qwen3-VL-32B-Instruct \
+#   --base8b_path /mnt/nvme0/vlm_distill/models/Qwen3-VL-8B-Instruct \
+#   --distill_model_path /mnt/nvme0/vlm_distill/models/Qwen3-VL-8B-Instruct \
+#   --distill_adapter_path /mnt/nvme0/vlm_distill/outputs/student/adapter \
 #   --torch_dtype bfloat16 \
 #   --load_in_4bit \
 #   --match_threshold 0.70
