@@ -711,10 +711,17 @@ def _safe_string(value: Any) -> str | None:
 
 
 def _normalize_bbox(value: Any) -> list[float] | None:
-    if not isinstance(value, (list, tuple)) or len(value) != 4:
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.strip().split(",")]
+        if len(parts) != 4:
+            return None
+        raw_items: list[Any] = parts
+    elif isinstance(value, (list, tuple)) and len(value) == 4:
+        raw_items = list(value)
+    else:
         return None
     bbox: list[float] = []
-    for item in value:
+    for item in raw_items:
         numeric = _normalize_float(item)
         if numeric is None:
             return None
@@ -955,6 +962,7 @@ def build_summary(
         summary[role] = role_stats[role]
 
     summary["parse_stats"] = _build_parse_stats(raw_rows_by_role)
+    summary["bbox_parse_stats"] = _build_bbox_parse_stats(raw_rows_by_role)
     summary["teacher_reuse"] = teacher_reuse
     summary["generation_settings"] = generation_settings
 
@@ -1047,6 +1055,39 @@ def _build_parse_stats(raw_rows_by_role: dict[str, list[dict[str, Any]]]) -> dic
                 total_parsed_elements / num_rows if num_rows else 0.0
             ),
             "parse_error_counts": dict(parse_errors),
+        }
+    return stats
+
+
+def _build_bbox_parse_stats(
+    raw_rows_by_role: dict[str, list[dict[str, Any]]]
+) -> dict[str, dict[str, Any]]:
+    stats: dict[str, dict[str, Any]] = {}
+    for role in MODEL_ROLE_ORDER:
+        rows = raw_rows_by_role.get(role, [])
+        total_elements = 0
+        elements_with_valid_bbox = 0
+        for row in rows:
+            parsed = row.get("parsed")
+            if not isinstance(parsed, dict):
+                continue
+            elements = parsed.get("elements")
+            if not isinstance(elements, list):
+                continue
+            for element in elements:
+                if not isinstance(element, dict):
+                    continue
+                total_elements += 1
+                if _normalize_bbox(element.get("bbox")) is not None:
+                    elements_with_valid_bbox += 1
+        elements_with_missing_or_invalid_bbox = total_elements - elements_with_valid_bbox
+        stats[role] = {
+            "total_elements": total_elements,
+            "elements_with_valid_bbox": elements_with_valid_bbox,
+            "valid_bbox_rate": (
+                elements_with_valid_bbox / total_elements if total_elements else 0.0
+            ),
+            "elements_with_missing_or_invalid_bbox": elements_with_missing_or_invalid_bbox,
         }
     return stats
 
