@@ -89,9 +89,7 @@ def log_memory(label: str, model_path: str, stage: str, output_path: Path) -> No
     _append_jsonl(output_path, payload)
 
 
-def cleanup_model(*objects) -> None:
-    for obj in objects:
-        del obj
+def cleanup_cuda() -> None:
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -236,7 +234,13 @@ def profile_one_model(label: str, model_path: str, args, output_path: Path) -> N
         )
         print(f"[profile] {label}: load failed: {exc}")
     finally:
-        cleanup_model(generated_text, image, tokenizer, processor, model)
+        generated_text = None
+        image = None
+        tokenizer = None
+        processor = None
+        model = None
+
+        cleanup_cuda()
         log_memory(label, resolved_model_path, "after_cleanup", output_path)
         _prepare_for_next_model(args.sleep_seconds)
         print(f"[profile] {label}: finished {resolved_model_path}")

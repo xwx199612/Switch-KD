@@ -28,6 +28,8 @@ Typical stages are:
 - `after_generate`
 - `after_cleanup`
 
+`after_cleanup` is recorded only after the script clears the Python references for the loaded objects, runs `gc.collect()`, and empties the CUDA cache.
+
 If load or generate fails, the script keeps going and writes `load_error` or `generate_error` records.
 
 ## Run the Smoke Test
