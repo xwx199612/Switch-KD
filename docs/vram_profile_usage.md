@@ -73,3 +73,5 @@ If `nvidia_smi_used_mib` is much larger than `torch_allocated_gib`, the gap is u
 ## Notes
 
 The 32B teacher may not fit on a single GPU. In practice it may require `device_map=auto`, multi-GPU placement, CPU offload, 4-bit or 8-bit quantization, or a smaller smoke-test target environment.
+
+`after_cleanup` is recorded only after Python references to the model, processor, tokenizer, image, and generated text are cleared, followed by `gc.collect()`, `torch.cuda.empty_cache()`, CUDA peak-memory reset, and CUDA device synchronization. This makes the cleanup-stage VRAM record more representative of the post-release GPU state.
