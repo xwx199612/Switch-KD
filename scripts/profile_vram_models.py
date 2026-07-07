@@ -93,9 +93,8 @@ def cleanup_cuda() -> None:
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        for device_index in range(torch.cuda.device_count()):
-            torch.cuda.reset_peak_memory_stats(device_index)
-            torch.cuda.synchronize(device_index)
+        _safe_reset_peak_memory_stats()
+        _safe_cuda_synchronize()
 
 
 def load_processor(model_path: str):
@@ -292,6 +291,36 @@ def _append_jsonl(output_path: Path, payload: dict[str, Any]) -> None:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
+def _safe_reset_peak_memory_stats() -> None:
+    if not torch.cuda.is_available():
+        return
+
+    for device_index in range(torch.cuda.device_count()):
+        try:
+            with torch.cuda.device(device_index):
+                torch.cuda.reset_peak_memory_stats()
+        except RuntimeError as exc:
+            print(
+                f"[profile] warning: failed to reset CUDA peak memory stats "
+                f"for device {device_index}: {exc}"
+            )
+
+
+def _safe_cuda_synchronize() -> None:
+    if not torch.cuda.is_available():
+        return
+
+    for device_index in range(torch.cuda.device_count()):
+        try:
+            with torch.cuda.device(device_index):
+                torch.cuda.synchronize()
+        except RuntimeError as exc:
+            print(
+                f"[profile] warning: failed to synchronize CUDA device "
+                f"{device_index}: {exc}"
+            )
+
+
 def _get_torch_cuda_memory() -> dict[str, Any]:
     if not torch.cuda.is_available():
         return {
@@ -304,9 +333,15 @@ def _get_torch_cuda_memory() -> dict[str, Any]:
     reserved = 0
     max_allocated = 0
     for device_index in range(torch.cuda.device_count()):
-        allocated += torch.cuda.memory_allocated(device_index)
-        reserved += torch.cuda.memory_reserved(device_index)
-        max_allocated += torch.cuda.max_memory_allocated(device_index)
+        try:
+            allocated += torch.cuda.memory_allocated(device_index)
+            reserved += torch.cuda.memory_reserved(device_index)
+            max_allocated += torch.cuda.max_memory_allocated(device_index)
+        except RuntimeError as exc:
+            print(
+                f"[profile] warning: failed to query CUDA memory for device "
+                f"{device_index}: {exc}"
+            )
 
     return {
         "torch_allocated_gib": round(allocated / GIB, 4),
@@ -319,9 +354,8 @@ def _prepare_for_next_model(sleep_seconds: float) -> None:
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        for device_index in range(torch.cuda.device_count()):
-            torch.cuda.reset_peak_memory_stats(device_index)
-        torch.cuda.synchronize()
+        _safe_reset_peak_memory_stats()
+        _safe_cuda_synchronize()
     if sleep_seconds > 0:
         time.sleep(sleep_seconds)
 
