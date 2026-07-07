@@ -570,7 +570,7 @@ def parse_model_output(raw_output: str) -> dict[str, Any]:
     if not text:
         return {"elements": [], "parse_error": "empty_output"}
 
-    candidate, candidate_error = _extract_json_candidate(text)
+    candidate, candidate_error, parse_repair = _extract_json_candidate(text)
     if candidate_error is not None:
         return {"elements": [], "parse_error": candidate_error}
     if candidate is None:
@@ -610,6 +610,8 @@ def parse_model_output(raw_output: str) -> dict[str, Any]:
         if normalized is not None:
             normalized_elements.append(normalized)
     result: dict[str, Any] = {"elements": normalized_elements}
+    if parse_repair:
+        result["parse_repair"] = parse_repair
     if has_top_level_named_elements_list and elements and not normalized_elements:
         result["parse_error"] = "all_elements_invalid_after_normalization"
     elif not normalized_elements:
@@ -652,24 +654,24 @@ def _normalize_legacy_element(index: int, element: Any) -> dict[str, Any] | None
     }
 
 
-def _extract_json_candidate(text: str) -> tuple[str | None, str | None]:
+def _extract_json_candidate(text: str) -> tuple[str | None, str | None, str | None]:
     fenced_blocks = re.findall(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
     for block in fenced_blocks:
-        candidate, error = _extract_json_candidate_from_source(block)
+        candidate, error, parse_repair = _extract_json_candidate_from_source(block)
         if candidate is not None or error is not None:
-            return candidate, error
+            return candidate, error, parse_repair
     return _extract_json_candidate_from_source(text)
 
 
-def _extract_json_candidate_from_source(text: str) -> tuple[str | None, str | None]:
+def _extract_json_candidate_from_source(text: str) -> tuple[str | None, str | None, str | None]:
     stripped = text.strip()
     if not stripped:
-        return None, None
+        return None, None, None
     if _looks_like_named_top_level_object_payload(stripped):
         return _decode_json_value_at_start(stripped, "top_level")
     if stripped.startswith("["):
         return _decode_json_value_at_start(stripped, "top_level")
-    return _extract_first_json_value(stripped), None
+    return _extract_first_json_value(stripped), None, None
 
 
 def _extract_first_json_value(text: str) -> str | None:
@@ -688,20 +690,45 @@ def _looks_like_named_top_level_object_payload(text: str) -> bool:
     return bool(re.match(r'^\{\s*"(?:e|elements)"\s*:', text))
 
 
-def _decode_json_value_at_start(text: str, context: str) -> tuple[str | None, str | None]:
+def _decode_json_value_at_start(text: str, context: str) -> tuple[str | None, str | None, str | None]:
     decoder = json.JSONDecoder()
     try:
         obj, end = decoder.raw_decode(text)
     except json.JSONDecodeError as exc:
         if context == "top_level" and text.startswith("{"):
+            repaired_text, parse_repair = _repair_named_top_level_object_payload(text)
+            if repaired_text is not None and parse_repair is not None:
+                return repaired_text, None, parse_repair
             message = f"json_decode_error_top_level: {exc}"
             if re.match(r'^\{\s*"(?:e|elements)"\s*:', text):
-                return None, message or "truncated_or_malformed_top_level_json"
-            return None, message
-        return None, f"json_decode_error: {exc}"
+                return None, message or "truncated_or_malformed_top_level_json", None
+            return None, message, None
+        return None, f"json_decode_error: {exc}", None
     if not isinstance(obj, (dict, list)):
-        return None, "top_level_json_is_not_object_or_array"
-    return text[:end], None
+        return None, "top_level_json_is_not_object_or_array", None
+    return text[:end], None, None
+
+
+def _repair_named_top_level_object_payload(text: str) -> tuple[str | None, str | None]:
+    if not _looks_like_named_top_level_object_payload(text):
+        return None, None
+    repaired_text = text.rstrip()
+    if not repaired_text.startswith("{") or repaired_text.endswith("}"):
+        return None, None
+    repaired_text += "}"
+
+    decoder = json.JSONDecoder()
+    try:
+        obj, end = decoder.raw_decode(repaired_text)
+    except json.JSONDecodeError:
+        return None, None
+    if not isinstance(obj, dict):
+        return None, None
+    if "e" not in obj and "elements" not in obj:
+        return None, None
+    if repaired_text[end:].strip():
+        return None, None
+    return repaired_text, "appended_missing_top_level_closing_brace"
 
 
 def _safe_string(value: Any) -> str | None:
@@ -962,6 +989,7 @@ def build_summary(
         summary[role] = role_stats[role]
 
     summary["parse_stats"] = _build_parse_stats(raw_rows_by_role)
+    summary["parse_repair_stats"] = _build_parse_repair_stats(raw_rows_by_role)
     summary["bbox_parse_stats"] = _build_bbox_parse_stats(raw_rows_by_role)
     summary["teacher_reuse"] = teacher_reuse
     summary["generation_settings"] = generation_settings
@@ -1055,6 +1083,32 @@ def _build_parse_stats(raw_rows_by_role: dict[str, list[dict[str, Any]]]) -> dic
                 total_parsed_elements / num_rows if num_rows else 0.0
             ),
             "parse_error_counts": dict(parse_errors),
+        }
+    return stats
+
+
+def _build_parse_repair_stats(
+    raw_rows_by_role: dict[str, list[dict[str, Any]]]
+) -> dict[str, dict[str, Any]]:
+    stats: dict[str, dict[str, Any]] = {}
+    for role in MODEL_ROLE_ORDER:
+        rows = raw_rows_by_role.get(role, [])
+        repair_counts = Counter()
+        for row in rows:
+            parsed = row.get("parsed")
+            if not isinstance(parsed, dict):
+                continue
+            parse_repair = parsed.get("parse_repair")
+            if parse_repair:
+                repair_counts[str(parse_repair)] += 1
+
+        num_rows = len(rows)
+        num_repaired_rows = sum(repair_counts.values())
+        stats[role] = {
+            "num_rows": num_rows,
+            "num_repaired_rows": num_repaired_rows,
+            "repair_rate": (num_repaired_rows / num_rows if num_rows else 0.0),
+            "repair_counts": dict(repair_counts),
         }
     return stats
 
