@@ -6,7 +6,17 @@ from pathlib import Path
 
 from PIL import Image
 
-from tools.draw_lm_bboxes import clamp_bbox, draw_bboxes, extract_json_from_text, load_lm_output
+from tools.draw_lm_bboxes import (
+    COORD_SYSTEM_NORMALIZED_1000,
+    COORD_SYSTEM_PIXEL,
+    clamp_bbox,
+    convert_bbox_to_pixels,
+    draw_bboxes,
+    extract_json_from_text,
+    infer_coord_system,
+    label_text,
+    load_lm_output,
+)
 
 
 def _file_hash(path: Path) -> str:
@@ -40,6 +50,27 @@ def test_clamp_bbox_clamps_to_image_bounds() -> None:
     assert clamp_bbox([-5, 10, 120, 90], width=100, height=80) == (0, 10, 100, 80)
     assert clamp_bbox([50, 50, 40, 70], width=100, height=100) is None
     assert clamp_bbox(["bad", 0, 10, 10], width=100, height=100) is None
+
+
+def test_infer_coord_system_detects_normalized_1000_for_large_images() -> None:
+    elements = [{"bbox": [283, 700, 518, 754]}]
+
+    assert infer_coord_system(elements, width=1920, height=1080) == COORD_SYSTEM_NORMALIZED_1000
+    assert infer_coord_system(elements, width=800, height=600) == COORD_SYSTEM_PIXEL
+
+
+def test_convert_bbox_to_pixels_scales_normalized_1000() -> None:
+    converted = convert_bbox_to_pixels([283, 700, 518, 754], 1920, 1080, COORD_SYSTEM_NORMALIZED_1000)
+
+    assert converted == (543.36, 756.0, 994.56, 814.32)
+    assert clamp_bbox(converted, 1920, 1080) == (543, 756, 995, 814)
+
+
+def test_label_text_can_hide_focused_suffix() -> None:
+    element = {"text": "General", "focused": True}
+
+    assert label_text(element) == "General FOCUSED"
+    assert label_text(element, include_focused_suffix=False) == "General"
 
 
 def test_draw_bboxes_creates_output_without_modifying_original(tmp_path: Path) -> None:
@@ -77,3 +108,36 @@ def test_draw_bboxes_creates_output_without_modifying_original(tmp_path: Path) -
     assert output_path.exists()
     assert _file_hash(image_path) == original_hash
     assert _file_hash(output_path) != original_hash
+
+
+def test_draw_bboxes_supports_normalized_1000_bboxes(tmp_path: Path) -> None:
+    image_path = tmp_path / "original_1080p.png"
+    output_path = tmp_path / "annotated_1080p.png"
+    Image.new("RGB", (1920, 1080), color="white").save(image_path)
+
+    lm_data = {
+        "elements": [
+            {
+                "text": "External Devices",
+                "bbox": [283, 700, 518, 754],
+                "focused": True,
+                "confidence": 0.98,
+                "type": "menu_item",
+            }
+        ]
+    }
+
+    draw_bboxes(
+        image_path,
+        lm_data,
+        output_path,
+        coord_system=COORD_SYSTEM_NORMALIZED_1000,
+        font_size=18,
+        line_width=3,
+    )
+
+    output = Image.open(output_path)
+    try:
+        assert output.getpixel((543, 756)) == (255, 59, 48)
+    finally:
+        output.close()
