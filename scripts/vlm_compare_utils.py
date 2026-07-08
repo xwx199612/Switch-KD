@@ -15,6 +15,23 @@ MODEL_SPECS = (
     ("distilled_32to8b", "model_distilled"),
 )
 
+_BULLET_PREFIX_RE = re.compile(r"^\s*(?:[-*•]+|\d+[.)]|[A-Za-z][.)])\s*")
+_OBJECT_EXPLANATION_PREFIXES = (
+    "here are",
+    "objects:",
+    "object names:",
+    "visible objects:",
+    "visible ui elements:",
+    "ui elements:",
+    "elements:",
+    "output:",
+    "answer:",
+    "explanation:",
+    "note:",
+)
+_BOOL_TRUE_VALUES = {"true", "yes", "y", "focused", "1"}
+_BOOL_FALSE_VALUES = {"false", "no", "n", "unfocused", "0"}
+
 
 def ensure_dir(path: str | Path) -> Path:
     directory = Path(path)
@@ -63,13 +80,29 @@ def load_processor_and_model(
     model_path: str,
     torch_dtype: str,
     device_map: str,
+    quantization: str,
 ):
-    from transformers import AutoProcessor
+    from transformers import AutoProcessor, BitsAndBytesConfig
 
     try:
         from transformers import AutoModelForImageTextToText
     except ImportError:  # pragma: no cover
         from transformers import AutoModelForVision2Seq as AutoModelForImageTextToText
+
+    resolved_torch_dtype = resolve_torch_dtype(torch_dtype)
+    quantization_config = None
+    effective_device_map = device_map
+    if quantization == "4bit":
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=resolved_torch_dtype,
+            bnb_4bit_use_double_quant=True,
+        )
+        effective_device_map = "auto"
+    elif quantization == "8bit":
+        quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+        effective_device_map = "auto"
 
     processor = AutoProcessor.from_pretrained(
         model_path,
@@ -81,8 +114,9 @@ def load_processor_and_model(
         model_path,
         trust_remote_code=True,
         local_files_only=True,
-        device_map=device_map,
-        torch_dtype=resolve_torch_dtype(torch_dtype),
+        device_map=effective_device_map,
+        torch_dtype=resolved_torch_dtype,
+        quantization_config=quantization_config,
     )
     model.eval()
     return processor, model
@@ -178,7 +212,6 @@ def run_vlm_inference(
     output_ids = model.generate(
         **inputs,
         do_sample=False,
-        temperature=0.0,
         max_new_tokens=max_new_tokens,
     )
     input_ids = inputs.get("input_ids")
@@ -194,18 +227,219 @@ def run_vlm_inference(
     return decoded[0].strip() if decoded else ""
 
 
-def extract_json_from_text(text: str) -> dict[str, Any]:
-    decoder = json.JSONDecoder()
+EXPECTED_TOP_LEVEL_KEYS = (
+    "elements",
+    "objects",
+    "bounding_boxes",
+    "detections",
+    "predictions",
+)
+
+
+_BBOX_FIELD_NAMES = (
+    "bbox",
+    "box",
+    "bbox_2d",
+    "bounding_box",
+    "coordinates",
+)
+_JSON_NUMBER_RE = r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?"
+_BBOX_VALUE_RE = (
+    rf"{_JSON_NUMBER_RE}\s*,\s*"
+    rf"{_JSON_NUMBER_RE}\s*,\s*"
+    rf"{_JSON_NUMBER_RE}\s*,\s*"
+    rf"{_JSON_NUMBER_RE}"
+)
+_BBOX_FIELD_RE = "|".join(re.escape(field) for field in _BBOX_FIELD_NAMES)
+_MISSING_BOTH_BBOX_BRACKETS_RE = re.compile(
+    rf'("(?P<field>{_BBOX_FIELD_RE})"\s*:\s*)'
+    rf'(?P<coords>{_BBOX_VALUE_RE})'
+    rf'(?P<tail>\s*,\s*"[^"]+"\s*:)'
+)
+_MALFORMED_BBOX_KEY_RE = re.compile(
+    rf'"(?P<field>{_BBOX_FIELD_RE})=(?P<quote>\")(?P<coords>{_BBOX_VALUE_RE})(?P<closing>\s*\])'
+)
+_MISSING_OPEN_BBOX_BRACKET_RE = re.compile(
+    rf'("(?P<field>{_BBOX_FIELD_RE})"\s*:\s*)'
+    rf'(?P<coords>{_BBOX_VALUE_RE})'
+    rf'(?P<closing>\s*\])'
+)
+_MISSING_CLOSE_BBOX_BRACKET_RE = re.compile(
+    rf'("(?P<field>{_BBOX_FIELD_RE})"\s*:\s*\[\s*)'
+    rf'(?P<coords>{_BBOX_VALUE_RE})'
+    rf'(?P<tail>\s*,\s*"[^"]+"\s*:)'
+)
+
+
+def repair_common_json_errors(text: str) -> tuple[str, list[str]]:
+    repaired = text
+    notes: list[str] = []
+
+    repaired, count = _MALFORMED_BBOX_KEY_RE.subn(
+        lambda match: (
+            f'"{match.group("field")}":[{match.group("coords")}{match.group("closing")}'
+        ),
+        repaired,
+    )
+    if count:
+        notes.append(f"repaired malformed bbox key/value ({count} occurrence(s))")
+
+    repaired, count = _MISSING_BOTH_BBOX_BRACKETS_RE.subn(
+        lambda match: (
+            f'{match.group(1)}[{match.group("coords")}]{match.group("tail")}'
+        ),
+        repaired,
+    )
+    if count:
+        notes.append(f"repaired missing bbox brackets ({count} occurrence(s))")
+
+    repaired, count = _MISSING_OPEN_BBOX_BRACKET_RE.subn(
+        lambda match: (
+            f'{match.group(1)}[{match.group("coords")}{match.group("closing")}'
+        ),
+        repaired,
+    )
+    if count:
+        notes.append(f"repaired missing bbox opening bracket ({count} occurrence(s))")
+
+    repaired, count = _MISSING_CLOSE_BBOX_BRACKET_RE.subn(
+        lambda match: (
+            f'{match.group(1)}{match.group("coords")}]{match.group("tail")}'
+        ),
+        repaired,
+    )
+    if count:
+        notes.append(f"repaired missing bbox closing bracket ({count} occurrence(s))")
+
+    return repaired, notes
+
+
+def _iter_top_level_json_starts(text: str):
+    in_string = False
+    escaped = False
+    depth = 0
+
     for index, char in enumerate(text):
-        if char != "{":
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
             continue
+
+        if char == '"':
+            in_string = True
+            continue
+        if char in "{[":
+            if depth == 0:
+                yield index
+            depth += 1
+            continue
+        if char in "}]":
+            if depth > 0:
+                depth -= 1
+
+
+def _is_truncated_top_level_json(text: str, start_index: int) -> bool:
+    opening = text[start_index]
+    if opening not in "{[":
+        return False
+
+    expected_closing = "}" if opening == "{" else "]"
+    in_string = False
+    escaped = False
+    depth = 0
+
+    for char in text[start_index:]:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+            continue
+        if char == opening:
+            depth += 1
+            continue
+        if char == expected_closing:
+            depth -= 1
+            if depth == 0:
+                return False
+
+    return depth > 0
+
+
+def _extract_json_from_text_once(
+    text: str,
+    *,
+    json_repaired: bool = False,
+    repair_notes: list[str] | None = None,
+) -> dict[str, Any]:
+    decoder = json.JSONDecoder()
+    found_candidate = False
+
+    for start_index in _iter_top_level_json_starts(text):
+        found_candidate = True
         try:
-            parsed, _ = decoder.raw_decode(text[index:])
+            parsed, _ = decoder.raw_decode(text[start_index:])
         except json.JSONDecodeError:
+            if _is_truncated_top_level_json(text, start_index):
+                raise ValueError(
+                    "No complete top-level JSON object found. The model output may be truncated."
+                ) from None
             continue
+
+        if isinstance(parsed, list):
+            result: dict[str, Any] = {"elements": parsed}
+            if json_repaired:
+                result["json_repaired"] = True
+            if repair_notes:
+                result["repair_notes"] = list(repair_notes)
+            return result
         if isinstance(parsed, dict):
-            return parsed
-    raise ValueError("No JSON object found in model output.")
+            if any(key in parsed for key in EXPECTED_TOP_LEVEL_KEYS):
+                result = dict(parsed)
+                if json_repaired:
+                    result["json_repaired"] = True
+                if repair_notes:
+                    result["repair_notes"] = list(repair_notes)
+                return result
+            continue
+
+    if found_candidate:
+        raise ValueError(
+            "No valid top-level JSON object found in model output. "
+            "The output may be malformed or truncated."
+        )
+    raise ValueError(
+        "No valid top-level JSON object found in model output. "
+        "The output may be malformed or truncated."
+    )
+
+
+def extract_json_from_text(text: str) -> dict[str, Any]:
+    try:
+        return _extract_json_from_text_once(text)
+    except ValueError as original_error:
+        repaired_text, repair_notes = repair_common_json_errors(text)
+        if repaired_text == text:
+            raise original_error
+
+        try:
+            return _extract_json_from_text_once(
+                repaired_text,
+                json_repaired=True,
+                repair_notes=repair_notes,
+            )
+        except ValueError as repaired_error:
+            raise repaired_error
 
 
 def _extract_text_like(value: Any) -> str | None:
@@ -245,6 +479,92 @@ def normalize_object_list(parsed_json: dict[str, Any]) -> list[str]:
         seen.add(key)
         deduped.append(candidate)
     return deduped
+
+
+def _strip_common_line_prefix(line: str) -> str:
+    return _BULLET_PREFIX_RE.sub("", line, count=1).strip()
+
+
+def _looks_like_non_object_line(line: str) -> bool:
+    lowered = line.strip().casefold()
+    if not lowered:
+        return True
+    if lowered in _OBJECT_EXPLANATION_PREFIXES:
+        return True
+    if any(lowered.startswith(prefix) for prefix in _OBJECT_EXPLANATION_PREFIXES):
+        return True
+    if lowered.startswith(("json", "{", "[", "```")):
+        return True
+    if "|" in line:
+        return True
+    if len(line.split()) > 12:
+        return True
+    return False
+
+
+def parse_line_object_names(raw_text: str) -> list[str]:
+    objects: list[str] = []
+    seen: set[str] = set()
+
+    for raw_line in raw_text.splitlines():
+        line = _strip_common_line_prefix(raw_line)
+        if not line or _looks_like_non_object_line(line):
+            continue
+        key = line.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        objects.append(line)
+    return objects
+
+
+def _parse_focused_value(value: str) -> bool | None:
+    normalized = value.strip().casefold()
+    if normalized in _BOOL_TRUE_VALUES:
+        return True
+    if normalized in _BOOL_FALSE_VALUES:
+        return False
+    return None
+
+
+def parse_line_bbox_elements(raw_text: str) -> list[dict[str, Any]]:
+    elements: list[dict[str, Any]] = []
+
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) != 3:
+            continue
+
+        text, bbox_text, focused_text = parts
+        text = _strip_common_line_prefix(text)
+        if not text or _looks_like_non_object_line(text):
+            continue
+
+        bbox_parts = [part.strip() for part in bbox_text.split(",")]
+        if len(bbox_parts) != 4:
+            continue
+        try:
+            bbox = [float(value) for value in bbox_parts]
+        except (TypeError, ValueError):
+            continue
+
+        focused = _parse_focused_value(focused_text)
+        if focused is None:
+            continue
+
+        elements.append(
+            {
+                "text": text,
+                "bbox": bbox,
+                "focused": focused,
+            }
+        )
+
+    return elements
 
 
 def cleanup_model(model, processor) -> None:

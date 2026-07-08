@@ -21,6 +21,7 @@ from scripts.vlm_compare_utils import (
     extract_json_from_text,
     list_images,
     load_processor_and_model,
+    parse_line_bbox_elements,
     run_vlm_inference,
 )
 from tools.draw_lm_bboxes import (
@@ -31,7 +32,33 @@ from tools.draw_lm_bboxes import (
 )
 
 
-PROMPT = """You are an Android TV visual grounding assistant.
+LINE_PROMPT = """You are an Android TV visual grounding assistant.
+
+Analyze the screenshot and list all visible interactive UI elements.
+
+Return line-based TSV-like output only.
+Each line must be:
+text | x_min,y_min,x_max,y_max | focused
+
+Example:
+Picture | 145,238,276,292 | false
+General | 145,348,276,404 | true
+Network Settings | 705,396,807,432 | false
+
+Rules:
+Do not return JSON.
+Do not return markdown.
+Do not return explanations.
+One visible interactive UI element per line.
+Use normalized 0-1000 coordinates.
+Include all visible interactive UI elements.
+Do not impose a maximum number of elements.
+Do not include decorative background graphics.
+Do not include duplicate elements.
+Do not include long helper descriptions unless the text itself is a distinct clickable UI element.
+Use concise labels only."""
+
+JSON_PROMPT = """You are an Android TV visual grounding assistant.
 
 Analyze the screenshot and list all visible interactive UI elements and visible object names.
 
@@ -69,13 +96,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-32b", required=True)
     parser.add_argument("--model-8b", required=True)
     parser.add_argument("--model-distilled", required=True)
-    parser.add_argument("--device-map", default="auto")
+    parser.add_argument(
+        "--device-map",
+        default="auto",
+        help="Device map for non-quantized loading. Quantized loading always uses auto.",
+    )
     parser.add_argument(
         "--torch-dtype",
         choices=("float16", "bfloat16", "float32"),
         default="bfloat16",
+        help="Torch dtype for model loading and 4-bit compute.",
+    )
+    parser.add_argument(
+        "--quantization",
+        choices=("none", "4bit", "8bit"),
+        default="none",
+        help="Quantized model loading mode.",
     )
     parser.add_argument("--max-new-tokens", type=int, default=1024)
+    parser.add_argument(
+        "--output-format",
+        choices=("line", "json"),
+        default="line",
+        help="Model output format. 'line' is the parse-resistant default; 'json' keeps legacy parsing.",
+    )
     parser.add_argument(
         "--coord-system",
         choices=(COORD_SYSTEM_PIXEL, COORD_SYSTEM_NORMALIZED_1000, COORD_SYSTEM_AUTO),
@@ -157,6 +201,7 @@ def main() -> None:
             model_path=model_path,
             torch_dtype=args.torch_dtype,
             device_map=args.device_map,
+            quantization=args.quantization,
         )
         try:
             for index, image_path in enumerate(images, start=1):
@@ -172,17 +217,27 @@ def main() -> None:
                         model=model,
                         processor=processor,
                         image=image,
-                        prompt=PROMPT,
+                        prompt=JSON_PROMPT if args.output_format == "json" else LINE_PROMPT,
                         max_new_tokens=args.max_new_tokens,
                     )
                     raw_path = raw_dir / f"{debug_stem(image_path)}.txt"
                     raw_path.write_text(raw_output + ("\n" if raw_output else ""), encoding="utf-8")
 
-                    parsed_json = extract_json_from_text(raw_output)
-                    normalized_elements, skipped = normalize_elements(parsed_json)
-                    debug_payload = {
+                    if args.output_format == "json":
+                        parsed_json = extract_json_from_text(raw_output)
+                        normalized_elements, skipped = normalize_elements(parsed_json)
+                    else:
+                        normalized_elements = parse_line_bbox_elements(raw_output)
+                        skipped = []
+                    debug_payload: dict[str, Any] = {
                         "elements": normalized_elements,
+                        "parse_format": args.output_format,
                     }
+                    if not normalized_elements and raw_output.strip():
+                        debug_payload["parse_error"] = "no_valid_lines"
+                        debug_payload["hint"] = (
+                            "The model output may be malformed. Inspect raw output."
+                        )
                     if skipped:
                         debug_payload["skipped_elements"] = skipped
                     json_path = json_dir / f"{debug_stem(image_path)}.json"
@@ -221,7 +276,9 @@ def main() -> None:
                         json.dumps(
                             {
                                 "elements": [],
+                                "parse_format": args.output_format,
                                 "parse_error": f"{type(exc).__name__}: {exc}",
+                                "hint": "The model output may be malformed or truncated. Inspect raw output.",
                             },
                             ensure_ascii=False,
                             indent=2,

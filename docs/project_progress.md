@@ -15,6 +15,10 @@ Two server-side comparison scripts are available for running the same image fold
 1. `scripts/compare_vlm_object_listing.py`
 2. `scripts/compare_vlm_bbox_grounding.py`
 
-The object-listing script compares recognition and parsing ability by asking each model to return visible object or UI-element names and writing one text report per model.
+The object-listing script compares recognition and parsing ability by asking each model to return visible object or UI-element names, saving raw outputs per image, and writing parsed text and JSON artifacts per image.
 
 The bbox-grounding script compares visual localization ability by asking each model to return labeled elements with bounding boxes, saving raw and parsed outputs for debugging, and writing annotated image copies per model. It supports Qwen-VL-style normalized `0-1000` coordinates via `--coord-system normalized-1000` and related coordinate handling in the annotation path.
+
+Both scripts now also support `--quantization {none,4bit,8bit}`. Quantized model loading uses `BitsAndBytesConfig`, keeps the existing one-model-at-a-time execution flow, and still calls `cleanup_model()` after each model finishes so VRAM can be released before the next checkpoint loads.
+
+Normal inference in both comparison scripts now defaults to parse-error-resistant line-based model output instead of model-generated JSON. Raw model outputs are still saved unchanged per image, while parsed `.json` artifacts are produced by script-side line parsers for object names and bbox elements. Malformed lines are skipped instead of failing the whole image, and legacy JSON parsing is only used when explicitly requested via `--output-format json`.
