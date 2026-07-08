@@ -14,17 +14,17 @@ options:
 # Do not add local_files_only / trust_remote_code here unless config_schema.py is updated.
 
 data:
-  training_manifest_path: outputs/switch-kd/{task_name}_training_manifest.jsonl
-  inference_manifest_path: outputs/switch-kd/{task_name}_inference_manifest.jsonl
-  distill_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}.jsonl
+  training_manifest_path: outputs/lora_ablation/{task_name}_training_manifest.jsonl
+  inference_manifest_path: outputs/lora_ablation/{task_name}_inference_manifest.jsonl
+  distill_path: outputs/lora_ablation/{task_name}_switch_kd_{response_profile}.jsonl
   # Canonical unified teacher output. Rows contain teacher_answer,
   # teacher_tokens, and teacher_logits when distillation.teacher_logits=true.
-  label_path: outputs/switch-kd/{task_name}_teacher_labels_{label_profile}.jsonl
+  label_path: outputs/lora_ablation/{task_name}_teacher_labels_{label_profile}.jsonl
   # Deprecated: teacher_logits_path is intentionally omitted from this workflow.
   # Legacy configs may still set it, but switch-kd now reads teacher logits from label_path.
-  switch_logits_path: outputs/switch-kd/{task_name}_switch_logits_{response_profile}.jsonl
-  eval_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}.jsonl
-  prediction_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/student_predictions.jsonl
+  switch_logits_path: outputs/lora_ablation/{task_name}_switch_logits_{response_profile}.jsonl
+  eval_path: outputs/lora_ablation/{task_name}_switch_kd_{response_profile}.jsonl
+  prediction_path: outputs/lora_ablation/{task_name}_switch_kd_{response_profile}/student_predictions.jsonl
   training_image_dir: /mnt/nvme0/vlm_distill/TV_data
   inference_image_dir: /mnt/nvme0/vlm_distill/validation_data
   image_root: .
@@ -47,14 +47,14 @@ student:
   output_dir: outputs/lora_ablation/r32_attn_mlp
   adapter_dir: outputs/lora_ablation/r32_attn_mlp/adapter
   merged_model_path: 
-  #outputs/switch-kd/{task_name}_switch_kd_{response_profile}/merged_model
+  #outputs/lora_ablation/{task_name}_switch_kd_{response_profile}/merged_model
 
   # Prediction-time model/adapter controls.
   # Leave inference_model_path empty to let predict prefer merged_model_path when it exists,
   # otherwise fall back to model_name.
-  inference_model_path: outputs/switch-kd/parsing_switch_kd_1080p_4bit_student_4bit/merged_hf_bf16
-  inference_adapter_path:
-  load_adapter: true
+  inference_model_path: 
+  inference_adapter_path: 
+  load_adapter: false
   merge_adapter: false
 
   device_map: auto
@@ -204,7 +204,7 @@ distillation:
   teacher_token_embedding_path: model.language_model.embed_tokens
   teacher_lm_head_path: lm_head
   switch_cache_student_visual: true
-  student_visual_cache_dir: outputs/switch-kd/{task_name}_student_visual_cache_{response_profile}
+  student_visual_cache_dir: outputs/lora_ablation/{task_name}_student_visual_cache_{response_profile}
   keep_student_visual_cache_on_cpu: true
   visual_token_placeholder: "<|image_pad|>"
   max_cached_logits_vocab: 4096
@@ -218,7 +218,7 @@ distillation:
       allow_fallback_adapter: false
 
 evaluation:
-  output_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/eval_report.json
+  output_path: outputs/lora_ablation/{task_name}_switch_kd_{response_profile}/eval_report.json
   metrics:
     - exact_match
     - token_f1

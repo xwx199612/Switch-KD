@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
+import yaml
 
 from . import teacher_validation
 from .config_schema import (
@@ -15,6 +17,7 @@ from .config_schema import (
 from .data_manifest import validate_manifest
 from .hf_runtime import configure_hf_offline_mode
 from .manifest_builder import create_manifest_from_config, infer_manifest_task_from_config_path
+from .parsing_output_parser import convert_parsing_output_dir
 from .stage_evaluation import evaluate
 from .stage_merge_adapter import merge_student_adapter
 from .stage_prediction_evaluation import evaluate_predictions
@@ -39,7 +42,16 @@ def main() -> None:
         choices=("training", "inference"),
         required=True,
     )
+    create_manifest_parser.add_argument(
+        "--task",
+        choices=("parsing", "grounding"),
+    )
     create_manifest_parser.add_argument("--recursive", action="store_true")
+
+    parse_outputs_parser = subparsers.add_parser("parse-parsing-outputs")
+    parse_outputs_parser.add_argument("--raw-dir", type=Path, required=True)
+    parse_outputs_parser.add_argument("--json-dir", type=Path, required=True)
+    parse_outputs_parser.add_argument("--overwrite", action="store_true")
 
     for command in (
         "validate-manifest",
@@ -75,7 +87,10 @@ def main() -> None:
 
     if args.command == "create-manifest":
         config = load_config(args.config)
-        task = infer_manifest_task_from_config_path(args.config)
+        task = _resolve_create_manifest_task(
+            config_path=args.config,
+            cli_task=args.task,
+        )
 
         output_path = create_manifest_from_config(
             config=config,
@@ -84,6 +99,20 @@ def main() -> None:
             recursive=args.recursive,
         )
         print(f"OK manifest written: {output_path}")
+        return
+
+    if args.command == "parse-parsing-outputs":
+        report = convert_parsing_output_dir(
+            raw_dir=args.raw_dir,
+            json_dir=args.json_dir,
+            overwrite=args.overwrite,
+        )
+        print(
+            "OK parsed outputs "
+            f"total_files={report['total_files']} parse_ok={report['parse_ok']} "
+            f"parse_failed={report['parse_failed']} total_elements={report['total_elements']} "
+            f"json_dir={args.json_dir}"
+        )
         return
 
     config = load_config(args.config)
@@ -232,6 +261,43 @@ def _print_teacher_validation_summary(summary: dict[str, object]) -> None:
         print("first_bad_rows:")
         for bad_row in bad_rows:
             print(f"  id={bad_row['id']} reason={bad_row['reason']}")
+
+
+def _resolve_create_manifest_task(
+    *,
+    config_path: Path,
+    cli_task: str | None,
+) -> str:
+    raw_config_task = _read_raw_config_task_name(config_path)
+    task = cli_task or raw_config_task
+    if task is None:
+        task = infer_manifest_task_from_config_path(config_path)
+
+    allowed_tasks = ("parsing", "grounding")
+    normalized_task = str(task).strip().casefold()
+    if normalized_task not in allowed_tasks:
+        raise ValueError(
+            "Invalid create-manifest task resolution. "
+            f"resolved task={task!r} config path={config_path} "
+            f"allowed tasks={list(allowed_tasks)}"
+        )
+    return normalized_task
+
+
+def _read_raw_config_task_name(config_path: Path) -> str | None:
+    with config_path.open("r", encoding="utf-8") as handle:
+        loaded: Any = yaml.safe_load(handle)
+
+    if not isinstance(loaded, dict):
+        return None
+    options = loaded.get("options")
+    if not isinstance(options, dict):
+        return None
+    task_name = options.get("task_name")
+    if task_name is None:
+        return None
+    task_text = str(task_name).strip()
+    return task_text or None
 
 
 def _print_switch_logits_validation_summary(summary: dict[str, object]) -> None:
