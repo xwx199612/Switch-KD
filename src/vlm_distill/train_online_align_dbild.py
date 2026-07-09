@@ -25,6 +25,201 @@ VISION_FREEZE_KEYWORDS = (
     "visual.window_index",
 )
 
+
+def _canonical_text_for_token_alignment(text: str) -> str:
+    return str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _encode_answer_without_special_tokens(processor, answer: str) -> list[int]:
+    tokenizer = getattr(processor, "tokenizer", processor)
+    encoded = tokenizer(
+        answer,
+        add_special_tokens=False,
+        return_attention_mask=False,
+    )
+    input_ids = encoded["input_ids"]
+    if input_ids and isinstance(input_ids[0], list):
+        input_ids = input_ids[0]
+    return [int(token_id) for token_id in input_ids]
+
+
+def _decode_answer_tokens(processor, token_ids: list[int]) -> str:
+    tokenizer = getattr(processor, "tokenizer", processor)
+    return tokenizer.decode(
+        [int(token_id) for token_id in token_ids],
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )
+
+
+def _first_mismatch_index(left: list[int], right: list[int]) -> int | None:
+    for index, (left_id, right_id) in enumerate(zip(left, right)):
+        if int(left_id) != int(right_id):
+            return index
+    if len(left) != len(right):
+        return min(len(left), len(right))
+    return None
+
+
+def _validate_teacher_token_identity(
+    *,
+    row: dict[str, Any],
+    teacher_processor,
+) -> None:
+    sample_id = row.get("id")
+    answer = str(row.get("teacher_answer") or "")
+    cached_tokens = [int(token_id) for token_id in row.get("teacher_tokens") or []]
+    encoded_tokens = _encode_answer_without_special_tokens(teacher_processor, answer)
+
+    if cached_tokens != encoded_tokens:
+        mismatch = _first_mismatch_index(cached_tokens, encoded_tokens)
+        mismatch_index = mismatch or 0
+        cached_window = cached_tokens[max(0, mismatch_index - 5):mismatch_index + 6]
+        encoded_window = encoded_tokens[max(0, mismatch_index - 5):mismatch_index + 6]
+
+        raise ValueError(
+            "Teacher token identity validation failed. "
+            f"id={sample_id!r}, "
+            f"cached_len={len(cached_tokens)}, "
+            f"encoded_len={len(encoded_tokens)}, "
+            f"first_mismatch_index={mismatch}, "
+            f"cached_token={cached_tokens[mismatch] if mismatch is not None and mismatch < len(cached_tokens) else None}, "
+            f"encoded_token={encoded_tokens[mismatch] if mismatch is not None and mismatch < len(encoded_tokens) else None}, "
+            f"cached_decoded_window={_decode_answer_tokens(teacher_processor, cached_window)!r}, "
+            f"encoded_decoded_window={_decode_answer_tokens(teacher_processor, encoded_window)!r}, "
+            f"teacher_answer_preview={answer[:300]!r}"
+        )
+
+
+def _validate_teacher_student_tokenizer_identity(
+    *,
+    row: dict[str, Any],
+    teacher_processor,
+    student_processor,
+) -> None:
+    sample_id = row.get("id")
+    answer = str(row.get("teacher_answer") or "")
+    teacher_ids = _encode_answer_without_special_tokens(teacher_processor, answer)
+    student_ids = _encode_answer_without_special_tokens(student_processor, answer)
+
+    if teacher_ids != student_ids:
+        mismatch = _first_mismatch_index(teacher_ids, student_ids)
+        mismatch_index = mismatch or 0
+        teacher_window = teacher_ids[max(0, mismatch_index - 5):mismatch_index + 6]
+        student_window = student_ids[max(0, mismatch_index - 5):mismatch_index + 6]
+
+        raise ValueError(
+            "Teacher/student tokenizer identity validation failed. "
+            "Online token-position DBiLD requires identical answer token IDs. "
+            f"id={sample_id!r}, "
+            f"teacher_len={len(teacher_ids)}, "
+            f"student_len={len(student_ids)}, "
+            f"first_mismatch_index={mismatch}, "
+            f"teacher_token={teacher_ids[mismatch] if mismatch is not None and mismatch < len(teacher_ids) else None}, "
+            f"student_token={student_ids[mismatch] if mismatch is not None and mismatch < len(student_ids) else None}, "
+            f"teacher_decoded_window={_decode_answer_tokens(teacher_processor, teacher_window)!r}, "
+            f"student_decoded_window={_decode_answer_tokens(student_processor, student_window)!r}, "
+            f"teacher_answer_preview={answer[:300]!r}"
+        )
+
+
+def _validate_online_dbild_token_alignment_rows(
+    *,
+    rows: list[dict[str, Any]],
+    teacher_processor,
+    student_processor,
+) -> None:
+    checked = 0
+    for row in rows:
+        if row.get("task", "parsing") != "parsing":
+            continue
+        _validate_teacher_token_identity(
+            row=row,
+            teacher_processor=teacher_processor,
+        )
+        _validate_teacher_student_tokenizer_identity(
+            row=row,
+            teacher_processor=teacher_processor,
+            student_processor=student_processor,
+        )
+        checked += 1
+
+    print("Online DBiLD token alignment validation:")
+    print(f"  checked_rows={checked}")
+    print("  teacher_token_identity_ok=True")
+    print("  teacher_student_tokenizer_identity_ok=True")
+
+
+def _validate_student_label_answer_span(
+    *,
+    batch: dict[str, Any],
+    student_processor,
+) -> list[int]:
+    input_ids = batch["input_ids"]
+    labels = batch["labels"]
+    teacher_answers = batch.get("teacher_answer") or batch.get("teacher_answers")
+
+    if teacher_answers is None:
+        raise ValueError("Missing teacher_answer metadata in batch; cannot validate supervised answer span.")
+
+    supervised_counts: list[int] = []
+
+    for batch_index, expected_answer in enumerate(teacher_answers):
+        label_mask = labels[batch_index] != -100
+        label_ids = input_ids[batch_index][label_mask].detach().cpu().tolist()
+        supervised_counts.append(len(label_ids))
+
+        decoded = _decode_answer_tokens(student_processor, label_ids)
+        expected = str(expected_answer)
+
+        if _canonical_text_for_token_alignment(decoded) != _canonical_text_for_token_alignment(expected):
+            raise ValueError(
+                "Student supervised answer span validation failed. "
+                f"batch_index={batch_index}, "
+                f"label_token_count={len(label_ids)}, "
+                f"decoded_label_text={decoded[:500]!r}, "
+                f"expected_teacher_answer={expected[:500]!r}"
+            )
+
+    return supervised_counts
+
+
+def _validate_answer_logits_alignment(
+    *,
+    teacher_answer_logits,
+    student_answer_logits,
+    supervised_label_counts: list[int],
+    sample_ids: list[str] | None = None,
+) -> None:
+    teacher_len = int(teacher_answer_logits.shape[1])
+    student_len = int(student_answer_logits.shape[1])
+
+    if teacher_len != student_len:
+        raise ValueError(
+            "Teacher/student answer logits length mismatch. "
+            f"teacher_answer_logits_len={teacher_len}, "
+            f"student_answer_logits_len={student_len}, "
+            f"sample_ids={sample_ids}"
+        )
+
+    if len(set(int(count) for count in supervised_label_counts)) != 1:
+        raise ValueError(
+            "Batch has non-uniform supervised answer lengths, but answer logits are represented as a single dense length. "
+            f"supervised_label_counts={supervised_label_counts}, "
+            f"sample_ids={sample_ids}"
+        )
+
+    label_len = int(supervised_label_counts[0])
+    if teacher_len != label_len:
+        raise ValueError(
+            "Answer logits length does not match supervised answer span length. "
+            f"teacher_answer_logits_len={teacher_len}, "
+            f"student_answer_logits_len={student_len}, "
+            f"supervised_label_len={label_len}, "
+            f"sample_ids={sample_ids}"
+        )
+
+
 @dataclass(frozen=True)
 class TrainableSummary:
     count: int
@@ -85,7 +280,7 @@ class OnlineAlignDataset(VlmTrainingDataset):
             print(f"  sample_id={row['id']}")
             print(f"  student_supervised_label_count={student_supervised_label_count}")
             print(f"  cached_teacher_tokens_len={cached_teacher_tokens_len}")
-            print("  note=cached teacher_tokens are not used for token identity validation in online DBiLD")
+            print("  note=startup validation enforces teacher_tokens/tokenizer identity before training")
             self._token_identity_debug_printed = True
         item["sample_id"] = str(row["id"])
         item["image_path"] = str(row["image"])
@@ -671,6 +866,11 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
         input_device=teacher_input_device,
     )
     student_model, student_processor, student_model_path, _student_device_map = _load_student(config)
+    _validate_online_dbild_token_alignment_rows(
+        rows=rows,
+        teacher_processor=teacher_processor,
+        student_processor=student_processor,
+    )
     student_model, trainable_summary = _apply_student_train_setup(config, student_model)
     lora_target_summary = None
     if config.student.use_lora:
@@ -693,6 +893,8 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
     grad_accum_steps = int(config.training.gradient_accumulation_steps)
     global_step = 0
     first_batch_debug_printed = False
+    token_alignment_batch_validated = False
+    validate_every_batch = bool(getattr(config.training, "debug_token_alignment", False))
     last_step_log_values: dict[str, float | int | None] = {
         "lm_loss": None,
         "align_loss": None,
@@ -741,6 +943,24 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
             }
             student_batch = batch_to_device(student_batch, student_input_device)
             labels = student_batch["labels"]
+            if validate_every_batch or not token_alignment_batch_validated:
+                validation_batch = dict(student_batch)
+                validation_batch["teacher_answer"] = batch.get("teacher_answer")
+                supervised_label_counts = _validate_student_label_answer_span(
+                    batch=validation_batch,
+                    student_processor=student_processor,
+                )
+                if not token_alignment_batch_validated:
+                    print("Online DBiLD first-batch answer span validation:")
+                    print(f"  sample_ids={batch.get('sample_id')}")
+                    print(f"  supervised_label_counts={supervised_label_counts}")
+                    print("  supervised_answer_span_decode_ok=True")
+                    token_alignment_batch_validated = True
+            else:
+                supervised_label_counts = [
+                    int((student_batch["labels"][i] != -100).sum().item())
+                    for i in range(student_batch["labels"].shape[0])
+                ]
             student_forward_inputs = {
                 key: value
                 for key, value in student_batch.items()
@@ -771,6 +991,12 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
                     aligned_teacher_logits = aligned_teacher_logits.to(dbild_device)
                 if aligned_attention_mask.device != dbild_device:
                     aligned_attention_mask = aligned_attention_mask.to(dbild_device)
+                _validate_answer_logits_alignment(
+                    teacher_answer_logits=aligned_teacher_logits,
+                    student_answer_logits=aligned_student_logits,
+                    supervised_label_counts=supervised_label_counts,
+                    sample_ids=batch.get("sample_id"),
+                )
                 align_loss = full_dynamic_bidirectional_logits_difference(
                     reference_logits=aligned_teacher_logits,
                     target_logits=aligned_student_logits,
@@ -808,6 +1034,7 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
                 print(f"aligned_teacher_logits.shape={tuple(aligned_teacher_logits.shape)}")
                 print(f"aligned_student_logits.shape={tuple(aligned_student_logits.shape)}")
                 print(f"aligned_attention_mask.shape={tuple(aligned_attention_mask.shape)}")
+                print("answer_logits_length_ok=True")
                 print("Online DBiLD tensor devices:")
                 print(f"  teacher_logits_device={teacher_logits.device}")
                 print(f"  student_logits_device={student_logits.device}")
