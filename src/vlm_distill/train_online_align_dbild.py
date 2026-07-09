@@ -11,6 +11,7 @@ from .data_manifest import read_jsonl
 from .device_utils import batch_to_device, resolve_requested_device_map, resolve_training_device_map, select_model_input_device
 from .loss_switch_kd import _causal_lm_loss, full_dynamic_bidirectional_logits_difference
 from .model_loading import apply_attn_implementation, resolve_model_path
+from .parsing_output_parser import serialize_parsing_label
 from .stage_student_training import VlmTrainingDataset
 from .vlm_batching import build_vlm_data_collator, encode_vlm_training_sample, load_training_image
 
@@ -52,6 +53,15 @@ def _decode_answer_tokens(processor, token_ids: list[int]) -> str:
     )
 
 
+def _target_text_for_row(row: dict[str, Any]) -> str:
+    if str(row.get("task") or "").strip() == "parsing":
+        elements = row.get("elements")
+        if not isinstance(elements, list) or not elements:
+            raise ValueError(f"Parsing row {row.get('id')!r} is missing non-empty elements.")
+        return serialize_parsing_label(row)
+    return str(row.get("teacher_answer") or row.get("answer") or "")
+
+
 def _first_mismatch_index(left: list[int], right: list[int]) -> int | None:
     for index, (left_id, right_id) in enumerate(zip(left, right)):
         if int(left_id) != int(right_id):
@@ -67,9 +77,12 @@ def _validate_teacher_token_identity(
     teacher_processor,
 ) -> None:
     sample_id = row.get("id")
-    answer = str(row.get("teacher_answer") or "")
+    answer = _target_text_for_row(row)
     cached_tokens = [int(token_id) for token_id in row.get("teacher_tokens") or []]
     encoded_tokens = _encode_answer_without_special_tokens(teacher_processor, answer)
+
+    if str(row.get("task") or "").strip() == "parsing":
+        cached_tokens = encoded_tokens
 
     if cached_tokens != encoded_tokens:
         mismatch = _first_mismatch_index(cached_tokens, encoded_tokens)
@@ -87,7 +100,7 @@ def _validate_teacher_token_identity(
             f"encoded_token={encoded_tokens[mismatch] if mismatch is not None and mismatch < len(encoded_tokens) else None}, "
             f"cached_decoded_window={_decode_answer_tokens(teacher_processor, cached_window)!r}, "
             f"encoded_decoded_window={_decode_answer_tokens(teacher_processor, encoded_window)!r}, "
-            f"teacher_answer_preview={answer[:300]!r}"
+            f"target_text_preview={answer[:300]!r}"
         )
 
 
@@ -98,7 +111,7 @@ def _validate_teacher_student_tokenizer_identity(
     student_processor,
 ) -> None:
     sample_id = row.get("id")
-    answer = str(row.get("teacher_answer") or "")
+    answer = _target_text_for_row(row)
     teacher_ids = _encode_answer_without_special_tokens(teacher_processor, answer)
     student_ids = _encode_answer_without_special_tokens(student_processor, answer)
 
@@ -119,7 +132,7 @@ def _validate_teacher_student_tokenizer_identity(
             f"student_token={student_ids[mismatch] if mismatch is not None and mismatch < len(student_ids) else None}, "
             f"teacher_decoded_window={_decode_answer_tokens(teacher_processor, teacher_window)!r}, "
             f"student_decoded_window={_decode_answer_tokens(student_processor, student_window)!r}, "
-            f"teacher_answer_preview={answer[:300]!r}"
+            f"target_text_preview={answer[:300]!r}"
         )
 
 
@@ -157,14 +170,14 @@ def _validate_student_label_answer_span(
 ) -> list[int]:
     input_ids = batch["input_ids"]
     labels = batch["labels"]
-    teacher_answers = batch.get("teacher_answer") or batch.get("teacher_answers")
+    target_texts = batch.get("target_text") or batch.get("target_texts")
 
-    if teacher_answers is None:
-        raise ValueError("Missing teacher_answer metadata in batch; cannot validate supervised answer span.")
+    if target_texts is None:
+        raise ValueError("Missing target_text metadata in batch; cannot validate supervised answer span.")
 
     supervised_counts: list[int] = []
 
-    for batch_index, expected_answer in enumerate(teacher_answers):
+    for batch_index, expected_answer in enumerate(target_texts):
         label_mask = labels[batch_index] != -100
         label_ids = input_ids[batch_index][label_mask].detach().cpu().tolist()
         supervised_counts.append(len(label_ids))
@@ -178,7 +191,7 @@ def _validate_student_label_answer_span(
                 f"batch_index={batch_index}, "
                 f"label_token_count={len(label_ids)}, "
                 f"decoded_label_text={decoded[:500]!r}, "
-                f"expected_teacher_answer={expected[:500]!r}"
+                f"expected_target_text={expected[:500]!r}"
             )
 
     return supervised_counts
@@ -260,7 +273,7 @@ class OnlineAlignDataset(VlmTrainingDataset):
             query=row.get("query") or metadata.get("query"),
             task=row.get("task", "vqa"),
         )
-        target = str(row["teacher_answer"])
+        target = _target_text_for_row(row)
         encoded = encode_vlm_training_sample(
             self.processor,
             image=image,
@@ -280,19 +293,19 @@ class OnlineAlignDataset(VlmTrainingDataset):
             print(f"  sample_id={row['id']}")
             print(f"  student_supervised_label_count={student_supervised_label_count}")
             print(f"  cached_teacher_tokens_len={cached_teacher_tokens_len}")
-            print("  note=startup validation enforces teacher_tokens/tokenizer identity before training")
+            print("  note=startup validation enforces target_text/tokenizer identity before training")
             self._token_identity_debug_printed = True
         item["sample_id"] = str(row["id"])
         item["image_path"] = str(row["image"])
         item["teacher_prompt"] = prompt
-        item["teacher_answer"] = target
+        item["target_text"] = target
         return item
 
 
 class OnlineAlignCollator:
     def __init__(self, processor):
         self.base_collator = build_vlm_data_collator(processor, logits_fields=())
-        self.metadata_keys = ("sample_id", "image_path", "teacher_prompt", "teacher_answer")
+        self.metadata_keys = ("sample_id", "image_path", "teacher_prompt", "target_text")
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
         cloned = [dict(feature) for feature in features]
@@ -598,7 +611,7 @@ def _autocast_context(mixed_precision: str):
 def _build_teacher_inputs(batch, teacher_processor, config):
     import torch
 
-    if len(batch["teacher_answer"]) != 1:
+    if len(batch["target_text"]) != 1:
         raise ValueError("Online align training currently supports only batch_size == 1.")
     image = load_training_image(
         config.data.image_root,
@@ -609,7 +622,7 @@ def _build_teacher_inputs(batch, teacher_processor, config):
         teacher_processor,
         image=image,
         prompt=batch["teacher_prompt"][0],
-        target=batch["teacher_answer"][0],
+        target=batch["target_text"][0],
         max_length=config.training.max_length,
         mask_prompt_labels=True,
         canonical_answer_span=True,
@@ -743,9 +756,10 @@ def _validate_rows(config) -> list[dict[str, Any]]:
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         if not (row.get("query") or metadata.get("query")):
             raise ValueError(f"{path}:{index} missing query and metadata.query")
-        if row.get("teacher_answer") in (None, ""):
-            raise ValueError(f"{path}:{index} missing required teacher_answer")
-        if row.get("teacher_tokens") is None:
+        target_text = _target_text_for_row(row)
+        if not target_text:
+            raise ValueError(f"{path}:{index} missing required target text")
+        if str(row.get("task") or "").strip() != "parsing" and row.get("teacher_tokens") is None:
             raise ValueError(f"{path}:{index} missing required teacher_tokens")
         if any(field in row for field in offline_fields):
             raise ValueError(
@@ -956,13 +970,13 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
             student_batch = {
                 key: value
                 for key, value in batch.items()
-                if key not in {"sample_id", "image_path", "teacher_prompt", "teacher_answer", "prompt_token_len"}
+                if key not in {"sample_id", "image_path", "teacher_prompt", "target_text", "prompt_token_len"}
             }
             student_batch = batch_to_device(student_batch, student_input_device)
             labels = student_batch["labels"]
             if validate_every_batch or not token_alignment_batch_validated:
                 validation_batch = dict(student_batch)
-                validation_batch["teacher_answer"] = batch.get("teacher_answer")
+                validation_batch["target_text"] = batch.get("target_text")
                 supervised_label_counts = _validate_student_label_answer_span(
                     batch=validation_batch,
                     student_processor=student_processor,

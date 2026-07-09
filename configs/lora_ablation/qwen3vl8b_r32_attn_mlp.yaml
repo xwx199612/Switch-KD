@@ -18,7 +18,7 @@ data:
   inference_manifest_path: outputs/lora_ablation/{task_name}_inference_manifest.jsonl
   distill_path: outputs/lora_ablation/{task_name}_online_dbild_{response_profile}.jsonl
   # Canonical teacher label output. Keep this JSONL schema strict:
-  # id, image, task, query, teacher_answer, teacher_tokens, teacher_element_count.
+  # id, image, task, query, serialized parsing target, cached answer token ids, teacher_element_count.
   label_path: outputs/lora_ablation/{task_name}_teacher_labels_{label_profile}.jsonl
   eval_path: outputs/lora_ablation/{task_name}_online_dbild_{response_profile}.jsonl
   prediction_path: outputs/lora_ablation/{task_name}_online_dbild_{response_profile}/student_predictions.jsonl
@@ -97,26 +97,27 @@ distillation:
 
     Find all visible interactive UI elements.
 
-    Return only the following plain-text table.
-    Do not output JSON.
-    Do not output markdown.
+    Return raw JSON only.
     Do not explain.
+    Do not use markdown.
 
-    Format:
-    BEGIN_ELEMENTS
-    text | type | x1 | y1 | x2 | y2 | focused
-    ...
-    END_ELEMENTS
+    Use this schema:
+    {
+      "elements": [
+        {
+          "text": "...",
+          "bbox_norm": [x1, y1, x2, y2],
+          "focused": false
+        }
+      ],
+      "coordinate_system": "normalized_0_1000"
+    }
 
     Rules:
-    - Each element must be exactly one line.
-    - Each line must contain exactly 7 fields separated by " | ".
-    - type must be one of: button, tab, app_icon, card, menu_item, input, unknown.
+    - Do not include type.
     - Use normalized 0-1000 coordinates, not pixel coordinates.
-    - x1, y1, x2, y2 must be integers only.
-    - Coordinates must satisfy: 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000.
-    - Do not combine coordinates into one field.
-    - Do not use commas in coordinates.
+    - bbox_norm must contain exactly four integers.
+    - Coordinates must satisfy 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000.
     - focused must be exactly true or false.
     - If you cannot provide a valid bbox for an element, omit that element.
     - Keep text short. If the visible text is very long, summarize it into a short label.

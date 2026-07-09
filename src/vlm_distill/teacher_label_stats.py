@@ -5,62 +5,70 @@ from pathlib import Path
 from typing import Any
 
 from .data_manifest import read_jsonl
-from .parsing_output_parser import parse_parsing_answer
+from .parsing_output_parser import normalize_element
 
 
 SCHEMA_WORD_ELEMENTS = {
     "text",
-    "type",
     "focused",
     "true",
     "false",
     "elements",
+    "bbox_norm",
+    "coordinate_system",
 }
 
 
 def summarize_teacher_label_file(path: Path, *, max_samples: int | None = None) -> dict[str, Any]:
     rows = read_jsonl(path, max_samples=max_samples)
+    rows_with_elements = 0
+    empty_element_rows = 0
     total_elements = 0
-    unknown_type_elements = 0
-    empty_elements = 0
+    invalid_bbox_count = 0
+    focused_true_count = 0
     schema_word_elements = 0
+    duplicate_text_count = 0
 
     for row in rows:
-        answer = row.get("teacher_answer")
-        parsed = _parse_teacher_answer(answer)
-        elements = parsed.get("elements") if isinstance(parsed, dict) else None
+        elements = row.get("elements")
         if not isinstance(elements, list):
+            empty_element_rows += 1
             continue
-        for element in elements:
-            if not isinstance(element, dict):
+        if elements:
+            rows_with_elements += 1
+        else:
+            empty_element_rows += 1
+        seen_texts: set[str] = set()
+        for raw_element in elements:
+            normalized, error = normalize_element(raw_element)
+            if normalized is None:
+                if error and "bbox_norm" in error:
+                    invalid_bbox_count += 1
                 continue
             total_elements += 1
-            text = str(element.get("text") or "").strip()
-            element_type = str(element.get("type") or "").strip().lower()
-            if element_type == "unknown":
-                unknown_type_elements += 1
-            if not text:
-                empty_elements += 1
+            text = normalized["text"]
+            normalized_text = text.casefold()
+            if normalized_text in seen_texts:
+                duplicate_text_count += 1
+            else:
+                seen_texts.add(normalized_text)
+            if normalized["focused"]:
+                focused_true_count += 1
             if text.lower() in SCHEMA_WORD_ELEMENTS:
                 schema_word_elements += 1
 
     return {
         "path": str(path),
         "total_samples": len(rows),
+        "rows_with_elements": rows_with_elements,
+        "empty_element_rows": empty_element_rows,
         "total_elements": total_elements,
-        "unknown_type_ratio": _safe_ratio(unknown_type_elements, total_elements),
-        "empty_elements_ratio": _safe_ratio(empty_elements, total_elements),
+        "avg_elements_per_row": _safe_ratio(total_elements, len(rows)),
+        "invalid_bbox_count": invalid_bbox_count,
+        "focused_true_count": focused_true_count,
         "schema_word_element_count": schema_word_elements,
+        "duplicate_text_count": duplicate_text_count,
     }
-
-
-def _parse_teacher_answer(answer: object) -> dict[str, object] | None:
-    if isinstance(answer, dict):
-        return answer
-    if isinstance(answer, str):
-        parsed = parse_parsing_answer(answer)
-        return parsed if parsed.get("usable") else None
-    return None
 
 
 def _safe_ratio(count: int, total: int) -> float:
@@ -74,10 +82,14 @@ def format_teacher_label_summary(summary: dict[str, Any]) -> str:
         [
             f"path={summary['path']}",
             f"total_samples={summary['total_samples']}",
+            f"rows_with_elements={summary['rows_with_elements']}",
+            f"empty_element_rows={summary['empty_element_rows']}",
             f"total_elements={summary['total_elements']}",
-            f"unknown_type_ratio={summary['unknown_type_ratio']:.4f}",
-            f"empty_elements_ratio={summary['empty_elements_ratio']:.4f}",
+            f"avg_elements_per_row={summary['avg_elements_per_row']:.4f}",
+            f"invalid_bbox_count={summary['invalid_bbox_count']}",
+            f"focused_true_count={summary['focused_true_count']}",
             f"schema_word_element_count={summary['schema_word_element_count']}",
+            f"duplicate_text_count={summary['duplicate_text_count']}",
         ]
     )
 

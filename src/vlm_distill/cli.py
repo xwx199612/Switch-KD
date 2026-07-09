@@ -17,7 +17,7 @@ from .config_schema import (
 from .data_manifest import validate_manifest
 from .hf_runtime import configure_hf_offline_mode
 from .manifest_builder import create_manifest_from_config, infer_manifest_task_from_config_path
-from .parsing_output_parser import convert_parsing_output_dir
+from .model_output_artifacts import refresh_parsing_sidecar_reports
 from .stage_evaluation import evaluate
 from .stage_merge_adapter import merge_student_adapter
 from .stage_prediction_evaluation import evaluate_predictions
@@ -49,9 +49,8 @@ def main() -> None:
     create_manifest_parser.add_argument("--recursive", action="store_true")
 
     parse_outputs_parser = subparsers.add_parser("parse-parsing-outputs")
-    parse_outputs_parser.add_argument("--raw-dir", type=Path, required=True)
-    parse_outputs_parser.add_argument("--json-dir", type=Path, required=True)
-    parse_outputs_parser.add_argument("--overwrite", action="store_true")
+    parse_outputs_parser.add_argument("--output-root", type=Path, required=True)
+    parse_outputs_parser.add_argument("--role", choices=("teacher", "student"), required=True)
 
     for command in (
         "validate-manifest",
@@ -102,16 +101,15 @@ def main() -> None:
         return
 
     if args.command == "parse-parsing-outputs":
-        report = convert_parsing_output_dir(
-            raw_dir=args.raw_dir,
-            json_dir=args.json_dir,
-            overwrite=args.overwrite,
+        report = refresh_parsing_sidecar_reports(
+            output_root=args.output_root,
+            role=args.role,
         )
         print(
-            "OK parsed outputs "
+            "OK refreshed parsing sidecar reports "
             f"total_files={report['total_files']} parse_ok={report['parse_ok']} "
             f"parse_failed={report['parse_failed']} total_elements={report['total_elements']} "
-            f"json_dir={args.json_dir}"
+            f"json_dir={args.output_root / 'json' / args.role}"
         )
         return
 
@@ -135,10 +133,6 @@ def main() -> None:
 
     if args.command == "validate-teacher":
         decoder = teacher_validation.build_teacher_token_decoder(config)
-        if decoder is None:
-            raise RuntimeError(
-                "Teacher tokenizer unavailable; cannot validate teacher_tokens."
-            )
         summary = teacher_validation.validate_teacher_output_file(
             resolve_label_path(config.data),
             max_samples=config.data.max_samples,

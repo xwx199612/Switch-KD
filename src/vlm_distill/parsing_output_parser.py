@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import re
 from typing import Any
 
@@ -183,74 +182,6 @@ def normalize_element(element: object) -> tuple[dict[str, Any] | None, str | Non
         "bbox_norm": bbox,
         "focused": focused_raw,
     }, None
-
-
-def convert_parsing_output_dir(
-    *,
-    raw_dir: Path,
-    json_dir: Path,
-    overwrite: bool = False,
-) -> dict[str, int]:
-    if not raw_dir.exists():
-        raise FileNotFoundError(f"raw-dir not found: {raw_dir}")
-    if not raw_dir.is_dir():
-        raise NotADirectoryError(f"raw-dir is not a directory: {raw_dir}")
-    if json_dir.exists() and not json_dir.is_dir():
-        raise NotADirectoryError(f"json-dir is not a directory: {json_dir}")
-
-    json_dir.mkdir(parents=True, exist_ok=True)
-    raw_files = sorted(raw_dir.glob("*.txt"))
-    failures: list[dict[str, str]] = []
-    total_elements = 0
-    parse_ok = 0
-
-    for source_path in raw_files:
-        output_path = json_dir / f"{source_path.stem}.json"
-        if output_path.exists() and not overwrite:
-            raise FileExistsError(
-                f"Output file already exists: {output_path}. "
-                "Use --overwrite to replace existing JSON files."
-            )
-
-        raw_text = source_path.read_text(encoding="utf-8")
-        parsed = parse_parsing_answer(raw_text)
-        source_file = str(Path(raw_dir.name) / source_path.name).replace("\\", "/")
-        output_payload = {
-            "source_file": source_file,
-            "raw_model_output": raw_text.rstrip("\n"),
-            **parsed,
-        }
-        output_path.write_text(
-            json.dumps(output_payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-
-        if parsed["parse_ok"]:
-            parse_ok += 1
-            total_elements += int(parsed["element_count"])
-        else:
-            failures.append(
-                {
-                    "source_file": source_file,
-                    "parse_error": str(parsed["parse_error"]),
-                    "raw_preview": _build_raw_preview(raw_text),
-                }
-            )
-
-    report = {
-        "total_files": len(raw_files),
-        "parse_ok": parse_ok,
-        "parse_failed": len(raw_files) - parse_ok,
-        "total_elements": total_elements,
-    }
-    (json_dir / "parse_report.json").write_text(
-        json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    with (json_dir / "parse_failures.jsonl").open("w", encoding="utf-8") as handle:
-        for row in failures:
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-    return report
 
 
 def _parsed_payload(

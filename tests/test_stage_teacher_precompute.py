@@ -1,15 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
-import torch
 
 from vlm_distill.config_schema import DataConfig, DistillationConfig, PipelineConfig, StudentConfig, TeacherConfig
 from vlm_distill.data_manifest import VlmSample
 import vlm_distill.stage_teacher_precompute as stage_teacher_precompute
-from vlm_distill.stage_teacher_precompute import TeacherLogitsGenerator, compute_teacher_forced_answer_logits
 
 
 def _make_config(tmp_path: Path) -> PipelineConfig:
@@ -20,118 +18,66 @@ def _make_config(tmp_path: Path) -> PipelineConfig:
             distill_path=tmp_path / "labels.jsonl",
             image_root=tmp_path,
         ),
-        teacher=TeacherConfig(model_name="mock-teacher", backend="hf", device_map="cuda:0"),
+        teacher=TeacherConfig(model_name="mock-teacher", backend="mock"),
         student=StudentConfig(model_name="mock-student", output_dir=tmp_path / "out", adapter_dir=tmp_path / "adapter"),
         distillation=DistillationConfig(method="switch_kd"),
     )
 
 
-class _FakeProcessor:
-    def __init__(self, token_map: dict[str, list[int]]):
-        self._token_map = token_map
-        self.tokenizer = self
-
-    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
-        del tokenize, add_generation_prompt
-        parts: list[str] = []
-        for message in messages:
-            for content in message["content"]:
-                text = content.get("text")
-                if text:
-                    parts.append(text)
-        return " ".join(parts)
-
-    def __call__(self, text, images=None, return_tensors="pt", add_special_tokens=False):
-        del images, return_tensors, add_special_tokens
-        if isinstance(text, str):
-            token_ids = self._token_map[text]
-            return {"input_ids": token_ids}
-        token_ids = self._token_map[text[0]]
-        return {"input_ids": torch.tensor([token_ids], dtype=torch.long)}
-
-    def decode(self, token_ids, skip_special_tokens=False, clean_up_tokenization_spaces=False):
-        del skip_special_tokens, clean_up_tokenization_spaces
-        return " ".join(str(token_id) for token_id in token_ids)
-
-
-class _FakeModel(torch.nn.Module):
-    def __init__(self, seq_len: int, vocab_size: int = 8):
-        super().__init__()
-        self.device = torch.device("cpu")
-        self._seq_len = seq_len
-        self._vocab_size = vocab_size
-
-    def forward(self, **kwargs):
-        del kwargs
-        return SimpleNamespace(logits=torch.zeros(1, self._seq_len, self._vocab_size))
-
-
-def test_teacher_forcing_uses_full_input_answer_span_as_canonical_teacher_tokens(tmp_path: Path):
-    config = _make_config(tmp_path)
-    prompt = "prompt"
-    teacher_answer = "answer"
-    processor = _FakeProcessor(
-        {
-            prompt: [101, 102],
-            teacher_answer: [4913, 5890],
-            f"{prompt} {teacher_answer}": [101, 102, 4913, 5890],
-        }
-    )
-    payload = compute_teacher_forced_answer_logits(
-        sample_id="parsing-000001",
-        image=object(),
-        prompt=prompt,
-        teacher_answer=teacher_answer,
-        teacher_tokens=[5890, 9999],
-        model=_FakeModel(seq_len=4),
-        processor=processor,
-        config=config,
-    )
-
-    assert payload["teacher_tokens"] == [4913, 5890]
-    assert payload["teacher_logits_answer_token_ids"] == [4913, 5890]
-    assert payload["teacher_logits_token_identity_match"] is True
-    assert payload["teacher_logits"]["shape"][1] == 2
-
-
-def test_teacher_logits_generator_fallback_overwrites_teacher_tokens_with_canonical_answer_span(
+def test_teacher_precompute_writes_elements_only_rows_and_json_sidecars(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ):
     config = _make_config(tmp_path)
-    generator = TeacherLogitsGenerator(config)
-    prompt = "prompt"
-    teacher_answer = "answer"
-    processor = _FakeProcessor(
-        {
-            prompt: [11, 12],
-            teacher_answer: [55, 66],
-            f"{prompt} {teacher_answer}": [11, 12, 55, 66],
-        }
-    )
+    sample = VlmSample(id="parsing-000001", image="screen.png", task="parsing", query="List UI elements")
 
-    def fake_load():
-        generator._processor = processor
-        generator._model = _FakeModel(seq_len=4)
-        generator._input_device = torch.device("cpu")
+    class _Teacher:
+        def answer(self, _sample):
+            return {
+                "teacher_answer": json.dumps(
+                    {
+                        "elements": [{"text": "Home", "bbox_norm": [1, 2, 3, 4], "focused": False}],
+                        "coordinate_system": "normalized_0_1000",
+                    }
+                )
+            }
 
-    monkeypatch.setattr(generator, "load", fake_load)
-    monkeypatch.setattr(stage_teacher_precompute, "_load_teacher_image", lambda *args, **kwargs: object())
-    monkeypatch.setattr(stage_teacher_precompute, "_format_prompt", lambda _config, _sample: prompt)
-    monkeypatch.setattr(
-        stage_teacher_precompute,
-        "_extract_generated_ids_and_scores",
-        lambda generation, prompt_len, include_scores: (torch.tensor([[77, 88]], dtype=torch.long), [torch.zeros(8), torch.zeros(8)]),
-    )
-    monkeypatch.setattr(generator, "_generate", lambda inputs, include_scores: object())
-    monkeypatch.setattr(generator, "_decode", lambda generated_ids: teacher_answer)
-    monkeypatch.setattr(generator, "tokenize_teacher_answer", lambda answer: [999, 888])
+    monkeypatch.setattr(stage_teacher_precompute, "build_teacher", lambda _config: _Teacher())
 
-    row = generator.generate_for_sample(
-        VlmSample(id="sample-1", image="screen.png", task="vqa", query="hello"),
-        mode="switch_kd",
-    )
+    output_path = stage_teacher_precompute.create_teacher_precompute_dataset(config, [sample])
+    row = json.loads(output_path.read_text(encoding="utf-8").splitlines()[0])
 
-    assert row["teacher_logits_source"] == "teacher_forcing_forward"
-    assert row["teacher_tokens"] == [55, 66]
-    assert row["teacher_logits_answer_token_ids"] == [55, 66]
+    assert set(row.keys()) == {"id", "image", "task", "query", "elements", "coordinate_system"}
+    assert "teacher_answer" not in row
+    assert "teacher_tokens" not in row
+    assert "type" not in row["elements"][0]
+    assert not (tmp_path / "raw" / "teacher" / "parsing-000001.txt").exists()
+    assert (tmp_path / "json" / "teacher" / "parsing-000001.json").exists()
+
+
+def test_teacher_precompute_skips_invalid_parsing_rows_and_writes_sidecar_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    config = _make_config(tmp_path)
+    sample = VlmSample(id="parsing-000002", image="screen.png", task="parsing", query="List UI elements")
+
+    class _Teacher:
+        def answer(self, _sample):
+            return {"teacher_answer": '{"elements":[{"text":"Home"}]}'}
+
+    monkeypatch.setattr(stage_teacher_precompute, "build_teacher", lambda _config: _Teacher())
+
+    output_path = stage_teacher_precompute.create_teacher_precompute_dataset(config, [sample])
+
+    assert output_path.read_text(encoding="utf-8") == ""
+    assert not (tmp_path / "raw" / "teacher" / "parsing-000002.txt").exists()
+
+    sidecar_path = tmp_path / "json" / "teacher" / "parsing-000002.json"
+    failure_path = tmp_path / "json" / "teacher" / "parse_failures.jsonl"
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    failure = json.loads(failure_path.read_text(encoding="utf-8").splitlines()[0])
+
+    assert sidecar["usable"] is False
+    assert sidecar["elements"] == []
+    assert failure["json_sidecar"] == "json/teacher/parsing-000002.json"

@@ -120,7 +120,7 @@ def _element_labels(parsed: dict[str, Any]) -> list[str]:
     for element in elements:
         if not isinstance(element, dict):
             continue
-        label = element.get("text") or element.get("label") or element.get("name") or element.get("title")
+        label = element.get("text")
         if label:
             labels.append(normalize(str(label)))
     return labels
@@ -144,7 +144,7 @@ def _build_parsing_eval_item(*, prediction_elements: Any, target_elements: Any) 
 
     return {
         "parse_ok": float(pred_parsed["parse_ok"]),
-        "teacher_parse_ok": float(target_parsed["parse_ok"]),
+        "target_parse_ok": float(target_parsed["parse_ok"]),
         "element_precision": precision,
         "element_recall": recall,
         "element_f1": f1,
@@ -164,7 +164,7 @@ def _aggregate_prediction_metrics(predictions: list[dict[str, Any]], *, sample_k
         "exact_match": _mean(item["exact_match"] for item in predictions if item.get("exact_match") is not None),
         "token_f1": _mean(item["token_f1"] for item in predictions if item.get("token_f1") is not None),
         "parse_ok_rate": _mean(item.get("parse_ok", 1.0) for item in parsing_predictions),
-        "teacher_parse_ok_rate": _mean(item.get("teacher_parse_ok", 1.0) for item in parsing_predictions),
+        "target_parse_ok_rate": _mean(item.get("target_parse_ok", 1.0) for item in parsing_predictions),
         "element_f1": _mean(item.get("element_f1", 0.0) for item in parsing_predictions),
         "element_count_abs_diff": _mean(item.get("element_count_abs_diff", 0.0) for item in parsing_predictions),
         "focused_accuracy": _mean(item.get("focused_accuracy", 0.0) for item in parsing_predictions),
@@ -178,7 +178,7 @@ def _elements_by_label(parsed: dict[str, Any]) -> dict[str, dict[str, Any]]:
     for element in parsed.get("elements") or []:
         if not isinstance(element, dict):
             continue
-        label = element.get("text") or element.get("label") or element.get("name") or element.get("title")
+        label = element.get("text")
         if not label:
             continue
         normalized = normalize(str(label))

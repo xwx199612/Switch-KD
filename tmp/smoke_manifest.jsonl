@@ -1,0 +1,5 @@
+{"id":"smoke-1","image":"sample1.png","task":"parsing","query":"List all visible UI elements."}
+{"id":"smoke-2","image":"sample2.png","task":"parsing","query":"List all visible UI elements."}
+{"id":"smoke-3","image":"sample3.png","task":"parsing","query":"List all visible UI elements."}
+{"id":"smoke-4","image":"sample4.png","task":"parsing","query":"List all visible UI elements."}
+{"id":"smoke-5","image":"sample5.png","task":"parsing","query":"List all visible UI elements."}

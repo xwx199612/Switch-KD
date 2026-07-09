@@ -78,8 +78,7 @@ def build_vlm_chat_answer_span(
         raise ValueError("Full chat input does not preserve the prompt-only token prefix.")
 
     assistant_tail_ids = full_input_ids[prompt_token_len:]
-    tokenizer = getattr(processor, "tokenizer", processor)
-    raw_answer_token_ids = tokenizer(answer, add_special_tokens=False)["input_ids"]
+    raw_answer_token_ids = _tokenize_answer_without_special_tokens(processor, answer)
     answer_token_ids = [int(token_id) for token_id in raw_answer_token_ids]
     if assistant_tail_ids[: len(answer_token_ids)] != answer_token_ids:
         raise ValueError(
@@ -117,6 +116,22 @@ def _processor_call(processor, *, image: Image.Image, text: str, **kwargs):
         return processor(images=[image], text=[text], **kwargs)
     except TypeError:
         return processor(text=[text], images=[image], **kwargs)
+
+
+def _tokenize_answer_without_special_tokens(processor, answer: str) -> list[int]:
+    tokenizer = getattr(processor, "tokenizer", None)
+    candidates = [tokenizer, processor] if tokenizer is not None else [processor]
+    for candidate in candidates:
+        if callable(candidate):
+            try:
+                encoded = candidate(answer, add_special_tokens=False)
+            except TypeError:
+                encoded = candidate(answer)
+            input_ids = encoded["input_ids"]
+            if input_ids and isinstance(input_ids[0], list):
+                input_ids = input_ids[0]
+            return [int(token_id) for token_id in input_ids]
+    raise TypeError("Processor/tokenizer does not support direct answer tokenization.")
 
 
 def _decode_token_ids(processor, token_ids: list[int]) -> str:

@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import json
 from typing import Any
-
-from .parsing_output_parser import parse_parsing_answer
 
 
 def build_teacher_student_unique_rows(
@@ -80,13 +77,9 @@ def _row_key(row: dict[str, Any]) -> tuple[str, str]:
 
 
 def _ordered_labels(value: Any) -> dict[str, str]:
-    if isinstance(value, list):
-        elements = value
-    else:
-        parsed = parse_parsing_answer(str(value or ""))
-        elements = parsed.get("elements")
-        if not parsed["parse_ok"] or not isinstance(elements, list):
-            return {}
+    if not isinstance(value, list):
+        return {}
+    elements = value
 
     labels: dict[str, str] = {}
     for element in elements:
@@ -99,44 +92,9 @@ def _ordered_labels(value: Any) -> dict[str, str]:
     return labels
 
 
-def _parse_json_like(value: Any) -> dict[str, Any] | None:
-    if isinstance(value, dict):
-        return value
-    if not isinstance(value, str):
-        return None
-
-    text = value.strip()
-    if not text:
-        return None
-
-    try:
-        parsed = json.loads(text)
-        return parsed if isinstance(parsed, dict) else None
-    except json.JSONDecodeError:
-        pass
-
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            parsed = json.loads(text[start : end + 1])
-            return parsed if isinstance(parsed, dict) else None
-        except json.JSONDecodeError:
-            return None
-    return None
-
-
 def _element_label(element: Any) -> str | None:
-    if isinstance(element, str):
-        label = element.strip()
-        return label or None
     if isinstance(element, dict):
-        value = (
-            element.get("label")
-            or element.get("text")
-            or element.get("name")
-            or element.get("title")
-        )
+        value = element.get("text")
         if value is None:
             return None
         label = str(value).strip()

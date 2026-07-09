@@ -487,11 +487,20 @@ def _label_sample(
     if label["teacher_confidence"] < config.distillation.min_teacher_confidence:
         return None
 
-    row = {
+    if sample.task == "parsing":
+        parsed = parse_parsing_answer(str(label["teacher_answer"]))
+        if not parsed.get("usable"):
+            return None
+        return {
+            **_base_output_row(sample),
+            "elements": parsed["elements"],
+            "coordinate_system": COORDINATE_SYSTEM_NORMALIZED_0_1000,
+        }
+
+    return {
         **_base_output_row(sample),
         **label,
     }
-    return _attach_parsing_metadata(sample, row)
 
 
 def _load_completed_ids(path: Path) -> set[str]:
@@ -706,110 +715,6 @@ def _extract_ollama_text(data: dict) -> str:
     raise RuntimeError(f"Could not parse Ollama response payload: {data}")
 
 
-_COMMON_TOP_TABS = {"home", "shop", "discover", "apps"}
-_SCREEN_SCHEMA_WORDS = {
-    "text",
-    "type",
-    "focused",
-    "true",
-    "false",
-    "elements",
-}
-_KNOWN_APP_NAMES = {
-    "netflix",
-    "youtube",
-    "prime video",
-    "sony select",
-    "music",
-    "line tv",
-    "spotify",
-    "iqiyi",
-}
-_SCREEN_SCHEMA_LABELS = {
-    "",
-    "true",
-    "false",
-    "null",
-    "none",
-    "id",
-    "ref",
-    "data",
-    "version",
-    "text",
-    "label",
-    "type",
-    "icon",
-    "button",
-    "link",
-    "tab",
-    "tile",
-    "toggle",
-    "input",
-    "menu item",
-    "action",
-    "elements",
-    "element",
-    "active navigation areas",
-    "active navigation area",
-    "selected active navigation area index",
-    "top level tabs",
-    "tab label",
-    "is selected",
-    "tab id",
-    "is currently focused",
-    "has focus indicators",
-    "element type",
-    "tab name",
-    "is enabled",
-    "tab title",
-    "content items",
-    "navigation elements",
-    "ui elements",
-    "additional ui features",
-    "tile text",
-    "tile icon",
-    "tile plus button",
-    "app tiles",
-    "active",
-    "selected",
-    "status",
-    "navigation",
-    "content",
-    "recommended",
-    "navigation button",
-    "content item",
-    "text label",
-}
-_SCREEN_SCHEMA_SUBSTRINGS = (
-    "schema",
-    "json",
-    "active navigation",
-    "toplevel",
-    "selectedtab",
-    "tabfocused",
-    "contentitems",
-    "contentitemfocused",
-    "uielements",
-    "actionableelements",
-    "focus indicators",
-    "isactive",
-    "isfocused",
-    "tabindex",
-    "active_top_tab",
-    "focused_element",
-    "focus_state",
-)
-_ALLOWED_SCREEN_ELEMENT_TYPES = {
-    "tab",
-    "button",
-    "app_icon",
-    "menu_item",
-    "card",
-    "input",
-    "unknown",
-}
-
-
 def _normalize_teacher_answer(sample: VlmSample, teacher_answer: str) -> str:
     if sample.task != "parsing":
         return teacher_answer.strip()
@@ -822,229 +727,6 @@ def _normalize_teacher_answer(sample: VlmSample, teacher_answer: str) -> str:
             }
         )
     return teacher_answer.strip()
-
-
-def _normalize_parsing_payload(teacher_answer: str) -> dict[str, object]:
-    payload = _empty_parsing_payload()
-    parsed = _parse_json_object(teacher_answer)
-
-    if isinstance(parsed, dict):
-        raw_elements = parsed.get("elements")
-        if raw_elements is None:
-            raw_elements = parsed.get("selectable_elements")
-        payload["elements"] = _normalize_screen_elements(raw_elements)
-
-    if not payload["elements"]:
-        payload["elements"] = _labels_to_screen_elements(_extract_candidate_labels(teacher_answer))
-
-    return payload
-
-
-def _empty_parsing_payload() -> dict[str, object]:
-    return {
-        "elements": [],
-        "coordinate_system": COORDINATE_SYSTEM_NORMALIZED_0_1000,
-    }
-
-
-def _parse_json_object(text: str) -> dict | None:
-    candidate = text.strip()
-    if not candidate:
-        return None
-
-    candidate = re.sub(r"^```(?:json)?\s*", "", candidate, flags=re.IGNORECASE)
-    candidate = re.sub(r"\s*```$", "", candidate)
-
-    start = candidate.find("{")
-    end = candidate.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        candidate = candidate[start : end + 1]
-
-    try:
-        parsed = json.loads(candidate)
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _sanitize_screen_field(value: object) -> str:
-    if value is None:
-        return ""
-    cleaned = _clean_screen_label(str(value))
-    return "" if _is_screen_schema_label(cleaned) else cleaned
-
-
-def _normalize_screen_elements(raw_elements: object) -> list[dict[str, object]]:
-    if not isinstance(raw_elements, list):
-        return []
-
-    elements: list[dict[str, object]] = []
-    seen: set[str] = set()
-    for raw_element in raw_elements:
-        label: object = ""
-        element_type: object = "unknown"
-        focused: object = False
-        if isinstance(raw_element, str):
-            label = raw_element
-        elif isinstance(raw_element, dict):
-            label = (
-                raw_element.get("text")
-                or raw_element.get("label")
-                or raw_element.get("name")
-                or raw_element.get("title")
-                or ""
-            )
-            element_type = raw_element.get("type") or raw_element.get("role") or "unknown"
-            focused = raw_element.get("focused", raw_element.get("focus", False))
-        else:
-            continue
-
-        cleaned_label = _clean_screen_label(str(label))
-        if not cleaned_label or _should_drop_screen_element_label(cleaned_label):
-            continue
-
-        lowered = cleaned_label.lower()
-        if lowered in seen:
-            continue
-        seen.add(lowered)
-        normalized_type = _normalize_screen_element_type(element_type)
-        normalized_type = _repair_screen_element_type(cleaned_label, normalized_type)
-        raw_bbox = None
-        if isinstance(raw_element, dict):
-            raw_bbox = raw_element.get("bbox_norm", raw_element.get("bbox"))
-        if (
-            not isinstance(raw_bbox, list)
-            or len(raw_bbox) != 4
-            or not all(isinstance(value, int) for value in raw_bbox)
-        ):
-            continue
-        elements.append(
-            {
-                "text": cleaned_label,
-                "type": normalized_type,
-                "bbox_norm": raw_bbox,
-                "focused": _normalize_screen_element_focused(focused),
-            }
-        )
-
-    return elements
-
-
-def _extract_candidate_labels(text: str) -> list[str]:
-    candidates = re.findall(r'"([^"\n]{1,80})"', text)
-    labels: list[str] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        cleaned = _clean_screen_label(candidate)
-        if not cleaned or _should_drop_screen_element_label(cleaned):
-            continue
-        lowered = cleaned.lower()
-        if lowered in seen:
-            continue
-        seen.add(lowered)
-        labels.append(cleaned)
-    return labels
-
-
-def _labels_to_screen_elements(labels: list[str]) -> list[dict[str, object]]:
-    elements: list[dict[str, object]] = []
-    for label in labels:
-        normalized_type = _repair_screen_element_type(label, "unknown")
-        elements.append(
-            {
-                "text": label,
-                "type": normalized_type,
-                "bbox_norm": [0, 0, 1, 1],
-                "focused": False,
-            }
-        )
-    return elements
-
-
-def _normalize_screen_element_type(value: object) -> str:
-    if not isinstance(value, str):
-        return "unknown"
-
-    cleaned = _clean_screen_label(value)
-    if not cleaned:
-        return "unknown"
-
-    snake = re.sub(r"[^a-z0-9]+", "_", cleaned.lower()).strip("_")
-    snake = re.sub(r"_+", "_", snake)
-    if not snake:
-        return "unknown"
-    if snake in _ALLOWED_SCREEN_ELEMENT_TYPES:
-        return snake
-    if snake == "unknown":
-        return "unknown"
-
-    tokens = [token for token in snake.split("_") if token]
-    token_set = set(tokens)
-
-    if token_set & {"app", "application"}:
-        return "app_icon"
-    if token_set & {"tile", "card", "carousel", "recommend", "movie", "content", "poster", "banner"}:
-        return "card"
-    if "menu" in token_set:
-        return "menu_item"
-    if token_set & {"nav", "navigation"}:
-        return "tab"
-    if token_set & {"search", "search_box", "searchbar", "search_bar", "input", "text_box", "textbox", "text"}:
-        return "input"
-    if token_set & {"button", "btn"}:
-        return "button"
-    return "unknown"
-
-
-def _should_drop_screen_element_label(label: str) -> bool:
-    lowered = label.strip().lower()
-    return lowered in _SCREEN_SCHEMA_WORDS or _is_screen_schema_label(label)
-
-
-def _repair_screen_element_type(label: str, normalized_type: str) -> str:
-    lowered = label.strip().lower()
-    heuristic_type = _infer_screen_element_type_from_text(label)
-
-    if lowered in _COMMON_TOP_TABS and normalized_type in {"unknown", "other", "input"}:
-        return "tab"
-    if normalized_type == "unknown" and heuristic_type != "unknown":
-        return heuristic_type
-    return normalized_type
-
-
-def _infer_screen_element_type_from_text(label: str) -> str:
-    lowered = label.strip().lower()
-    if not lowered:
-        return "unknown"
-    if lowered in {"home", "shop", "discover", "apps"}:
-        return "tab"
-    if lowered == "search":
-        return "input"
-    if lowered in {"details", "dismiss", "+"}:
-        return "button"
-    if lowered in _KNOWN_APP_NAMES:
-        return "app_icon"
-    if any(token in lowered for token in ("channel", "setup", "program", "labels", "adjustment", "type")):
-        return "menu_item"
-    if any(token in lowered for token in ("recommended", "popular", "top selling", "movie", "show")):
-        return "card"
-    return "unknown"
-
-
-def _normalize_screen_element_focused(value: object) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "focused", "selected", "active"}
-    return bool(value)
-
-
-def _canonical_json(payload: object) -> str:
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def _compact_json(payload: object) -> str:
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def _strip_special_tokens(text: str) -> str:
@@ -1078,29 +760,10 @@ def _validate_generated_label(sample: VlmSample, label: dict, *, decoder=None) -
         return
 
     decoded = decoder([int(token_id) for token_id in teacher_tokens])
-    answer_canonical = _canonicalize_teacher_answer(str(label["teacher_answer"]))
-    decoded_canonical = _canonicalize_teacher_answer(decoded)
-    if decoded_canonical != answer_canonical:
+    answer_canonical = _strip_special_tokens(str(label["teacher_answer"]))
+    decoded_canonical = _strip_special_tokens(decoded)
+    if decoded_canonical.strip() != answer_canonical.strip():
         raise ValueError(f"{sample.id}: decoded teacher_tokens do not match teacher_answer")
-
-
-def _clean_screen_label(value: str) -> str:
-    cleaned = value.strip().strip(",.:;!?'\"`[]{}()")
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    return cleaned
-
-
-def _is_screen_schema_label(value: str) -> bool:
-    lowered = value.strip().lower()
-    if lowered in _SCREEN_SCHEMA_LABELS:
-        return True
-    if re.fullmatch(r"\d+", lowered):
-        return True
-    if len(lowered) == 1 and lowered.isalpha():
-        return True
-    if re.fullmatch(r"[a-z]+(?:_[a-z]+)+", lowered):
-        return True
-    return any(token in lowered for token in _SCREEN_SCHEMA_SUBSTRINGS)
 
 
 def _parsing_quality_score(answer: str) -> int:
@@ -1288,25 +951,6 @@ def _generate_label_row(
         "raw_model_output": raw_model_output,
         **parsed,
     }
-
-
-def _attach_parsing_metadata(sample: VlmSample, row: dict[str, Any]) -> dict[str, Any]:
-    if sample.task != "parsing":
-        return row
-    row["coordinate_system"] = COORDINATE_SYSTEM_NORMALIZED_0_1000
-    return row
-
-
-def _canonicalize_line_teacher_answer(answer: str) -> str | None:
-    parsed = parse_parsing_answer(answer)
-    if not parsed.get("usable"):
-        return None
-    return serialize_parsing_label(
-        {
-            "elements": parsed.get("elements", []),
-            "coordinate_system": COORDINATE_SYSTEM_NORMALIZED_0_1000,
-        }
-    )
 
 
 def _build_teacher_forcing_inputs_and_answer_span(processor, image, prompt: str, teacher_answer: str):

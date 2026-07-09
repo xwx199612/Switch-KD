@@ -17,8 +17,8 @@ Teacher precompute writes rows like:
   "image": "data/images/001.jpg",
   "task": "parsing",
   "query": "List the visible UI elements.",
-  "teacher_answer": "Picture | 145,238,276,292 | false",
-  "teacher_tokens": [1, 2, 3],
+  "serialized parsing target": "Picture | 145,238,276,292 | false",
+  "cached answer token ids": [1, 2, 3],
   "teacher_element_count": 1
 }
 ```

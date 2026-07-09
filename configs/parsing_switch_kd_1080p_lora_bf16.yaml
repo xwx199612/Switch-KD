@@ -12,8 +12,7 @@ options:
 data:
   manifest_path: outputs/switch-kd/{task_name}_manifest.jsonl
   distill_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}.jsonl
-  # Canonical unified teacher output. Rows contain teacher_answer,
-  # teacher_tokens, and teacher_logits when distillation.teacher_logits=true.
+  # Canonical parsing labels use elements-only rows for parsing. Raw model output is stored only in optional JSON sidecars as raw_model_output.
   label_path: outputs/switch-kd/{task_name}_teacher_labels_{label_profile}.jsonl
   # Deprecated: teacher_logits_path is intentionally omitted from this workflow.
   # Legacy configs may still set it, but Switch-KD now reads teacher logits from label_path.
@@ -71,8 +70,7 @@ training:
 
 distillation:
   method: switch_kd
-  # Unified teacher precompute: label writes teacher_answer, teacher_tokens,
-  # and answer-only teacher_logits together. Set false for answer/tokens only.
+  # Teacher precompute writes elements-only parsing labels. Online DBiLD computes teacher/student logits during training.
   teacher_logits: true
   confidence_weighting: true
   min_teacher_confidence: 0.35
@@ -146,8 +144,8 @@ distillation:
     "elements": [
     {{
     "text": "...",
-    "type": "tab",
-    "focused": true
+    "bbox_norm": [0, 0, 1000, 1000],
+    "focused": false
     }}
     ]
     }}

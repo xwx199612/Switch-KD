@@ -33,8 +33,8 @@ def evaluate_predictions(config: PipelineConfig) -> Path:
         item = {
             "id": row["id"],
             "task": row.get("task", target_row.get("task", "parsing")),
-            "prediction": row.get("elements", []) if row.get("task") == "parsing" else str(row.get("student_answer") or ""),
-            "target": target_row.get("elements", []) if target_row.get("task") == "parsing" else str(target_row.get("teacher_answer") or ""),
+            "prediction": row.get("elements", []) if row.get("task", target_row.get("task", "parsing")) == "parsing" else str(row.get("student_answer") or ""),
+            "target": target_row.get("elements", []) if target_row.get("task", "parsing") == "parsing" else str(target_row.get("teacher_answer") or ""),
             "exact_match": None,
             "token_f1": None,
         }

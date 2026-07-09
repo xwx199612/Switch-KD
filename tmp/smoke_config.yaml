@@ -1,0 +1,14 @@
+data:
+  training_manifest_path: tmp/smoke_manifest.jsonl
+  manifest_path: tmp/smoke_manifest.jsonl
+  distill_path: tmp/smoke_labels.jsonl
+  image_root: tmp/smoke_images
+teacher:
+  backend: mock
+  model_name: mock-teacher
+student:
+  model_name: mock-student
+  output_dir: tmp/smoke_out
+  adapter_dir: tmp/smoke_adapter
+distillation:
+  method: switch_kd

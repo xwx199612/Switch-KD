@@ -186,9 +186,8 @@ distillation:
 
     "text": "...",
 
-    "type": "tab",
-
-    "focused": true
+    "bbox_norm": [0, 0, 1000, 1000],
+    "focused": false
 
     }}
 

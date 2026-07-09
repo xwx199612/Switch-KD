@@ -1,15 +1,16 @@
 import torch
 from PIL import Image
 
-from vlm_distill.config_schema import DataConfig, DistillationConfig, PipelineConfig, StudentConfig, TeacherConfig
 from vlm_distill.logits_cache_utils import align_reference_logits_to_suffix, compact_logits
-from vlm_distill.stage_student_training import VocabAlignment, _load_training_rows, _remap_reference_logits_to_student_vocab
+from vlm_distill.stage_student_training import VocabAlignment, _remap_reference_logits_to_student_vocab
 from vlm_distill.vlm_batching import VlmDataCollator, encode_vlm_training_sample
 
 
 class _FakeProcessor:
     def __init__(self):
-        self.tokenizer = type("Tok", (), {"pad_token_id": 0, "eos_token_id": 0})()
+        self.tokenizer = self
+        self.pad_token_id = 0
+        self.eos_token_id = 0
 
     def __call__(self, images=None, text="", return_tensors="pt", truncation=True, max_length=128):
         del images, truncation, max_length
@@ -32,6 +33,7 @@ def test_encode_vlm_training_sample_masks_prompt_and_image_prefix():
         prompt="Question: cup?",
         target="a cup",
         max_length=64,
+        canonical_answer_span=False,
     )
     assert encoded.prompt_token_len == 2
     assert encoded.model_inputs["labels"][0].item() == -100
@@ -70,39 +72,6 @@ def test_align_reference_logits_to_suffix_places_answer_region():
     )
     assert aligned.shape == (1, 6, 4)
     assert torch.isfinite(aligned[:, 3:, :]).all()
-
-
-def test_load_training_rows_merges_label_and_logits_files(tmp_path):
-    label_path = tmp_path / "labels.jsonl"
-    switch_logits_path = tmp_path / "switch_logits.jsonl"
-
-    label_path.write_text(
-        '{"id":"sample-1","image":"a.png","task":"parsing","query":"q","teacher_answer":"{\\"elements\\":[\\"Home\\"]}","teacher_logits":{"vocab_size":4},"teacher_logits_prompt_len":2,"teacher_logits_vocab_size":4}\n',
-        encoding="utf-8",
-    )
-    switch_logits_path.write_text(
-        '{"id":"sample-1","switch_logits":{"vocab_size":4},"switch_logits_prompt_len":3,"switch_logits_vocab_size":4}\n',
-        encoding="utf-8",
-    )
-
-    config = PipelineConfig(
-        data=DataConfig(
-            manifest_path=tmp_path / "manifest.jsonl",
-            distill_path=tmp_path / "legacy.jsonl",
-            label_path=label_path,
-            switch_logits_path=switch_logits_path,
-        ),
-        teacher=TeacherConfig(model_name="mock-teacher"),
-        student=StudentConfig(model_name="mock-student", output_dir=tmp_path / "out", adapter_dir=tmp_path / "adapter"),
-        distillation=DistillationConfig(method="switch_kd"),
-    )
-
-    rows = _load_training_rows(config)
-
-    assert len(rows) == 1
-    assert rows[0]["teacher_answer"] == '{"elements":["Home"]}'
-    assert rows[0]["teacher_logits"]["vocab_size"] == 4
-    assert rows[0]["switch_logits"]["vocab_size"] == 4
 
 
 def test_remap_reference_logits_to_student_vocab_keeps_shared_prefix():

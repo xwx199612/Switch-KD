@@ -16,8 +16,8 @@ options:
 data:
   manifest_path: outputs/switch-kd/{task_name}_infer_manifest.jsonl
   distill_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}.jsonl
-  # Canonical unified teacher output. Rows contain teacher_answer,
-  # teacher_tokens, and teacher_logits when distillation.teacher_logits=true.
+  # Canonical unified teacher output. Rows contain serialized parsing target,
+  # cached answer token ids, and teacher_logits when distillation.teacher_logits=true.
   label_path: outputs/switch-kd/{task_name}_teacher_labels_{label_profile}.jsonl
   # Deprecated: teacher_logits_path is intentionally omitted from this workflow.
   # Legacy configs may still set it, but Switch-KD now reads teacher logits from label_path.
@@ -85,7 +85,7 @@ training:
 
 distillation:
   method: switch_kd
-  # Unified teacher precompute: label writes teacher_answer, teacher_tokens,
+  +# Teacher precompute writes elements-only parsing labels,
   # and answer-only teacher_logits together. Set false for answer/tokens only.
   teacher_logits: true
   confidence_weighting: true
@@ -171,8 +171,8 @@ distillation:
     "elements": [
     {{
     "text": "...",
-    "type": "tab",
-    "focused": true
+    "bbox_norm": [0, 0, 1000, 1000],
+    "focused": false
     }}
     ]
     }}

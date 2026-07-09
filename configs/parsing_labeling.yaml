@@ -91,7 +91,7 @@ distillation:
       "elements": [
         {{
           "text": "...",
-          "type": "tab|button|app_icon|app_tile|menu_item|tile|toggle|input|icon|link|other",
+          "bbox_norm": [x1, y1, x2, y2],
           "focused": true
         }}
       ]

@@ -6,27 +6,14 @@ from pathlib import Path
 from vlm_distill.teacher_validation import validate_teacher_output_file, validate_teacher_row
 
 
-def _valid_answer() -> str:
-    return "\n".join(
-        [
-            "BEGIN_ELEMENTS",
-            "text | type | x1 | y1 | x2 | y2 | focused",
-            "Home | tab | 10 | 20 | 30 | 40 | true",
-            "END_ELEMENTS",
-        ]
-    )
-
-
-def _row(*, answer: str | None = None, tokens: list[int] | None = None) -> dict:
-    final_answer = answer or _valid_answer()
-    final_tokens = tokens or [ord(char) for char in final_answer]
+def _row(*, elements=None, coordinate_system="normalized_0_1000") -> dict:
     return {
         "id": "sample-1",
         "image": "screen.png",
         "task": "parsing",
         "query": "List the visible UI elements.",
-        "teacher_answer": final_answer,
-        "teacher_tokens": final_tokens,
+        "elements": elements if elements is not None else [{"text": "Home", "bbox_norm": [10, 20, 30, 40], "focused": True}],
+        "coordinate_system": coordinate_system,
     }
 
 
@@ -36,41 +23,31 @@ def _write_rows(tmp_path: Path, rows: list[dict]) -> Path:
     return path
 
 
-def test_validate_teacher_row_accepts_valid_table_answer() -> None:
+def test_validate_teacher_row_accepts_elements_only_parsing_row() -> None:
     valid, reason = validate_teacher_row(_row())
     assert valid is True
     assert reason is None
 
 
-def test_validate_teacher_row_rejects_invalid_table_answer() -> None:
-    broken = "\n".join(
-        [
-            "BEGIN_ELEMENTS",
-            "text | type | x1 | y1 | x2 | y2 | focused",
-            "Home | tab | 10 | 20 | 10 | 40 | true",
-            "END_ELEMENTS",
-        ]
-    )
-    valid, reason = validate_teacher_row(_row(answer=broken))
+def test_validate_teacher_row_rejects_missing_elements() -> None:
+    valid, reason = validate_teacher_row(_row(elements=[]))
     assert valid is False
-    assert "canonical table format" in str(reason)
+    assert "elements is missing or empty" in str(reason)
 
 
-def test_validate_teacher_output_file_reports_token_mismatch(tmp_path: Path) -> None:
-    summary = validate_teacher_output_file(
-        _write_rows(tmp_path, [_row(tokens=[1, 2, 3])]),
-        decode_tokens=lambda _tokens: "broken",
-    )
+def test_validate_teacher_row_rejects_invalid_coordinate_system() -> None:
+    valid, reason = validate_teacher_row(_row(coordinate_system="pixels"))
+    assert valid is False
+    assert "coordinate_system must be normalized_0_1000" in str(reason)
+
+
+def test_validate_teacher_output_file_reports_invalid_rows(tmp_path: Path) -> None:
+    summary = validate_teacher_output_file(_write_rows(tmp_path, [_row(elements=[])]))
     assert summary["valid_rows"] == 0
     assert summary["invalid_rows"] == 1
-    assert summary["answer_token_mismatch_rows"] == 1
 
 
-def test_validate_teacher_output_file_accepts_matching_tokens(tmp_path: Path) -> None:
-    answer = _valid_answer()
-    summary = validate_teacher_output_file(
-        _write_rows(tmp_path, [_row(answer=answer, tokens=[ord(char) for char in answer])]),
-        decode_tokens=lambda tokens: "".join(chr(token) for token in tokens),
-    )
+def test_validate_teacher_output_file_accepts_valid_rows(tmp_path: Path) -> None:
+    summary = validate_teacher_output_file(_write_rows(tmp_path, [_row()]))
     assert summary["valid_rows"] == 1
     assert summary["invalid_rows"] == 0

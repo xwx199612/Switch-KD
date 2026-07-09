@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import vlm_distill.parsing_output_parser as parsing_output_parser
 from vlm_distill.parsing_output_parser import parse_parsing_answer
 
 
@@ -37,6 +38,11 @@ def test_parser_rejects_pipe_table_format() -> None:
 
     assert parsed["parse_ok"] is False
     assert parsed["usable"] is False
+    assert "JSON" in str(parsed["parse_error"])
+
+
+def test_raw_txt_converter_is_removed() -> None:
+    assert not hasattr(parsing_output_parser, "convert_parsing_output_dir")
 
 
 def test_parser_ignores_type_if_json_includes_it() -> None:

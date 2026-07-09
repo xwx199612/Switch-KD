@@ -151,7 +151,7 @@ vlm-distill label \
 ```
 
 `label` now runs unified teacher precompute. By default
-teacher precompute writes only `teacher_answer`, `teacher_tokens`, and
+teacher precompute writes only `serialized parsing target`, `cached answer token ids`, and
 `teacher_element_count` to `data.label_path`. This project no longer stores
 offline teacher logits. Online DBiLD computes teacher/student logits on the
 fly during training.
@@ -467,7 +467,7 @@ Example teacher row:
   "image": "D:/TV_data/test_data/example.png",
   "task": "parsing",
   "query": "List all visible interactive UI elements on this screen.",
-  "teacher_answer": "{\"elements\": [\"YouTube\", \"Search\"]}",
+  "serialized parsing target": "{\"elements\": [\"YouTube\", \"Search\"]}",
   "teacher_confidence": 1.0
 }
 ```
@@ -572,11 +572,11 @@ outputs/parsing_response_1080p_8bit/eval_report.json
 What this does:
 
 ```text
-teacher_answer JSONL
+serialized parsing target JSONL
         ->
 multimodal prompt + image
         ->
-training target = teacher_answer
+training target = serialized parsing target
         ->
 LoRA fine-tuning on the student VLM
 ```
@@ -736,7 +736,7 @@ evaluation against reference labels
 
 Notes for Qwen2.5-VL:
 
-* `teacher_answer` is the supervision target used during training.
+* `serialized parsing target` is the supervision target used during training.
 * `training.image_resize` controls how the student-side training image is resized before encoding. In the generic response config, it follows `{quality}` by default.`r`n* 1080p images can expand into a large number of image tokens, so `max_length: 4096` is a safer starting point than `512`.
 * If you compare multiple teacher label files first, keep the original teacher label JSONL for training; the compare JSONL is for analysis, not for student training.
 * The response distillation training path in this repo expects the original teacher label JSONL, not the row-wise compare JSONL.

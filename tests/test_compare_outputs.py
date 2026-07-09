@@ -45,3 +45,16 @@ def test_build_teacher_student_unique_rows_reports_counts_and_contents():
     assert row["teacher_unique_elements"] == ["Search", "YouTube"]
     assert row["student_unique_elements"] == ["Netflix"]
     assert row["shared_elements"] == ["Home"]
+
+
+def test_build_teacher_student_unique_rows_ignores_non_list_elements():
+    rows = build_teacher_student_unique_rows(
+        teacher_rows=[{"id": "row-1", "image": "a.png", "task": "parsing", "elements": '{"elements":[{"text":"Home"}]}'}],
+        student_rows=[{"id": "row-1", "image": "a.png", "task": "parsing", "elements": []}],
+        teacher_name="teacher",
+        student_name="student",
+    )
+
+    assert rows[0]["teacher_element_count"] == 0
+    assert rows[0]["student_element_count"] == 0
+    assert rows[0]["shared_element_count"] == 0

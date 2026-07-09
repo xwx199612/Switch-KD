@@ -1,0 +1,36 @@
+{
+  "source": "teacher",
+  "id": "smoke-5",
+  "image": "sample5.png",
+  "task": "parsing",
+  "query": "List all visible UI elements.",
+  "raw_model_output": "{\"elements\": [{\"text\": \"mock icon\", \"bbox_norm\": [0, 0, 100, 100], \"focused\": false}, {\"text\": \"mock settings\", \"bbox_norm\": [100, 0, 200, 100], \"focused\": true}], \"coordinate_system\": \"normalized_0_1000\"}",
+  "parse_ok": true,
+  "usable": true,
+  "parse_error": null,
+  "parse_errors": [],
+  "elements": [
+    {
+      "text": "mock icon",
+      "bbox_norm": [
+        0,
+        0,
+        100,
+        100
+      ],
+      "focused": false
+    },
+    {
+      "text": "mock settings",
+      "bbox_norm": [
+        100,
+        0,
+        200,
+        100
+      ],
+      "focused": true
+    }
+  ],
+  "element_count": 2,
+  "coordinate_system": "normalized_0_1000"
+}
