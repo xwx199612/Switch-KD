@@ -136,17 +136,10 @@ vlm-distill validate-teacher \
 This reads the canonical teacher output at `data.label_path` and reports:
 
 - `total_rows`
-- `valid_json_rows`
-- `schema_valid_rows`
-- `string_list_rows`
+- `valid_rows`
+- `invalid_rows`
 - `answer_token_match_rows`
 - `answer_token_mismatch_rows`
-- `rows_with_teacher_logits` when `distillation.teacher_logits: true`
-- `valid_teacher_logits_rows`
-- `logits_length_match_rows`
-- `logits_length_mismatch_rows`
-- `full_sequence_logits_rows`
-- `vocab_mismatch_rows`
 
 ---
 
@@ -158,11 +151,10 @@ vlm-distill label \
 ```
 
 `label` now runs unified teacher precompute. By default
-`distillation.teacher_logits: true`, so Switch-KD configs write
-`teacher_answer`, `teacher_tokens`, and answer-only `teacher_logits` from the
-same final normalized answer to `data.label_path`. `data.label_path` is the
-canonical teacher precompute output. `data.teacher_logits_path` is deprecated
-and is not used by the main Switch-KD workflow.
+teacher precompute writes only `teacher_answer`, `teacher_tokens`, and
+`teacher_element_count` to `data.label_path`. This project no longer stores
+offline teacher logits. Online DBiLD computes teacher/student logits on the
+fly during training.
 
 Use `vlm-distill teacher-precompute --config ...` for the same stage with an
 explicit name.
@@ -751,48 +743,23 @@ Notes for Qwen2.5-VL:
 * If you want to measure the gap between the distilled 3B student and the 7B teacher, keep the teacher label JSONL as the evaluation reference and run `vlm-distill evaluate` after training.
 
 ---
-# Switch-KD Workflow
+# Online DBiLD Workflow
 
-Switch-KD training pipeline:
+Teacher-label generation plus online DBiLD training:
 
 ```bash
 python -m vlm_distill.cli teacher-precompute --config configs/parsing_switch_kd.yaml
 python -m vlm_distill.cli validate-teacher --config configs/parsing_switch_kd.yaml
-python -m vlm_distill.cli switch-logits --config configs/parsing_switch_kd.yaml
-python -m vlm_distill.cli train --config configs/parsing_switch_kd.yaml
+python -m vlm_distill.train_online_align_dbild --config configs/lora_ablation/qwen3vl8b_r32_attn_mlp.yaml --max-steps 1
 ```
 
-For Switch-KD, use `teacher-precompute`, followed by `validate-teacher`,
-`switch-logits`, and `train`. `distillation.teacher_logits: true` means teacher
-logits are generated during `teacher-precompute` into `data.label_path`, the
-canonical unified teacher output.
-
-4-GPU precompute:
-
-```bash
-bash scripts/run_parallel_switch_kd_precompute_4gpu.sh --clean-outputs teacher-precompute
-python -m vlm_distill.cli validate-teacher --config configs/parsing_switch_kd.yaml
-bash scripts/run_parallel_switch_kd_precompute_4gpu.sh --clean-outputs switch-logits
-```
-
-Or:
-
-```bash
-bash scripts/run_parallel_switch_kd_precompute_4gpu.sh --clean-outputs all
-```
-
-Here `all` means `teacher-precompute` then `switch-logits`.
+This project no longer stores offline teacher logits. Online DBiLD computes
+teacher/student logits on the fly during training.
 
 Training objective:
 
 ```text
-L_total
-=
-LM Loss
-+
-DBiLD Loss
-+
-VSD Loss
+L_total = LM Loss + DBiLD Loss
 ```
 
 ---

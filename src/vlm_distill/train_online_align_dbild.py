@@ -724,6 +724,16 @@ def _validate_rows(config) -> list[dict[str, Any]]:
     path = resolve_label_path(config.data)
     rows = read_jsonl(path, max_samples=config.data.max_samples)
     validated: list[dict[str, Any]] = []
+    offline_fields = (
+        "teacher_logits",
+        "switch_logits",
+        "teacher_logits_indices",
+        "teacher_logits_values",
+        "teacher_logits_token_k",
+        "teacher_logits_answer_token_ids",
+        "teacher_logits_source",
+        "teacher_logits_aligned_to_answer",
+    )
     for index, row in enumerate(rows, start=1):
         if not isinstance(row, dict):
             raise ValueError(f"{path}:{index} is not a JSON object.")
@@ -737,6 +747,11 @@ def _validate_rows(config) -> list[dict[str, Any]]:
             raise ValueError(f"{path}:{index} missing required teacher_answer")
         if row.get("teacher_tokens") is None:
             raise ValueError(f"{path}:{index} missing required teacher_tokens")
+        if any(field in row for field in offline_fields):
+            raise ValueError(
+                f"{path}:{index} contains deprecated offline logits fields. "
+                "Online DBiLD expects teacher label rows only."
+            )
         validated.append(row)
     if not validated:
         raise ValueError(f"No training rows found in {path}.")
@@ -906,6 +921,8 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
     }
 
     print("Online Align DBiLD training")
+    print("offline_teacher_logits=disabled")
+    print("teacher/student logits source=online forward pass during training")
     print(f"teacher_model_path={teacher_model_path}")
     print(f"student_model_path={student_model_path}")
     print(f"teacher_quantization={config.teacher.quantization}")

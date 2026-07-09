@@ -11,7 +11,6 @@ from .config_schema import (
     resolve_inference_manifest_path,
     resolve_label_path,
     resolve_prediction_path,
-    resolve_teacher_logits_path,
     resolve_switch_logits_path,
     resolve_training_manifest_path,
 )
@@ -136,10 +135,6 @@ def main() -> None:
 
     if args.command == "validate-teacher":
         decoder = teacher_validation.build_teacher_token_decoder(config)
-        require_logits = (
-            bool(config.distillation.teacher_logits)
-            and resolve_teacher_logits_path(config.data) == resolve_label_path(config.data)
-        )
         if decoder is None:
             raise RuntimeError(
                 "Teacher tokenizer unavailable; cannot validate teacher_tokens."
@@ -148,8 +143,6 @@ def main() -> None:
             resolve_label_path(config.data),
             max_samples=config.data.max_samples,
             decode_tokens=decoder,
-            require_teacher_logits=require_logits,
-            logits_field=config.distillation.teacher_logits_field,
         )
         _print_teacher_validation_summary(summary)
         if summary["invalid_rows"]:
@@ -246,20 +239,10 @@ def main() -> None:
 def _print_teacher_validation_summary(summary: dict[str, object]) -> None:
     print(f"OK validated teacher output path={summary['path']}")
     print(f"total_rows={summary['total_rows']}")
-    print(f"valid_json_rows={summary['valid_json_rows']}")
-    print(f"schema_valid_rows={summary['schema_valid_rows']}")
-    print(f"string_list_rows={summary['string_list_rows']}")
+    print(f"valid_rows={summary['valid_rows']}")
+    print(f"invalid_rows={summary['invalid_rows']}")
     print(f"answer_token_match_rows={summary['answer_token_match_rows']}")
     print(f"answer_token_mismatch_rows={summary['answer_token_mismatch_rows']}")
-    print(f"token_identity_match_rows={summary['token_identity_match_rows']}")
-    print(f"token_identity_mismatch_rows={summary['token_identity_mismatch_rows']}")
-    print(f"rows_with_teacher_logits={summary['rows_with_teacher_logits']}")
-    print(f"valid_teacher_logits_rows={summary['valid_teacher_logits_rows']}")
-    print(f"logits_length_match_rows={summary['logits_length_match_rows']}")
-    print(f"logits_length_mismatch_rows={summary['logits_length_mismatch_rows']}")
-    print(f"full_sequence_logits_rows={summary['full_sequence_logits_rows']}")
-    print(f"vocab_mismatch_rows={summary['vocab_mismatch_rows']}")
-    print(f"invalid_rows={summary['invalid_rows']}")
     bad_rows = summary.get("bad_rows") or []
     if bad_rows:
         print("first_bad_rows:")

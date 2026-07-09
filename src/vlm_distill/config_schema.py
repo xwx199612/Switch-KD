@@ -158,6 +158,12 @@ OUTPUT_ROOT_ENV_VARS = (
     "CODEX_OUTPUT_ROOT",
 )
 
+_OFFLINE_LOGITS_WARNING = (
+    "Warning: offline teacher logits config is deprecated and ignored. "
+    "Online DBiLD computes logits during training."
+)
+_OFFLINE_LOGITS_WARNING_EMITTED = False
+
 
 def load_config(path: str | Path) -> PipelineConfig:
     config_path = Path(path)
@@ -225,6 +231,10 @@ def remap_output_path_string(value: str | None) -> str | None:
 
 def _build_data_config(raw: dict[str, Any]) -> DataConfig:
     values = dict(raw)
+    _warn_if_deprecated_offline_logits_config(
+        values,
+        deprecated_keys=("teacher_logits_path", "switch_logits_path"),
+    )
     if values.get("training_manifest_path") is None and values.get("manifest_path") is not None:
         values["training_manifest_path"] = values["manifest_path"]
     if values.get("training_image_dir") is None and values.get("image_dir") is not None:
@@ -271,6 +281,16 @@ def _build_student_config(raw: dict[str, Any]) -> StudentConfig:
 
 def _build_distillation_config(raw: dict[str, Any]) -> DistillationConfig:
     values = dict(raw)
+    _warn_if_deprecated_offline_logits_config(
+        values,
+        deprecated_keys=(
+            "teacher_logits",
+            "teacher_logits_field",
+            "teacher_logits_mode",
+            "switch_logits_field",
+            "use_cached_logits",
+        ),
+    )
     legacy_target_field = values.pop("target_field", None)
     if legacy_target_field not in (None, "student_target", "teacher_answer"):
         raise ValueError(
@@ -489,3 +509,16 @@ def resolve_teacher_logits_path(data: DataConfig) -> Path:
 
 def resolve_switch_logits_path(data: DataConfig) -> Path:
     return data.switch_logits_path or data.distill_path
+
+
+def _warn_if_deprecated_offline_logits_config(
+    values: dict[str, Any],
+    *,
+    deprecated_keys: tuple[str, ...],
+) -> None:
+    global _OFFLINE_LOGITS_WARNING_EMITTED
+    if _OFFLINE_LOGITS_WARNING_EMITTED:
+        return
+    if any(key in values and values.get(key) not in (None, False, "", []) for key in deprecated_keys):
+        print(_OFFLINE_LOGITS_WARNING)
+        _OFFLINE_LOGITS_WARNING_EMITTED = True
