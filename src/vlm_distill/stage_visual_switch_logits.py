@@ -27,6 +27,7 @@ from .device_utils import (
     select_model_input_device,
 )
 from .model_loading import resolve_attn_implementation, resolve_model_path
+from .parsing_output_parser import serialize_parsing_label
 from .token_alignment import build_token_mismatch_details, coerce_token_ids
 
 
@@ -771,7 +772,7 @@ class VisualSwitchDistiller:
     ):
         from .stage_teacher_precompute import _build_teacher_forcing_inputs_and_answer_span
 
-        teacher_answer = str((base_row or {}).get("teacher_answer") or "").strip()
+        teacher_answer = _target_text(base_row or {})
         image = self._load_teacher_image_for_sample(sample)
         projected_visual = self._apply_visual_switch_projection(student_visual, student_inputs)
         (
@@ -875,7 +876,6 @@ class VisualSwitchDistiller:
             f"{field}_answer_token_ids": answer_token_ids_from_forward,
             f"{field}_temperature": float(self.config.distillation.kd_temperature),
             f"{field}_debug": debug_info,
-            "teacher_tokens": teacher_tokens,
         }
 
     def _generate_for_sample_from_projected_visual(
@@ -958,9 +958,9 @@ def create_visual_switch_dataset(config: PipelineConfig) -> Path:
         for sample in pending_samples:
             started = time.perf_counter()
             row = dict(rows_by_id.get(sample.id, asdict(sample)))
-            if not str(row.get("teacher_answer") or "").strip():
+            if not _target_text(row):
                 raise ValueError(
-                    "Switch logits generation requires teacher_answer so the full "
+                    "Switch logits generation requires a runtime target text so the full "
                     f"prompt-plus-answer sequence can be cached. id={sample.id}, image={sample.image}, "
                     f"row_keys={sorted(row.keys())}"
                 )
@@ -973,8 +973,6 @@ def create_visual_switch_dataset(config: PipelineConfig) -> Path:
                 row.update(distiller.generate_for_sample_from_visual_cache(sample, cache_path, base_row=row))
             else:
                 row.update(distiller.generate_for_sample(sample, base_row=row))
-            if "teacher_tokens" not in row:
-                row["teacher_tokens"] = _extract_teacher_tokens(row)
             _validate_switch_logits_row(
                 row,
                 field_name=config.distillation.switch_logits_field,
@@ -1036,6 +1034,11 @@ def _rewrite_valid_completed_rows(path: Path, *, field_name: str) -> None:
 
 
 def _extract_teacher_tokens(row: dict[str, Any]) -> list[int]:
+    if str(row.get("task") or "").strip() == "parsing":
+        for field_name in ("teacher_logits", "switch_logits"):
+            token_ids = row.get(f"{field_name}_answer_token_ids")
+            if token_ids is not None:
+                return coerce_token_ids(token_ids)
     tokens = row.get("teacher_tokens")
     if isinstance(tokens, list) and (not tokens or not isinstance(tokens[0], list)):
         return [int(value) for value in tokens]
@@ -1047,6 +1050,12 @@ def _extract_teacher_tokens(row: dict[str, Any]) -> list[int]:
     if isinstance(generated, list):
         return [int(value) for value in generated]
     return []
+
+
+def _target_text(row: dict[str, Any]) -> str:
+    if str(row.get("task") or "").strip() == "parsing":
+        return serialize_parsing_label(row)
+    return str(row.get("teacher_answer") or "").strip()
 
 
 def _join_prompt_and_answer(prompt: str, answer: str) -> str:

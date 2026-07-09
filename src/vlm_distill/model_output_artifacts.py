@@ -7,104 +7,67 @@ from typing import Any
 from .parsing_output_parser import parse_parsing_answer
 
 
-def attach_parsing_sidecar_outputs(
-    row: dict[str, Any],
+def write_parsing_sidecar(
     *,
+    row: dict[str, Any],
     output_root: Path,
     role: str,
-    answer_field: str,
-) -> None:
+    raw_model_output: str,
+) -> dict[str, Any]:
     if row.get("task") != "parsing":
-        return
+        return {}
 
-    answer = str(row.get(answer_field) or "").strip()
-    raw_relative = Path("raw") / role / f"{row['id']}.txt"
     json_relative = Path("json") / role / f"{row['id']}.json"
-    raw_path = output_root / raw_relative
     json_path = output_root / json_relative
-    raw_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    raw_path.write_text(answer + ("\n" if answer else ""), encoding="utf-8")
 
-    parsed = parse_parsing_answer(answer)
+    parsed = parse_parsing_answer(raw_model_output)
     payload = {
-        "source_file": str(raw_relative).replace("\\", "/"),
-        "raw_answer": answer,
+        "source": role,
+        "id": row.get("id"),
+        "image": row.get("image"),
+        "task": row.get("task"),
+        "query": row.get("query"),
+        "raw_model_output": raw_model_output,
         **parsed,
-        "answer": answer,
     }
     json_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-
-    prefix = "teacher" if role == "teacher" else "student"
-    row[f"{prefix}_parse_ok"] = bool(parsed["parse_ok"])
-    row[f"{prefix}_usable"] = bool(parsed.get("usable"))
-    row[f"{prefix}_element_count"] = int(parsed["element_count"])
-    row[f"{prefix}_coordinate_system"] = parsed.get("coordinate_system")
-    if not parsed.get("usable"):
-        row[f"{prefix}_element_count"] = 0
-        print(
-            f"Warning: {prefix} parsing output did not parse cleanly for id={row.get('id')}: "
-            f"{parsed['parse_error']}"
-        )
+    return parsed
 
 
 def refresh_parsing_sidecar_reports(*, output_root: Path, role: str) -> dict[str, int]:
-    raw_dir = output_root / "raw" / role
     json_dir = output_root / "json" / role
-
-    if not raw_dir.exists():
-        report = {
-            "total_files": 0,
-            "parse_ok": 0,
-            "parse_failed": 0,
-            "total_elements": 0,
-        }
-        json_dir.mkdir(parents=True, exist_ok=True)
-        _write_report_files(json_dir=json_dir, report=report, failures=[])
-        return report
-
     json_dir.mkdir(parents=True, exist_ok=True)
-    raw_files = sorted(raw_dir.glob("*.txt"))
+    sidecar_files = sorted(
+        path for path in json_dir.glob("*.json")
+        if path.name != "parse_report.json"
+    )
     failures: list[dict[str, str]] = []
     total_elements = 0
     parse_ok = 0
 
-    for source_path in raw_files:
-        raw_text = source_path.read_text(encoding="utf-8")
-        parsed = parse_parsing_answer(raw_text)
-        raw_relative = Path("raw") / role / source_path.name
-        output_payload = {
-            "source_file": str(raw_relative).replace("\\", "/"),
-            "raw_answer": raw_text.rstrip("\n"),
-            **parsed,
-            "answer": raw_text.rstrip("\n"),
-        }
-        output_path = json_dir / f"{source_path.stem}.json"
-        output_path.write_text(
-            json.dumps(output_payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-
-        if parsed["parse_ok"]:
+    for source_path in sidecar_files:
+        payload = json.loads(source_path.read_text(encoding="utf-8"))
+        if payload.get("parse_ok"):
             parse_ok += 1
-            total_elements += int(parsed["element_count"])
+            total_elements += int(payload.get("element_count", 0))
         else:
             failures.append(
                 {
-                    "source_file": str(raw_relative).replace("\\", "/"),
-                    "parsed_output_file": str((Path("json") / role / output_path.name)).replace("\\", "/"),
-                    "parse_error": str(parsed["parse_error"]),
-                    "raw_preview": _build_raw_preview(raw_text),
+                    "id": str(payload.get("id") or source_path.stem),
+                    "json_sidecar": str((Path("json") / role / source_path.name)).replace("\\", "/"),
+                    "parse_error": str(payload.get("parse_error")),
+                    "raw_preview": _build_raw_preview(str(payload.get("raw_model_output") or "")),
                 }
             )
 
     report = {
-        "total_files": len(raw_files),
+        "total_files": len(sidecar_files),
         "parse_ok": parse_ok,
-        "parse_failed": len(raw_files) - parse_ok,
+        "parse_failed": len(sidecar_files) - parse_ok,
         "total_elements": total_elements,
     }
     _write_report_files(json_dir=json_dir, report=report, failures=failures)

@@ -90,24 +90,21 @@ def validate_manifest(path: Path, image_root: Path = Path("."), max_samples: int
 
 def summarize_label_rows(path: Path, max_samples: int | None = None) -> dict[str, int]:
     rows = read_jsonl(path, max_samples=max_samples)
-    teacher_answer_rows = 0
-    non_empty_teacher_answer_rows = 0
+    element_rows = 0
+    non_empty_element_rows = 0
 
     for index, row in enumerate(rows, start=1):
         if not isinstance(row, dict):
             raise ValueError(f"{path}:{index} is not a JSON object")
-        if "teacher_answer" not in row:
+        if "elements" not in row:
             continue
-        teacher_answer_rows += 1
-        value = row.get("teacher_answer")
-        if isinstance(value, str):
-            if value.strip():
-                non_empty_teacher_answer_rows += 1
-        elif value is not None:
-            non_empty_teacher_answer_rows += 1
+        element_rows += 1
+        value = row.get("elements")
+        if isinstance(value, list) and value:
+            non_empty_element_rows += 1
 
     return {
         "total_rows": len(rows),
-        "teacher_answer_rows": teacher_answer_rows,
-        "non_empty_teacher_answer_rows": non_empty_teacher_answer_rows,
+        "element_rows": element_rows,
+        "non_empty_element_rows": non_empty_element_rows,
     }

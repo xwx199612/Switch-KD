@@ -1,18 +1,19 @@
 from __future__ import annotations
 
+import json
+
 from vlm_distill.parsing_output_parser import parse_parsing_answer
 
 
-def test_parse_table_format_exact_example() -> None:
-    raw_text = "\n".join(
-        [
-            "BEGIN_ELEMENTS",
-            "text | type | x1 | y1 | x2 | y2 | focused",
-            "Picture | card | 145 | 238 | 276 | 292 | false",
-            "General | button | 145 | 348 | 276 | 404 | true",
-            "Network Settings | menu_item | 705 | 396 | 807 | 432 | false",
-            "END_ELEMENTS",
-        ]
+def test_parser_accepts_valid_json_schema() -> None:
+    raw_text = json.dumps(
+        {
+            "elements": [
+                {"text": "Picture", "bbox_norm": [145, 238, 276, 292], "focused": False},
+                {"text": "General", "bbox_norm": [145, 348, 276, 404], "focused": True},
+            ],
+            "coordinate_system": "normalized_0_1000",
+        }
     )
 
     parsed = parse_parsing_answer(raw_text)
@@ -23,55 +24,93 @@ def test_parse_table_format_exact_example() -> None:
         "parse_error": None,
         "parse_errors": [],
         "elements": [
-            {"text": "Picture", "type": "card", "bbox_norm": [145, 238, 276, 292], "focused": False},
-            {"text": "General", "type": "button", "bbox_norm": [145, 348, 276, 404], "focused": True},
-            {"text": "Network Settings", "type": "menu_item", "bbox_norm": [705, 396, 807, 432], "focused": False},
+            {"text": "Picture", "bbox_norm": [145, 238, 276, 292], "focused": False},
+            {"text": "General", "bbox_norm": [145, 348, 276, 404], "focused": True},
         ],
-        "element_count": 3,
+        "element_count": 2,
         "coordinate_system": "normalized_0_1000",
     }
 
 
-def test_parse_table_format_keeps_valid_rows_when_one_row_fails() -> None:
-    raw_text = "\n".join(
-        [
-            "BEGIN_ELEMENTS",
-            "text | type | x1 | y1 | x2 | y2 | focused",
-            "Picture | card | 145 | 238 | 276 | 292 | false",
-            "Broken | card | 145 | 238 | 145 | 292 | false",
-            "General | button | 145 | 348 | 276 | 404 | true",
-            "END_ELEMENTS",
-        ]
-    )
-
-    parsed = parse_parsing_answer(raw_text)
-
-    assert parsed["parse_ok"] is False
-    assert parsed["usable"] is True
-    assert parsed["element_count"] == 2
-    assert [element["text"] for element in parsed["elements"]] == ["Picture", "General"]
-    assert len(parsed["parse_errors"]) == 1
-    assert "0 <= x1 < x2 <= 1000" in str(parsed["parse_errors"][0]["error"])
-
-
-def test_parse_table_format_skips_optional_header_line() -> None:
-    raw_text = "\n".join(
-        [
-            "BEGIN_ELEMENTS",
-            "text | type | x1 | y1 | x2 | y2 | focused",
-            "A | unknown | 1 | 2 | 3 | 4 | true",
-            "END_ELEMENTS",
-        ]
-    )
-
-    parsed = parse_parsing_answer(raw_text)
-
-    assert parsed["parse_ok"] is True
-    assert parsed["elements"][0]["focused"] is True
-
-
-def test_parse_table_format_requires_markers() -> None:
+def test_parser_rejects_pipe_table_format() -> None:
     parsed = parse_parsing_answer("Picture | card | 1 | 2 | 3 | 4 | false\n")
 
     assert parsed["parse_ok"] is False
     assert parsed["usable"] is False
+
+
+def test_parser_ignores_type_if_json_includes_it() -> None:
+    parsed = parse_parsing_answer(
+        json.dumps(
+            {
+                "elements": [
+                    {"text": "Search", "type": "input", "bbox_norm": [1, 2, 3, 4], "focused": False}
+                ]
+            }
+        )
+    )
+
+    assert parsed["parse_ok"] is True
+    assert parsed["elements"] == [{"text": "Search", "bbox_norm": [1, 2, 3, 4], "focused": False}]
+
+
+def test_parser_drops_schema_label_text_rows() -> None:
+    parsed = parse_parsing_answer(
+        json.dumps(
+            {
+                "elements": [
+                    {"text": "button", "bbox_norm": [1, 2, 3, 4], "focused": False},
+                    {"text": "Search", "bbox_norm": [10, 20, 30, 40], "focused": False},
+                ]
+            }
+        )
+    )
+
+    assert parsed["parse_ok"] is True
+    assert parsed["element_count"] == 1
+    assert parsed["elements"][0]["text"] == "Search"
+
+
+def test_invalid_bbox_norm_is_rejected() -> None:
+    parsed = parse_parsing_answer(
+        json.dumps(
+            {
+                "elements": [
+                    {"text": "Search", "bbox_norm": [1, 2, 1, 4], "focused": False}
+                ]
+            }
+        )
+    )
+
+    assert parsed["parse_ok"] is False
+    assert parsed["usable"] is False
+
+
+def test_missing_bbox_norm_is_rejected() -> None:
+    parsed = parse_parsing_answer(
+        json.dumps(
+            {
+                "elements": [
+                    {"text": "Search", "focused": False}
+                ]
+            }
+        )
+    )
+
+    assert parsed["parse_ok"] is False
+    assert parsed["usable"] is False
+
+
+def test_missing_focused_defaults_to_false() -> None:
+    parsed = parse_parsing_answer(
+        json.dumps(
+            {
+                "elements": [
+                    {"text": "Search", "bbox_norm": [1, 2, 3, 4]}
+                ]
+            }
+        )
+    )
+
+    assert parsed["parse_ok"] is True
+    assert parsed["elements"][0]["focused"] is False

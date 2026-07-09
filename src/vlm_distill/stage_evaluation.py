@@ -7,7 +7,7 @@ from typing import Any
 
 from .config_schema import PipelineConfig, resolve_label_path
 from .data_manifest import read_jsonl
-from .parsing_output_parser import parse_parsing_answer
+from .parsing_output_parser import normalize_element
 
 
 def normalize(text: str | None) -> str:
@@ -40,17 +40,22 @@ def evaluate(config: PipelineConfig) -> Path:
     predictions = []
 
     for row in rows:
-        answer = str(row.get("teacher_answer") or "")
+        task = row.get("task", "parsing")
         item = {
             "id": row["id"],
-            "task": row.get("task", "parsing"),
-            "prediction": answer,
-            "target": answer,
-            "exact_match": exact_match(answer, answer),
-            "token_f1": token_f1(answer, answer),
+            "task": task,
+            "prediction": row.get("elements", []) if task == "parsing" else str(row.get("teacher_answer") or ""),
+            "target": row.get("elements", []) if task == "parsing" else str(row.get("teacher_answer") or ""),
+            "exact_match": None if task == "parsing" else 1.0,
+            "token_f1": None if task == "parsing" else 1.0,
         }
-        if item["task"] == "parsing":
-            item.update(_build_parsing_eval_item(prediction=answer, target=answer))
+        if task == "parsing":
+            item.update(
+                _build_parsing_eval_item(
+                    prediction_elements=row.get("elements", []),
+                    target_elements=row.get("elements", []),
+                )
+            )
         predictions.append(item)
 
     metrics = _aggregate_prediction_metrics(predictions, sample_key="num_samples")
@@ -126,32 +131,20 @@ def _mean(values) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
-def _build_parsing_eval_item(*, prediction: str, target: str) -> dict[str, Any]:
-    pred_parsed = parse_parsing_answer(prediction)
-    target_parsed = parse_parsing_answer(target)
-    pred_ok = bool(pred_parsed["parse_ok"])
-    target_ok = bool(target_parsed["parse_ok"])
-
-    if pred_ok and target_ok:
-        precision, recall, f1 = element_f1(pred_parsed, target_parsed)
-        element_count_abs_diff = abs(
-            int(pred_parsed["element_count"]) - int(target_parsed["element_count"])
-        )
-        focused_accuracy = _focused_accuracy(pred_parsed, target_parsed)
-        bbox_iou = _mean(_matching_label_ious(pred_parsed, target_parsed))
-        bbox_center_distance = _mean(_matching_label_center_distances(pred_parsed, target_parsed))
-    else:
-        precision = recall = f1 = 0.0
-        element_count_abs_diff = abs(
-            int(pred_parsed["element_count"]) - int(target_parsed["element_count"])
-        )
-        focused_accuracy = 0.0
-        bbox_iou = 0.0
-        bbox_center_distance = 0.0
+def _build_parsing_eval_item(*, prediction_elements: Any, target_elements: Any) -> dict[str, Any]:
+    pred_parsed = _parsed_from_elements(prediction_elements)
+    target_parsed = _parsed_from_elements(target_elements)
+    precision, recall, f1 = element_f1(pred_parsed, target_parsed)
+    element_count_abs_diff = abs(
+        int(pred_parsed["element_count"]) - int(target_parsed["element_count"])
+    )
+    focused_accuracy = _focused_accuracy(pred_parsed, target_parsed)
+    bbox_iou = _mean(_matching_label_ious(pred_parsed, target_parsed))
+    bbox_center_distance = _mean(_matching_label_center_distances(pred_parsed, target_parsed))
 
     return {
-        "parse_ok": float(pred_ok),
-        "teacher_parse_ok": float(target_ok),
+        "parse_ok": float(pred_parsed["parse_ok"]),
+        "teacher_parse_ok": float(target_parsed["parse_ok"]),
         "element_precision": precision,
         "element_recall": recall,
         "element_f1": f1,
@@ -168,8 +161,8 @@ def _aggregate_prediction_metrics(predictions: list[dict[str, Any]], *, sample_k
     parsing_predictions = [item for item in predictions if item.get("task") == "parsing"]
     return {
         sample_key: len(predictions),
-        "exact_match": _mean(item["exact_match"] for item in predictions),
-        "token_f1": _mean(item["token_f1"] for item in predictions),
+        "exact_match": _mean(item["exact_match"] for item in predictions if item.get("exact_match") is not None),
+        "token_f1": _mean(item["token_f1"] for item in predictions if item.get("token_f1") is not None),
         "parse_ok_rate": _mean(item.get("parse_ok", 1.0) for item in parsing_predictions),
         "teacher_parse_ok_rate": _mean(item.get("teacher_parse_ok", 1.0) for item in parsing_predictions),
         "element_f1": _mean(item.get("element_f1", 0.0) for item in parsing_predictions),
@@ -239,7 +232,26 @@ def _matching_label_center_distances(pred: dict[str, Any], target: dict[str, Any
 
 
 def _extract_bbox(data: dict[str, Any]) -> list[float] | None:
-    bbox = data.get("bbox_norm", data.get("bbox"))
+    bbox = data.get("bbox_norm")
     if isinstance(bbox, list) and len(bbox) == 4:
         return [float(value) for value in bbox]
     return None
+
+
+def _parsed_from_elements(raw_elements: Any) -> dict[str, Any]:
+    if not isinstance(raw_elements, list):
+        return {
+            "parse_ok": False,
+            "element_count": 0,
+            "elements": [],
+        }
+    elements: list[dict[str, Any]] = []
+    for element in raw_elements:
+        normalized, _error = normalize_element(element)
+        if normalized is not None:
+            elements.append(normalized)
+    return {
+        "parse_ok": bool(elements),
+        "element_count": len(elements),
+        "elements": elements,
+    }

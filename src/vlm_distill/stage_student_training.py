@@ -32,7 +32,7 @@ from .logits_cache_utils import (
     vocab_sizes_compatible,
 )
 from .model_loading import apply_attn_implementation, resolve_model_path
-from .parsing_output_parser import elements_to_line_format, parse_parsing_answer
+from .parsing_output_parser import COORDINATE_SYSTEM_NORMALIZED_0_1000, serialize_parsing_label
 from .token_alignment import build_token_mismatch_details, coerce_token_ids
 
 
@@ -104,7 +104,7 @@ class VlmTrainingDataset:
             query=example.get("query") or metadata.get("query"),
             task=example.get("task", "vqa"),
         )
-        target = example["teacher_answer"]
+        target = _training_target_text(example)
         encoded = encode_vlm_training_sample(
             self.processor,
             image=image,
@@ -126,7 +126,7 @@ class VlmTrainingDataset:
             teacher_field = self.config.distillation.teacher_logits_field
             switch_field = self.config.distillation.switch_logits_field
             supervised_label_ids = [int(token_id) for token_id in item["labels"][item["labels"] != -100].tolist()]
-            teacher_tokens = _extract_teacher_tokens(example)
+            teacher_tokens = _extract_teacher_tokens(example, tokenizer=_row_tokenizer(self.processor))
             print("Switch-KD first sample label debug:")
             print(f"  prompt_token_len: {encoded.prompt_token_len}")
             print(f"  teacher_tokens_len: {len(_extract_teacher_tokens(example))}")
@@ -205,7 +205,7 @@ def _validate_student_supervised_labels_against_teacher_tokens(
 ) -> None:
     if not _student_label_alignment_required(config):
         return
-    teacher_tokens = _extract_teacher_tokens(example)
+    teacher_tokens = _extract_teacher_tokens(example, tokenizer=_row_tokenizer(processor))
     if not teacher_tokens:
         return
     supervised_label_ids = [int(token_id) for token_id in labels[labels != -100].tolist()]
@@ -215,10 +215,10 @@ def _validate_student_supervised_labels_against_teacher_tokens(
             f"{build_token_mismatch_details(expected=teacher_tokens, actual=supervised_label_ids, actual_field_name='actual_student_label_id')}"
         )
     decoded_supervised = _decode_token_ids(processor, supervised_label_ids)
-    teacher_answer = str(example.get("teacher_answer") or "").strip()
-    if decoded_supervised[: min(len(decoded_supervised), 80)] != teacher_answer[: min(len(teacher_answer), 80)]:
+    target_text = _training_target_text(example)
+    if decoded_supervised[: min(len(decoded_supervised), 80)] != target_text[: min(len(target_text), 80)]:
         raise ValueError(
-            f"Student supervised label text head does not match teacher_answer. id={example.get('id')}"
+            f"Student supervised label text head does not match runtime target text. id={example.get('id')}"
         )
     prompt_head = prompt.strip()[:80]
     if prompt_head and prompt_head in decoded_supervised:
@@ -261,7 +261,7 @@ def _train_mock_student(config: PipelineConfig, rows: list[dict]) -> Path:
     artifact = {
         "model_name": config.student.model_name,
         "num_training_samples": len(rows),
-        "target_field": "teacher_answer",
+        "target_field": "runtime_serialized_target",
         "distillation_method": config.distillation.method,
         "note": "Mock student artifact. Use configs/hf_vlm.yaml for real training.",
     }
@@ -1015,15 +1015,12 @@ def _warn_if_switch_logits_missing(config: PipelineConfig, rows: list[dict]) -> 
 def _validate_switch_kd_training_rows(config: PipelineConfig, rows: list[dict]) -> None:
     teacher_field = config.distillation.teacher_logits_field
     switch_field = config.distillation.switch_logits_field
-    rows_with_teacher_answer = sum(1 for row in rows if row.get("teacher_answer") is not None)
-    rows_with_teacher_tokens = sum(1 for row in rows if _extract_teacher_tokens(row))
+    rows_with_target_text = sum(1 for row in rows if _training_target_text(row) != "")
     rows_with_teacher_logits = sum(1 for row in rows if row.get(teacher_field) is not None)
     rows_with_switch_logits = sum(1 for row in rows if row.get(switch_field) is not None)
 
-    if rows_with_teacher_answer <= 0:
-        raise RuntimeError("Switch-KD method selected but rows_with_teacher_answer=0.")
-    if rows_with_teacher_tokens <= 0:
-        raise RuntimeError("Switch-KD method selected but rows_with_teacher_tokens=0.")
+    if rows_with_target_text <= 0:
+        raise RuntimeError("Switch-KD method selected but rows_with_runtime_target_text=0.")
     if config.distillation.teacher_logits and rows_with_teacher_logits <= 0:
         raise RuntimeError(f"Switch-KD method selected but rows_with_{teacher_field}=0.")
     if rows_with_switch_logits <= 0:
@@ -1122,7 +1119,36 @@ def _cached_logits_seq_len(payload: Any) -> int | None:
     return None
 
 
-def _extract_teacher_tokens(row: dict[str, Any]) -> list[int]:
+def _training_target_text(row: dict[str, Any]) -> str:
+    if str(row.get("task") or "").strip() == "parsing":
+        return serialize_parsing_label(row)
+    return str(row.get("teacher_answer") or "")
+
+
+def _row_tokenizer(processor):
+    tokenizer = getattr(processor, "tokenizer", None)
+    if callable(tokenizer):
+        return tokenizer
+    if callable(processor):
+        return processor
+    return None
+
+
+def _extract_teacher_tokens(row: dict[str, Any], tokenizer=None) -> list[int]:
+    if str(row.get("task") or "").strip() == "parsing":
+        if callable(tokenizer):
+            try:
+                input_ids = tokenizer(_training_target_text(row), add_special_tokens=False)["input_ids"]
+            except TypeError:
+                try:
+                    input_ids = tokenizer(text=_training_target_text(row), add_special_tokens=False)["input_ids"]
+                except TypeError:
+                    input_ids = tokenizer(text=_training_target_text(row))["input_ids"]
+            return [int(value) for value in input_ids]
+        for field_name in ("teacher_logits", "switch_logits"):
+            token_ids = row.get(f"{field_name}_answer_token_ids")
+            if token_ids is not None:
+                return coerce_token_ids(token_ids)
     tokens = row.get("teacher_tokens")
     if isinstance(tokens, list) and (not tokens or not isinstance(tokens[0], list)):
         return [int(value) for value in tokens]
@@ -1189,47 +1215,31 @@ def _load_training_rows(config: PipelineConfig) -> list[dict[str, Any]]:
 def _prepare_training_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     prepared: list[dict[str, Any]] = []
     dropped_unusable = 0
-    repaired_answers = 0
 
     for row in rows:
         if str(row.get("task") or "").strip() != "parsing":
             prepared.append(row)
             continue
 
-        parsed = parse_parsing_answer(str(row.get("teacher_answer") or ""))
-        if not parsed.get("usable"):
+        elements = row.get("elements")
+        if not isinstance(elements, list) or not elements:
             dropped_unusable += 1
             continue
 
-        elements = parsed.get("elements")
-        if not isinstance(elements, list):
-            dropped_unusable += 1
-            continue
-
-        canonical_answer = elements_to_line_format([element for element in elements if isinstance(element, dict)])
         updated_row = dict(row)
-        if canonical_answer != str(row.get("teacher_answer") or ""):
-            repaired_answers += 1
-        updated_row["teacher_answer"] = canonical_answer
         updated_row["elements"] = elements
-        updated_row["coordinate_system"] = parsed.get("coordinate_system")
-        updated_row["parse_ok"] = bool(parsed.get("parse_ok"))
-        updated_row["usable"] = True
-        updated_row["parse_errors"] = parsed.get("parse_errors", [])
-        updated_row["teacher_element_count"] = int(parsed.get("element_count", 0))
+        updated_row["coordinate_system"] = COORDINATE_SYSTEM_NORMALIZED_0_1000
         prepared.append(updated_row)
 
     if dropped_unusable > 0:
         print(f"Warning: dropped unusable parsing rows from training set: {dropped_unusable}")
-    if repaired_answers > 0:
-        print(f"Normalized parsing teacher_answer rows for training: {repaired_answers}")
     return prepared
 
 
 def _print_training_row_summary(config: PipelineConfig, rows: list[dict[str, Any]]) -> None:
     teacher_field = config.distillation.teacher_logits_field
     switch_field = config.distillation.switch_logits_field
-    teacher_answer_rows = sum(1 for row in rows if row.get("teacher_answer") is not None)
+    target_rows = sum(1 for row in rows if _training_target_text(row) != "")
     teacher_logits_rows = sum(1 for row in rows if row.get(teacher_field) is not None)
     switch_logits_rows = sum(1 for row in rows if row.get(switch_field) is not None)
     teacher_vocab_sizes = sorted(
@@ -1263,7 +1273,7 @@ def _print_training_row_summary(config: PipelineConfig, rows: list[dict[str, Any
             f"first_row_keys={first_keys}"
         )
     print(f"  total rows: {len(rows)}")
-    print(f"  rows with teacher_answer: {teacher_answer_rows}")
+    print(f"  rows with runtime target text: {target_rows}")
     print(f"  rows with {teacher_field}: {teacher_logits_rows}")
     print(f"  rows with {switch_field}: {switch_logits_rows}")
     print(

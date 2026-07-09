@@ -36,7 +36,7 @@ teacher:
   quantization: "{teacher_quantization}"
   attn_implementation: sdpa
   temperature: 0.0
-  max_new_tokens: 384
+  max_new_tokens: 768
   image_resize: "{quality}"
 
 student:
@@ -93,42 +93,33 @@ distillation:
   confidence_weighting: true
   min_teacher_confidence: 0.35
   prompt_template: |
-    You are an Android TV visual grounding assistant.
+    You are labeling Android TV screenshots for UI grounding.
 
-    Analyze the screenshot and list all visible interactive UI elements.
+    Find all visible interactive UI elements.
 
-    Return line-based output only.
-    Each line must use exactly this format:
+    Return only the following plain-text table.
+    Do not output JSON.
+    Do not output markdown.
+    Do not explain.
 
-    text | x_min,y_min,x_max,y_max | focused
-
-    Use normalized 0-1000 coordinates:
-    - top-left of the image is 0,0
-    - bottom-right of the image is 1000,1000
-    - x_min,y_min is the top-left corner of the element
-    - x_max,y_max is the bottom-right corner of the element
+    Format:
+    BEGIN_ELEMENTS
+    text | type | x1 | y1 | x2 | y2 | focused
+    ...
+    END_ELEMENTS
 
     Rules:
-    - One visible interactive UI element per line.
-    - Each line must contain exactly two " | " separators.
-    - The coordinate field must contain exactly four integers separated by commas.
-    - Coordinates must be integers from 0 to 1000.
-    - x_min < x_max and y_min < y_max.
-    - Do not concatenate coordinates.
-    - Do not use decimals, negative numbers, or extra coordinates.
+    - Each element must be exactly one line.
+    - Each line must contain exactly 7 fields separated by " | ".
+    - type must be one of: button, tab, app_icon, card, menu_item, input, unknown.
+    - Use normalized 0-1000 coordinates, not pixel coordinates.
+    - x1, y1, x2, y2 must be integers only.
+    - Coordinates must satisfy: 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000.
+    - Do not combine coordinates into one field.
+    - Do not use commas in coordinates.
     - focused must be exactly true or false.
-    - Include all visible interactive UI elements.
-    - Include tabs, buttons, app icons, app tiles, menu items, carousel tiles, focused items, toggles, search boxes, clickable text, and navigation icons.
-    - Do not include decorative graphics, duplicate elements, or long non-clickable descriptions.
-    - Use concise labels only.
-    - Do not return JSON, markdown, explanations, bullets, numbering, headers, or comments.
-
-    Example:
-    Picture | 145,238,276,292 | false
-    General | 145,348,276,404 | true
-    Network Settings | 705,396,807,432 | false
-
-    Now output only the lines.
+    - If you cannot provide a valid bbox for an element, omit that element.
+    - Keep text short. If the visible text is very long, summarize it into a short label.
 
   kd_temperature: 2.0
   dbild_top_k: 64

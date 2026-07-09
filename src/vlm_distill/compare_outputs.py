@@ -32,8 +32,8 @@ def build_teacher_student_unique_rows(
         if teacher_row is None or student_row is None:
             continue
 
-        teacher_labels = _ordered_labels(teacher_row.get("teacher_answer"))
-        student_labels = _ordered_labels(student_row.get("student_answer") or student_row.get("teacher_answer"))
+        teacher_labels = _ordered_labels(teacher_row.get("elements"))
+        student_labels = _ordered_labels(student_row.get("elements"))
         teacher_unique = [
             original
             for normalized, original in teacher_labels.items()
@@ -80,10 +80,13 @@ def _row_key(row: dict[str, Any]) -> tuple[str, str]:
 
 
 def _ordered_labels(value: Any) -> dict[str, str]:
-    parsed = parse_parsing_answer(str(value or ""))
-    elements = parsed.get("elements")
-    if not parsed["parse_ok"] or not isinstance(elements, list):
-        return {}
+    if isinstance(value, list):
+        elements = value
+    else:
+        parsed = parse_parsing_answer(str(value or ""))
+        elements = parsed.get("elements")
+        if not parsed["parse_ok"] or not isinstance(elements, list):
+            return {}
 
     labels: dict[str, str] = {}
     for element in elements:

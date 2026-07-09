@@ -55,8 +55,8 @@ def test_create_student_predictions_writes_mock_predictions(tmp_path: Path):
     output_path = create_student_predictions(config, samples)
     rows = read_jsonl(output_path)
 
-    assert "BEGIN_ELEMENTS" in rows[0]["student_answer"]
-    assert rows[0]["student_parse_ok"] is True
+    assert rows[0]["elements"]
+    assert rows[0]["coordinate_system"] == "normalized_0_1000"
 
 
 def test_evaluate_predictions_scores_against_eval_labels(tmp_path: Path):
@@ -143,7 +143,6 @@ def test_create_student_predictions_writes_parsing_sidecars(tmp_path: Path):
     output_path = create_student_predictions(config, samples)
     rows = read_jsonl(output_path)
 
-    assert rows[0]["student_parse_ok"] is True
-    assert rows[0]["student_element_count"] == 2
-    assert (tmp_path / "raw" / "student" / "parsing-000001.txt").exists()
+    assert rows[0]["elements"]
     assert (tmp_path / "json" / "student" / "parsing-000001.json").exists()
+    assert not (tmp_path / "raw" / "student" / "parsing-000001.txt").exists()

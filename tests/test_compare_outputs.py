@@ -9,11 +9,11 @@ def test_build_teacher_student_unique_rows_reports_counts_and_contents():
             "id": "parsing-000001",
             "image": "a.png",
             "task": "parsing",
-            "teacher_answer": (
-                "Home | 0,0,10,10 | true\n"
-                "Search | 10,0,20,10 | false\n"
-                "YouTube | 20,0,30,10 | false"
-            ),
+            "elements": [
+                {"text": "Home", "bbox_norm": [0, 0, 10, 10], "focused": True},
+                {"text": "Search", "bbox_norm": [10, 0, 20, 10], "focused": False},
+                {"text": "YouTube", "bbox_norm": [20, 0, 30, 10], "focused": False},
+            ],
         }
     ]
     student_rows = [
@@ -21,10 +21,10 @@ def test_build_teacher_student_unique_rows_reports_counts_and_contents():
             "id": "parsing-000001",
             "image": "a.png",
             "task": "parsing",
-            "student_answer": (
-                "Home | 0,0,10,10 | true\n"
-                "Netflix | 30,0,40,10 | false"
-            ),
+            "elements": [
+                {"text": "Home", "bbox_norm": [0, 0, 10, 10], "focused": True},
+                {"text": "Netflix", "bbox_norm": [30, 0, 40, 10], "focused": False},
+            ],
         }
     ]
 

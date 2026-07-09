@@ -30,20 +30,29 @@ def evaluate_predictions(config: PipelineConfig) -> Path:
             missing_targets += 1
             continue
 
-        prediction = str(row.get("student_answer") or row.get("teacher_answer") or "")
-        target = str(target_row.get("teacher_answer") or "")
-
         item = {
             "id": row["id"],
             "task": row.get("task", target_row.get("task", "parsing")),
-            "prediction": prediction,
-            "target": target,
-            "exact_match": exact_match(prediction, target),
-            "token_f1": token_f1(prediction, target),
+            "prediction": row.get("elements", []) if row.get("task") == "parsing" else str(row.get("student_answer") or ""),
+            "target": target_row.get("elements", []) if target_row.get("task") == "parsing" else str(target_row.get("teacher_answer") or ""),
+            "exact_match": None,
+            "token_f1": None,
         }
 
         if item["task"] == "parsing":
-            item.update(_build_parsing_eval_item(prediction=prediction, target=target))
+            item.update(
+                _build_parsing_eval_item(
+                    prediction_elements=row.get("elements", []),
+                    target_elements=target_row.get("elements", []),
+                )
+            )
+        else:
+            prediction = str(row.get("student_answer") or row.get("teacher_answer") or "")
+            target = str(target_row.get("teacher_answer") or "")
+            item["prediction"] = prediction
+            item["target"] = target
+            item["exact_match"] = exact_match(prediction, target)
+            item["token_f1"] = token_f1(prediction, target)
 
         predictions.append(item)
 

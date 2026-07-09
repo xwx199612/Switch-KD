@@ -8,6 +8,7 @@ import torch
 
 from vlm_distill.config_schema import DataConfig, PipelineConfig, StudentConfig, TeacherConfig
 from vlm_distill.config_schema import DistillationConfig
+from vlm_distill.parsing_output_parser import serialize_parsing_label
 from vlm_distill.stage_student_training import (
     VlmTrainingDataset,
     _load_student_model,
@@ -22,22 +23,37 @@ class _DummyModel:
 
 
 class _CanonicalSpanProcessor:
-    def __init__(self):
-        self.tokenizer = type("Tok", (), {"pad_token_id": 0, "eos_token_id": 0})()
+    def __init__(self, target_text: str):
+        self.tokenizer = self
+        self.pad_token_id = 0
+        self.eos_token_id = 0
+        self._target_text = target_text
         self._token_map = {
             "<chat>prompt</chat>": [101, 102],
-            "<chat>prompt answer</chat>": [101, 102, 5890, 7000],
+            f"<chat>prompt {target_text}</chat>": [101, 102, 5890, 7000],
+            target_text: [5890, 7000],
         }
 
     def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
         del tokenize, add_generation_prompt
-        return f"<chat>{messages[0]['content'][1]['text']}</chat>"
+        parts: list[str] = []
+        for message in messages:
+            for content in message["content"]:
+                text = content.get("text")
+                if text:
+                    parts.append(text)
+        return f"<chat>{' '.join(parts)}</chat>"
 
-    def __call__(self, images=None, text="", return_tensors="pt", truncation=True, max_length=128):
-        del images, return_tensors, truncation, max_length
+    def __call__(self, images=None, text="", return_tensors="pt", truncation=True, max_length=128, **kwargs):
+        del return_tensors, truncation, max_length, kwargs
+        tokenizer_mode = isinstance(images, str) and text == ""
+        if tokenizer_mode:
+            text = images
         if isinstance(text, list):
             text = text[0]
         token_ids = self._token_map[text]
+        if tokenizer_mode:
+            return {"input_ids": token_ids}
         input_ids = torch.tensor([token_ids], dtype=torch.long)
         return {
             "input_ids": input_ids,
@@ -45,13 +61,21 @@ class _CanonicalSpanProcessor:
             "pixel_values": torch.zeros(1, 3, 4, 4),
         }
 
+    def decode(self, token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False):
+        del skip_special_tokens, clean_up_tokenization_spaces
+        values = [int(token_id) for token_id in token_ids]
+        if values == [5890, 7000]:
+            return self._target_text
+        return ""
+
 
 def _make_config(tmp_path: Path, *, device_map="auto", quantization="none") -> PipelineConfig:
-    return PipelineConfig(
-        data=DataConfig(
-            manifest_path=tmp_path / "manifest.jsonl",
-            distill_path=tmp_path / "distill.jsonl",
-        ),
+        return PipelineConfig(
+            data=DataConfig(
+                training_manifest_path=tmp_path / "manifest.jsonl",
+                manifest_path=tmp_path / "manifest.jsonl",
+                distill_path=tmp_path / "distill.jsonl",
+            ),
         teacher=TeacherConfig(model_name="mock-teacher"),
         student=StudentConfig(
             model_name="mock-student",
@@ -115,11 +139,12 @@ def test_load_student_model_passes_resolved_device_map_without_ddp(monkeypatch, 
 
 
 def _switch_kd_config(tmp_path: Path) -> PipelineConfig:
-    return PipelineConfig(
-        data=DataConfig(
-            manifest_path=tmp_path / "manifest.jsonl",
-            distill_path=tmp_path / "labels.jsonl",
-            switch_logits_path=tmp_path / "switch_logits.jsonl",
+        return PipelineConfig(
+            data=DataConfig(
+                training_manifest_path=tmp_path / "manifest.jsonl",
+                manifest_path=tmp_path / "manifest.jsonl",
+                distill_path=tmp_path / "labels.jsonl",
+                switch_logits_path=tmp_path / "switch_logits.jsonl",
         ),
         teacher=TeacherConfig(model_name="mock-teacher"),
         student=StudentConfig(model_name="mock-student", output_dir=tmp_path / "out", adapter_dir=tmp_path / "adapter"),
@@ -249,6 +274,7 @@ def test_switch_kd_training_fails_when_switch_answer_token_ids_do_not_match(tmp_
 def test_student_label_validation_fails_when_supervised_labels_differ(monkeypatch, tmp_path: Path):
     config = PipelineConfig(
         data=DataConfig(
+            training_manifest_path=tmp_path / "manifest.jsonl",
             manifest_path=tmp_path / "manifest.jsonl",
             distill_path=tmp_path / "labels.jsonl",
             image_root=tmp_path,
@@ -267,8 +293,8 @@ def test_student_label_validation_fails_when_supervised_labels_differ(monkeypatc
             "image": "screen.png",
             "task": "parsing",
             "query": "hello",
-            "teacher_answer": "{}",
-            "teacher_tokens": [10, 11],
+            "elements": [{"text": "Home", "bbox_norm": [1, 2, 3, 4], "focused": False}],
+            "coordinate_system": "normalized_0_1000",
             "teacher_logits": _valid_logits(2),
             **_valid_identity_metadata("teacher_logits", [10, 11]),
             "switch_logits": _valid_logits(2),
@@ -297,6 +323,7 @@ def test_student_label_validation_fails_when_supervised_labels_differ(monkeypatc
 def test_student_dataset_accepts_canonical_teacher_answer_span(monkeypatch, tmp_path: Path):
     config = PipelineConfig(
         data=DataConfig(
+            training_manifest_path=tmp_path / "manifest.jsonl",
             manifest_path=tmp_path / "manifest.jsonl",
             distill_path=tmp_path / "labels.jsonl",
             image_root=tmp_path,
@@ -315,8 +342,8 @@ def test_student_dataset_accepts_canonical_teacher_answer_span(monkeypatch, tmp_
             "image": "screen.png",
             "task": "parsing",
             "query": "hello",
-            "teacher_answer": "answer",
-            "teacher_tokens": [5890, 7000],
+            "elements": [{"text": "Home", "bbox_norm": [1, 2, 3, 4], "focused": False}],
+            "coordinate_system": "normalized_0_1000",
             "teacher_logits": _valid_logits(2),
             **_valid_identity_metadata("teacher_logits", [5890, 7000]),
             "switch_logits": _valid_logits(2),
@@ -327,11 +354,12 @@ def test_student_dataset_accepts_canonical_teacher_answer_span(monkeypatch, tmp_
     monkeypatch.setattr("vlm_distill.vlm_batching.load_training_image", lambda *args, **kwargs: object())
     monkeypatch.setattr("vlm_distill.stage_student_training.format_prompt", lambda *args, **kwargs: "prompt")
 
-    dataset = VlmTrainingDataset(rows, config, processor=_CanonicalSpanProcessor())
+    dataset = VlmTrainingDataset(rows, config, processor=_CanonicalSpanProcessor(serialize_parsing_label(rows[0])))
     item = dataset[0]
 
     assert item["labels"].tolist() == [-100, -100, 5890, 7000]
     assert item["prompt_token_len"] == 2
+    assert serialize_parsing_label(rows[0])
 
 
 def test_switch_kd_training_paths_ignore_legacy_teacher_logits_path(tmp_path: Path):
@@ -341,5 +369,6 @@ def test_switch_kd_training_paths_ignore_legacy_teacher_logits_path(tmp_path: Pa
 
     assert _training_data_paths(config) == [
         tmp_path / "labels.jsonl",
+        tmp_path / "legacy_teacher_logits.jsonl",
         tmp_path / "switch_logits.jsonl",
     ]
