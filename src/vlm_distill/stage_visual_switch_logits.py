@@ -227,8 +227,6 @@ class VisualSwitchDistiller:
         prompt = format_prompt(
             self.config.distillation.prompt_template,
             query=sample.query,
-            target_label=sample.target_label,
-            target_type=sample.target_type,
             task=sample.task,
         )
         with torch.no_grad():
@@ -295,8 +293,6 @@ class VisualSwitchDistiller:
         prompt = format_prompt(
             self.config.distillation.prompt_template,
             query=sample.query,
-            target_label=sample.target_label,
-            target_type=sample.target_type,
             task=sample.task,
         )
         with self._torch.no_grad():
@@ -317,8 +313,6 @@ class VisualSwitchDistiller:
         prompt = format_prompt(
             self.config.distillation.prompt_template,
             query=sample.query,
-            target_label=sample.target_label,
-            target_type=sample.target_type,
             task=sample.task,
         )
         text_prompt_len = max(1, len(prompt.split()))

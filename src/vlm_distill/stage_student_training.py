@@ -100,8 +100,6 @@ class VlmTrainingDataset:
         prompt = format_prompt(
             self.config.distillation.prompt_template,
             query=example.get("query") or metadata.get("query"),
-            target_label=example.get("target_label") or metadata.get("target_label"),
-            target_type=example.get("target_type") or metadata.get("target_type"),
             task=example.get("task", "vqa"),
         )
         target = example["teacher_answer"]

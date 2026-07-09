@@ -44,7 +44,7 @@ def main() -> None:
     )
     create_manifest_parser.add_argument(
         "--task",
-        choices=("parsing", "grounding"),
+        choices=("parsing",),
     )
     create_manifest_parser.add_argument("--recursive", action="store_true")
 
@@ -273,7 +273,7 @@ def _resolve_create_manifest_task(
     if task is None:
         task = infer_manifest_task_from_config_path(config_path)
 
-    allowed_tasks = ("parsing", "grounding")
+    allowed_tasks = ("parsing",)
     normalized_task = str(task).strip().casefold()
     if normalized_task not in allowed_tasks:
         raise ValueError(

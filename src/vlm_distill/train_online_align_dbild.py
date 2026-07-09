@@ -63,8 +63,6 @@ class OnlineAlignDataset(VlmTrainingDataset):
         prompt = format_prompt(
             self.config.distillation.prompt_template,
             query=row.get("query") or metadata.get("query"),
-            target_label=row.get("target_label") or metadata.get("target_label"),
-            target_type=row.get("target_type") or metadata.get("target_type"),
             task=row.get("task", "vqa"),
         )
         target = str(row["teacher_answer"])

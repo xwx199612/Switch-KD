@@ -12,7 +12,6 @@ from .config_schema import (
     resolve_training_image_dir,
     resolve_training_manifest_path,
 )
-from .parsing_output_parser import parse_parsing_answer
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -26,21 +25,16 @@ TASK_DEFAULTS = {
             "List all visible interactive UI elements on this screen."
         ),
     },
-    "grounding": {
-        "source_filename": "parsing_teacher_labels.jsonl",
-    },
 }
 
 
 def infer_manifest_task_from_config_path(config_path: Path) -> str:
     stem = config_path.stem.casefold()
-    if "grounding" in stem:
-        return "grounding"
     if "parsing" in stem:
         return "parsing"
     raise ValueError(
         "Could not infer manifest task from config filename. "
-        "Include 'parsing' or 'grounding' in the config filename."
+        "Include 'parsing' in the config filename."
     )
 
 
@@ -65,17 +59,6 @@ def create_manifest_from_config(
             output_path=output_path,
             split=split,
             recursive=recursive,
-        )
-
-    if task == "grounding":
-        output_dir = config.data.output_dir or DEFAULT_OUTPUT_DIR
-
-        source_path = output_dir / TASK_DEFAULTS["grounding"]["source_filename"]
-
-        return create_grounding_manifest(
-            source_path=source_path,
-            output_path=output_path,
-            split=split,
         )
 
     raise ValueError(
@@ -125,123 +108,3 @@ def create_parsing_manifest(
     print(f"Samples: {len(images)}")
 
     return output_path
-
-
-def create_grounding_manifest(
-    source_path: Path,
-    output_path: Path,
-    split: str,
-) -> Path:
-    if not source_path.exists():
-        raise FileNotFoundError(
-            f"parsing teacher label file not found: {source_path}\n"
-            "Run screen parsing label generation first."
-        )
-
-    source_rows = _read_jsonl(source_path)
-    grounding_rows: list[dict[str, Any]] = []
-
-    for row in source_rows:
-        elements = _extract_elements(row)
-
-        for element_index, element in enumerate(elements, start=1):
-            label = _element_label(element)
-            if not label:
-                continue
-
-            grounding_rows.append(
-                {
-                    "id": f"{row['id']}-grounding-{element_index:03d}",
-                    "image": row["image"],
-                    "task": "grounding",
-                    "target_label": label,
-                    "target_type": element.get("type") if isinstance(element, dict) else None,
-                    "source_parsing_id": row["id"],
-                }
-            )
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with output_path.open("w", encoding="utf-8") as handle:
-        for row in grounding_rows:
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-    print(f"Selected split: {split}")
-    print(f"Output manifest path: {output_path}")
-    print(f"Created grounding manifest: {output_path}")
-    print(f"Source: {source_path}")
-    print(f"Samples: {len(grounding_rows)}")
-
-    return output_path
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-
-    with path.open("r", encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            if not line.strip():
-                continue
-
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"{path}:{line_number} is not valid JSON") from exc
-
-    return rows
-
-
-def _extract_elements(row: dict[str, Any]) -> list[Any]:
-    teacher_elements = row.get("teacher_elements")
-    if isinstance(teacher_elements, list):
-        return teacher_elements
-
-    parsed = parse_parsing_answer(str(row.get("teacher_answer") or ""))
-    elements = parsed.get("elements")
-    return elements if parsed["parse_ok"] and isinstance(elements, list) else []
-
-
-def _parse_json_like(value: Any) -> dict[str, Any] | None:
-    if isinstance(value, dict):
-        return value
-
-    if not isinstance(value, str) or not value.strip():
-        return None
-
-    try:
-        parsed = json.loads(value)
-        return parsed if isinstance(parsed, dict) else None
-    except json.JSONDecodeError:
-        pass
-
-    start = value.find("{")
-    end = value.rfind("}")
-
-    if start >= 0 and end > start:
-        try:
-            parsed = json.loads(value[start : end + 1])
-            return parsed if isinstance(parsed, dict) else None
-        except json.JSONDecodeError:
-            return None
-
-    return None
-
-
-def _element_label(element: Any) -> str | None:
-    if isinstance(element, str):
-        label = element.strip()
-        return label or None
-
-    if isinstance(element, dict):
-        label = (
-            element.get("label")
-            or element.get("text")
-            or element.get("name")
-            or element.get("title")
-        )
-
-        if label:
-            label = str(label).strip()
-            return label or None
-
-    return None

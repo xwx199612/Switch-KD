@@ -64,15 +64,6 @@ class MockTeacher:
                     "mock icon | 0,0,100,100 | false\n"
                     "mock settings | 100,0,200,100 | true"
                 )
-        elif sample.task == "grounding":
-            bbox = sample.metadata.get("bbox") if isinstance(sample.metadata, dict) else None
-            teacher_answer = json.dumps(
-                {
-                    "label": sample.target_label or "target",
-                    "bbox": bbox or [0, 0, 100, 100],
-                },
-                ensure_ascii=False,
-            )
         else:
             teacher_answer = f"mock answer for {sample.task}"
 
@@ -451,15 +442,12 @@ def _format_prompt(config: PipelineConfig, sample: VlmSample) -> str:
     return format_prompt(
         config.distillation.prompt_template,
         query=sample.query,
-        target_label=sample.target_label,
-        target_type=sample.target_type,
         task=sample.task,
     )
 
 
 def _target_from_existing_annotation(sample: VlmSample) -> str | None:
     elements = sample.metadata.get("elements") if isinstance(sample.metadata, dict) else None
-    bbox = sample.metadata.get("bbox") if isinstance(sample.metadata, dict) else None
 
     if sample.task == "parsing" and elements:
         if isinstance(elements, list):
@@ -470,15 +458,6 @@ def _target_from_existing_annotation(sample: VlmSample) -> str | None:
                 return line_answer
         return json.dumps(
             elements if isinstance(elements, dict) else {"elements": elements},
-            ensure_ascii=False,
-        )
-
-    if sample.task == "grounding" and bbox:
-        return json.dumps(
-            {
-                "label": sample.target_label or "target object",
-                "bbox": bbox,
-            },
             ensure_ascii=False,
         )
 
@@ -516,7 +495,7 @@ def _label_sample(
         return None
 
     return {
-        **asdict(sample),
+        **_base_output_row(sample),
         **label,
     }
 
@@ -1636,7 +1615,7 @@ def create_teacher_precompute_dataset(config: PipelineConfig, samples: list[VlmS
                     sample,
                     include_logits=require_logits,
                 )
-            row = {**asdict(sample), **generated}
+            row = _build_teacher_output_row(sample, generated)
             attach_parsing_sidecar_outputs(
                 row,
                 output_root=output_path.parent,
@@ -1662,6 +1641,33 @@ def create_teacher_precompute_dataset(config: PipelineConfig, samples: list[VlmS
 
 def create_distillation_dataset(config: PipelineConfig, samples: list[VlmSample]) -> Path:
     return create_teacher_precompute_dataset(config, samples)
+
+
+def _base_output_row(sample: VlmSample) -> dict[str, Any]:
+    return {
+        "id": sample.id,
+        "image": sample.image,
+        "task": sample.task,
+        "query": sample.query,
+    }
+
+
+def _build_teacher_output_row(sample: VlmSample, generated: dict[str, Any]) -> dict[str, Any]:
+    allowed_prefixes = (
+        "teacher_logits",
+        "switch_logits",
+    )
+    row: dict[str, Any] = {
+        **_base_output_row(sample),
+        "teacher_answer": str(generated["teacher_answer"]),
+        "teacher_tokens": [int(token_id) for token_id in generated.get("teacher_tokens", [])],
+    }
+    for key, value in generated.items():
+        if key in row:
+            continue
+        if key.startswith(allowed_prefixes):
+            row[key] = value
+    return row
 
 
 def _generate_label_with_optional_mock_logits(
@@ -2050,14 +2056,12 @@ def _format_prompt(config: PipelineConfig, sample: VlmSample) -> str:
         prompt = template.format(
             query=sample.query or "",
             question=sample.query or "",
-            target_label=sample.target_label or "",
-            target_type=sample.target_type or "",
             task=sample.task,
         )
     except KeyError as exc:
         raise KeyError(
             f"Prompt template references unsupported placeholder: {exc}. "
-            "Supported placeholders are: query, question, target_label, target_type, task."
+            "Supported placeholders are: query, question, task."
         ) from exc
 
     if sample.task != "parsing":
@@ -2302,16 +2306,6 @@ def _mock_answer(sample: VlmSample) -> str:
                         "bbox": [120, 0, 220, 100],
                     },
                 ],
-            },
-            ensure_ascii=False,
-        )
-
-    if sample.task == "grounding":
-        return json.dumps(
-            {
-                "label": sample.target_label or "target",
-                "type": sample.target_type or "object",
-                "bbox": [0, 0, 100, 100],
             },
             ensure_ascii=False,
         )

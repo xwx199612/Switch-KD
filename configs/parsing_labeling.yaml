@@ -100,5 +100,5 @@ distillation:
 evaluation:
   output_path: outputs/{task_name}_labeling_{label_profile}/eval_report.json
   metrics:
-    - valid_json_rate
+    - parse_ok_rate
     - element_f1

@@ -115,13 +115,6 @@ vlm-distill create-manifest \
   --config configs/parsing_labeling.yaml \
 ```
 
-or
-
-```powershell
-vlm-distill create-manifest \
-  --config configs/grounding_test.yaml \
-```
-
 ---
 
 ## Validate Manifest
@@ -358,44 +351,32 @@ No manual target label selection is required.
 data:
   output_dir: D:/TV_data/teacher_parsing
 
-  manifest_path: D:/TV_data/teacher_parsing/grounding_manifest.jsonl
+  manifest_path: D:/TV_data/teacher_parsing/parsing_manifest.jsonl
 
-  distill_path: D:/TV_data/teacher_parsing/grounding_teacher_labels.jsonl
+  distill_path: D:/TV_data/teacher_parsing/parsing_teacher_labels.jsonl
 
-  eval_path: D:/TV_data/teacher_parsing/grounding_teacher_labels.jsonl
+  eval_path: D:/TV_data/teacher_parsing/parsing_teacher_labels.jsonl
 ```
 
 ---
 
 ## Step 1
 
-Generate grounding manifest:
+Generate parsing manifest:
 
 ```powershell
 vlm-distill create-manifest \
-  --config configs/grounding_test.yaml \
+  --config configs/parsing_labeling.yaml \
 ```
 
-This automatically reads:
-
-```text
-parsing_teacher_labels.jsonl
-```
-
-and expands:
+Example manifest row:
 
 ```json
 {
-  "label":"YouTube"
-}
-```
-
-into:
-
-```json
-{
-  "target_label":"YouTube",
-  "target_type":"object"
+  "id":"parsing-000001",
+  "image":"...",
+  "task":"parsing",
+  "query":"List all visible interactive UI elements on this screen."
 }
 ```
 
@@ -403,34 +384,31 @@ into:
 
 ## Step 2
 
-Generate grounding teacher labels:
+Generate parsing teacher labels:
 
 ```powershell
-vlm-distill label \
-  --config configs/grounding_test.yaml
+vlm-distill teacher-precompute \
+  --config configs/parsing_labeling.yaml
 ```
 
 Expected output:
 
-```json
-{
-  "label":"YouTube",
-  "bbox":[100,200,300,400],
-  "confidence":0.93
-}
+```text
+Picture | 145,238,276,292 | false
+General | 145,348,276,404 | true
 ```
 
 Output:
 
 ```text
-D:\TV_data\teacher_parsing\grounding_teacher_labels.jsonl
+D:\TV_data\teacher_parsing\parsing_teacher_labels.jsonl
 ```
 
 Validate generated labels:
 
 ```powershell
   vlm-distill validate-teacher \
-  --config configs/grounding_test.yaml
+  --config configs/parsing_labeling.yaml
 ```
 
 ---
@@ -842,14 +820,8 @@ Screen Parsing + Grounding:
 vlm-distill create-manifest \
   --config configs/parsing_labeling.yaml \
 
-vlm-distill label \
+vlm-distill teacher-precompute \
   --config configs/parsing_labeling.yaml
-
-vlm-distill create-manifest \
-  --config configs/grounding_test.yaml \
-
-vlm-distill label \
-  --config configs/grounding_test.yaml
 ```
 
 ---

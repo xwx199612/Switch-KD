@@ -30,6 +30,7 @@ def attach_parsing_sidecar_outputs(
     payload = {
         "source_file": str(raw_relative).replace("\\", "/"),
         **parsed,
+        "answer": answer,
     }
     json_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
@@ -37,13 +38,9 @@ def attach_parsing_sidecar_outputs(
     )
 
     prefix = "teacher" if role == "teacher" else "student"
-    row[f"{prefix}_raw_output_path"] = str(raw_relative).replace("\\", "/")
-    row[f"{prefix}_parsed_output_path"] = str(json_relative).replace("\\", "/")
-    row[f"{prefix}_parse_ok"] = bool(parsed["parse_ok"])
-    row[f"{prefix}_parse_error"] = parsed["parse_error"]
-    row[f"{prefix}_elements"] = parsed["elements"]
     row[f"{prefix}_element_count"] = int(parsed["element_count"])
     if not parsed["parse_ok"]:
+        row[f"{prefix}_element_count"] = 0
         print(
             f"Warning: {prefix} parsing output did not parse cleanly for id={row.get('id')}: "
             f"{parsed['parse_error']}"
@@ -78,6 +75,7 @@ def refresh_parsing_sidecar_reports(*, output_root: Path, role: str) -> dict[str
         output_payload = {
             "source_file": str(raw_relative).replace("\\", "/"),
             **parsed,
+            "answer": raw_text.rstrip("\n"),
         }
         output_path = json_dir / f"{source_path.stem}.json"
         output_path.write_text(

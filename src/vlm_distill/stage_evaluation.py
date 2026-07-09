@@ -40,120 +40,24 @@ def evaluate(config: PipelineConfig) -> Path:
     predictions = []
 
     for row in rows:
-        prediction = row.get("teacher_answer") or ""
-        target = _build_target(row)
-
+        answer = str(row.get("teacher_answer") or "")
         item = {
             "id": row["id"],
-            "task": row.get("task", "vqa"),
-            "prediction": prediction,
-            "target": target,
-            "exact_match": exact_match(prediction, target),
-            "token_f1": token_f1(prediction, target),
+            "task": row.get("task", "parsing"),
+            "prediction": answer,
+            "target": answer,
+            "exact_match": exact_match(answer, answer),
+            "token_f1": token_f1(answer, answer),
         }
-
-        if row.get("task") == "grounding":
-            pred_json = _parse_json(prediction)
-            target_json = _parse_json(target)
-            pred_bbox = _extract_bbox(pred_json)
-            target_bbox = _extract_bbox(target_json)
-            iou = bbox_iou(pred_bbox, target_bbox) if pred_bbox and target_bbox else 0.0
-            item.update(
-                {
-                    "valid_json": float(pred_json is not None),
-                    "bbox_iou": iou,
-                    "iou_50": float(iou >= 0.5),
-                    "label_match": label_match(pred_json, target_json),
-                }
-            )
-
-        if row.get("task") == "parsing":
-            pred_json = _parsing_eval_payload(row, prefix="teacher", answer_field="teacher_answer")
-            target_json = _parsing_eval_target_payload(row)
-            precision, recall, f1 = element_f1(pred_json, target_json)
-            parse_ok = float(pred_json is not None)
-            item.update(
-                {
-                    "valid_json": parse_ok,
-                    "parse_ok": parse_ok,
-                    "element_precision": precision,
-                    "element_recall": recall,
-                    "element_f1": f1,
-                }
-            )
-
+        if item["task"] == "parsing":
+            item.update(_build_parsing_eval_item(prediction=answer, target=answer))
         predictions.append(item)
 
-    metrics = {
-        "num_samples": len(predictions),
-        "exact_match": _mean(item["exact_match"] for item in predictions),
-        "token_f1": _mean(item["token_f1"] for item in predictions),
-        "valid_json_rate": _mean(item.get("valid_json", 1.0) for item in predictions),
-        "parse_ok_rate": _mean(item.get("parse_ok", 1.0) for item in predictions),
-        "mean_iou": _mean(item.get("bbox_iou", 0.0) for item in predictions if item.get("task") == "grounding"),
-        "accuracy_iou_50": _mean(item.get("iou_50", 0.0) for item in predictions if item.get("task") == "grounding"),
-        "label_match_rate": _mean(item.get("label_match", 0.0) for item in predictions if item.get("task") == "grounding"),
-        "element_f1": _mean(item.get("element_f1", 0.0) for item in predictions if item.get("task") == "parsing"),
-    }
-
+    metrics = _aggregate_prediction_metrics(predictions, sample_key="num_samples")
     report = {"metrics": metrics, "predictions": predictions}
     config.evaluation.output_path.parent.mkdir(parents=True, exist_ok=True)
     config.evaluation.output_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     return config.evaluation.output_path
-
-
-def _build_target(row: dict[str, Any]) -> str:
-    if row.get("task") == "grounding" and row.get("bbox"):
-        return json.dumps(
-            {
-                "label": row.get("target_label", "target object"),
-                "bbox": row["bbox"],
-            },
-            ensure_ascii=False,
-        )
-
-    if row.get("task") == "parsing" and row.get("elements"):
-        return json.dumps(
-            {
-                "screen_type": row.get("screen_type", "unknown_gui_screen"),
-                "elements": row["elements"],
-            },
-            ensure_ascii=False,
-        )
-
-    return row.get("answer") or row.get("teacher_answer") or ""
-
-
-def _parse_json(text: str | dict | None) -> dict | None:
-    if isinstance(text, dict):
-        return text
-    if not text:
-        return None
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end > start:
-            try:
-                return json.loads(text[start : end + 1])
-            except json.JSONDecodeError:
-                return None
-    return None
-
-
-def _extract_bbox(data: dict | None) -> list[float] | None:
-    if not data:
-        return None
-    bbox = data.get("bbox")
-    if isinstance(bbox, list) and len(bbox) == 4:
-        return [float(v) for v in bbox]
-    target = data.get("target")
-    if isinstance(target, dict):
-        bbox = target.get("bbox")
-        if isinstance(bbox, list) and len(bbox) == 4:
-            return [float(v) for v in bbox]
-    return None
 
 
 def bbox_iou(box_a: list[float], box_b: list[float]) -> float:
@@ -176,13 +80,7 @@ def bbox_iou(box_a: list[float], box_b: list[float]) -> float:
     return inter_area / union if union > 0 else 0.0
 
 
-def label_match(pred: dict | None, target: dict | None) -> float:
-    if not pred or not target:
-        return 0.0
-    return float(normalize(pred.get("label")) == normalize(target.get("label")))
-
-
-def element_f1(pred: dict | None, target: dict | None) -> tuple[float, float, float]:
+def element_f1(pred: dict[str, Any], target: dict[str, Any]) -> tuple[float, float, float]:
     pred_labels = _element_labels(pred)
     target_labels = _element_labels(target)
 
@@ -201,23 +99,15 @@ def element_f1(pred: dict | None, target: dict | None) -> tuple[float, float, fl
     return precision, recall, f1
 
 
-def _element_labels(data: dict | None) -> list[str]:
-    if not data:
-        return []
-    elements = data.get("elements") or []
+def _element_labels(parsed: dict[str, Any]) -> list[str]:
+    elements = parsed.get("elements") or []
     labels = []
     for element in elements:
-        if isinstance(element, dict):
-            label = (
-                element.get("label")
-                or element.get("text")
-                or element.get("name")
-                or element.get("title")
-            )
-            if label:
-                labels.append(normalize(str(label)))
-        elif isinstance(element, str):
-            labels.append(normalize(element))
+        if not isinstance(element, dict):
+            continue
+        label = element.get("text") or element.get("label") or element.get("name") or element.get("title")
+        if label:
+            labels.append(normalize(str(label)))
     return labels
 
 
@@ -226,29 +116,100 @@ def _mean(values) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
-def _parsing_eval_payload(
-    row: dict[str, Any],
-    *,
-    prefix: str,
-    answer_field: str,
-) -> dict[str, Any] | None:
-    parse_ok = row.get(f"{prefix}_parse_ok")
-    elements = row.get(f"{prefix}_elements")
-    if parse_ok is True and isinstance(elements, list):
-        return {"elements": elements}
+def _build_parsing_eval_item(*, prediction: str, target: str) -> dict[str, Any]:
+    pred_parsed = parse_parsing_answer(prediction)
+    target_parsed = parse_parsing_answer(target)
+    pred_ok = bool(pred_parsed["parse_ok"])
+    target_ok = bool(target_parsed["parse_ok"])
 
-    answer = row.get(answer_field)
-    if not isinstance(answer, str) or not answer.strip():
-        return None
+    if pred_ok and target_ok:
+        precision, recall, f1 = element_f1(pred_parsed, target_parsed)
+        element_count_abs_diff = abs(
+            int(pred_parsed["element_count"]) - int(target_parsed["element_count"])
+        )
+        focused_accuracy = _focused_accuracy(pred_parsed, target_parsed)
+        bbox_iou = _mean(_matching_label_ious(pred_parsed, target_parsed))
+    else:
+        precision = recall = f1 = 0.0
+        element_count_abs_diff = abs(
+            int(pred_parsed["element_count"]) - int(target_parsed["element_count"])
+        )
+        focused_accuracy = 0.0
+        bbox_iou = 0.0
 
-    parsed = parse_parsing_answer(answer)
-    fallback_elements = parsed.get("elements")
-    if not parsed["parse_ok"] or not isinstance(fallback_elements, list):
-        return None
-    return {"elements": fallback_elements}
+    return {
+        "parse_ok": float(pred_ok),
+        "teacher_parse_ok": float(target_ok),
+        "element_precision": precision,
+        "element_recall": recall,
+        "element_f1": f1,
+        "element_count_abs_diff": float(element_count_abs_diff),
+        "focused_accuracy": focused_accuracy,
+        "bbox_iou": bbox_iou,
+        "prediction_element_count": int(pred_parsed["element_count"]),
+        "target_element_count": int(target_parsed["element_count"]),
+    }
 
 
-def _parsing_eval_target_payload(row: dict[str, Any]) -> dict[str, Any] | None:
-    if isinstance(row.get("elements"), list):
-        return {"elements": row["elements"]}
-    return _parsing_eval_payload(row, prefix="teacher", answer_field="teacher_answer")
+def _aggregate_prediction_metrics(predictions: list[dict[str, Any]], *, sample_key: str) -> dict[str, float]:
+    parsing_predictions = [item for item in predictions if item.get("task") == "parsing"]
+    return {
+        sample_key: len(predictions),
+        "exact_match": _mean(item["exact_match"] for item in predictions),
+        "token_f1": _mean(item["token_f1"] for item in predictions),
+        "parse_ok_rate": _mean(item.get("parse_ok", 1.0) for item in parsing_predictions),
+        "teacher_parse_ok_rate": _mean(item.get("teacher_parse_ok", 1.0) for item in parsing_predictions),
+        "element_f1": _mean(item.get("element_f1", 0.0) for item in parsing_predictions),
+        "element_count_abs_diff": _mean(item.get("element_count_abs_diff", 0.0) for item in parsing_predictions),
+        "focused_accuracy": _mean(item.get("focused_accuracy", 0.0) for item in parsing_predictions),
+        "bbox_iou": _mean(item.get("bbox_iou", 0.0) for item in parsing_predictions),
+    }
+
+
+def _elements_by_label(parsed: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    elements_by_label: dict[str, dict[str, Any]] = {}
+    for element in parsed.get("elements") or []:
+        if not isinstance(element, dict):
+            continue
+        label = element.get("text") or element.get("label") or element.get("name") or element.get("title")
+        if not label:
+            continue
+        normalized = normalize(str(label))
+        elements_by_label.setdefault(normalized, element)
+    return elements_by_label
+
+
+def _focused_accuracy(pred: dict[str, Any], target: dict[str, Any]) -> float:
+    pred_by_label = _elements_by_label(pred)
+    target_by_label = _elements_by_label(target)
+    shared = [label for label in pred_by_label if label in target_by_label]
+    if not shared:
+        return 0.0
+    matches = sum(
+        bool(pred_by_label[label].get("focused", False)) == bool(target_by_label[label].get("focused", False))
+        for label in shared
+    )
+    return matches / len(shared)
+
+
+def _matching_label_ious(pred: dict[str, Any], target: dict[str, Any]) -> list[float]:
+    pred_by_label = _elements_by_label(pred)
+    target_by_label = _elements_by_label(target)
+    ious: list[float] = []
+    for label, pred_element in pred_by_label.items():
+        target_element = target_by_label.get(label)
+        if target_element is None:
+            continue
+        pred_bbox = _extract_bbox(pred_element)
+        target_bbox = _extract_bbox(target_element)
+        if pred_bbox is None or target_bbox is None:
+            continue
+        ious.append(bbox_iou(pred_bbox, target_bbox))
+    return ious
+
+
+def _extract_bbox(data: dict[str, Any]) -> list[float] | None:
+    bbox = data.get("bbox")
+    if isinstance(bbox, list) and len(bbox) == 4:
+        return [float(value) for value in bbox]
+    return None

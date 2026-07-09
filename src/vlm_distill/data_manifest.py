@@ -10,7 +10,7 @@ from typing import Iterable, Any
 class VlmSample:
     id: str
     image: str
-    task: str = "vqa"
+    task: str = "parsing"
     query: str | None = None
     target_label: str | None = None
     target_type: str | None = None
@@ -55,17 +55,14 @@ def validate_manifest(path: Path, image_root: Path = Path("."), max_samples: int
             raise FileNotFoundError(f"{path}:{index} image not found: {image_path}")
 
         task = str(row["task"])
-        target_label = row.get("target_label")
-        if task == "grounding" and not target_label:
-            raise ValueError(f"{path}:{index} grounding task requires target_label")
+        if task != "parsing":
+            raise ValueError(f"{path}:{index} unsupported task={task!r}; only 'parsing' is supported")
 
         known_keys = {
             "id",
             "image",
             "task",
             "query",
-            "target_label",
-            "target_type",
             "answer",
             "metadata",
         }
@@ -83,8 +80,6 @@ def validate_manifest(path: Path, image_root: Path = Path("."), max_samples: int
                 image=str(row["image"]),
                 task=task,
                 query=str(row["query"]) if row.get("query") is not None else None,
-                target_label=str(target_label) if target_label is not None else None,
-                target_type=row.get("target_type"),
                 answer=row.get("answer"),
                 metadata=metadata,
             )

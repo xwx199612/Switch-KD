@@ -40,16 +40,16 @@ distillation:
 
     query: {query}
 
-    Return only valid JSON:
-    {{
-      "elements": [
-        ""
-      ]
-    }}
+    Return one UI element per line using exactly this format:
+    <label> | <x1>,<y1>,<x2>,<y2> | <focused>
+
+    Do not output JSON.
+    Do not use markdown.
+    Use pixel coordinates.
+    focused must be true or false.
 
 evaluation:
   output_path: outputs/parsing_eval_report.json
   metrics:
-    - valid_json_rate
+    - parse_ok_rate
     - element_f1
-
