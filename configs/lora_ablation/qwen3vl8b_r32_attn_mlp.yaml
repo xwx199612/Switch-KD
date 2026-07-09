@@ -144,14 +144,7 @@ distillation:
     - Do not use markdown.
     - Do not add explanations.
     - Use pixel coordinates in the original image.
-    - x1,y1 is the top-left corner.
-    - x2,y2 is the bottom-right corner.
     - focused must be true or false.
-
-    Example:
-    Picture | 145,238,276,292 | false
-    General | 145,348,276,404 | true
-    Network Settings | 705,396,807,432 | false
   lm_loss_weight: 1.0
   dbild_loss_weight: 1.0
   vsd_loss_weight: 0.0

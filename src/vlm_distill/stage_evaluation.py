@@ -215,7 +215,7 @@ def _element_labels(data: dict | None) -> list[str]:
                 or element.get("title")
             )
             if label:
-                labels.append(normalize(label))
+                labels.append(normalize(str(label)))
         elif isinstance(element, str):
             labels.append(normalize(element))
     return labels
