@@ -30,7 +30,25 @@ class TrainableSummary:
     count: int
     total: int
     ratio: float
+    tensor_count: int
     names: list[str]
+
+
+@dataclass(frozen=True)
+class LoraTargetStats:
+    tensor_count: int
+    param_count: int
+    examples: list[str]
+
+
+@dataclass(frozen=True)
+class LoraTargetSummary:
+    configured_targets: list[str]
+    target_stats: dict[str, LoraTargetStats]
+    missing_targets: list[str]
+    total_lora_tensors: int
+    total_lora_params: int
+    total_non_lora_params: int
 
 
 class OnlineAlignDataset(VlmTrainingDataset):
@@ -223,6 +241,7 @@ def _can_require_grad(parameter) -> bool:
 
 def freeze_student_vision_keep_merger_lm_trainable(model, *, use_lora: bool) -> TrainableSummary:
     trainable_names: list[str] = []
+    trainable_tensor_count = 0
 
     for name, parameter in model.named_parameters():
         lowered = name.lower()
@@ -251,6 +270,7 @@ def freeze_student_vision_keep_merger_lm_trainable(model, *, use_lora: bool) -> 
         if should_train and _can_require_grad(parameter):
             parameter.requires_grad_(True)
             trainable_names.append(name)
+            trainable_tensor_count += 1
         else:
             parameter.requires_grad_(False)
 
@@ -268,13 +288,106 @@ def freeze_student_vision_keep_merger_lm_trainable(model, *, use_lora: bool) -> 
     print(f"trainable_param_count={trainable_count}")
     print(f"total_param_count={total_count}")
     print(f"trainable_param_ratio={ratio:.6f}")
+    print(f"trainable_tensor_count={trainable_tensor_count}")
     print("first_trainable_parameter_names=", first_trainable_names)
     return TrainableSummary(
         count=int(trainable_count),
         total=int(total_count),
         ratio=ratio,
+        tensor_count=int(trainable_tensor_count),
         names=first_trainable_names,
     )
+
+
+def summarize_trainable_lora_targets(model, configured_targets: list[str]) -> LoraTargetSummary:
+    normalized_targets = list(dict.fromkeys(configured_targets))
+    target_stats: dict[str, dict[str, Any]] = {
+        target: {
+            "tensor_count": 0,
+            "param_count": 0,
+            "examples": [],
+        }
+        for target in normalized_targets
+    }
+    total_lora_tensors = 0
+    total_lora_params = 0
+    total_non_lora_params = 0
+
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+
+        numel = parameter.numel()
+        lowered = name.lower()
+        if "lora" in lowered:
+            total_lora_tensors += 1
+            total_lora_params += numel
+            for target in normalized_targets:
+                if target.lower() not in lowered:
+                    continue
+                stats = target_stats[target]
+                stats["tensor_count"] += 1
+                stats["param_count"] += numel
+                if len(stats["examples"]) < 5:
+                    stats["examples"].append(name)
+        else:
+            total_non_lora_params += numel
+
+    frozen_target_stats = {
+        target: LoraTargetStats(
+            tensor_count=int(stats["tensor_count"]),
+            param_count=int(stats["param_count"]),
+            examples=list(stats["examples"]),
+        )
+        for target, stats in target_stats.items()
+    }
+    missing_targets = [
+        target
+        for target, stats in frozen_target_stats.items()
+        if stats.tensor_count == 0
+    ]
+    return LoraTargetSummary(
+        configured_targets=normalized_targets,
+        target_stats=frozen_target_stats,
+        missing_targets=missing_targets,
+        total_lora_tensors=int(total_lora_tensors),
+        total_lora_params=int(total_lora_params),
+        total_non_lora_params=int(total_non_lora_params),
+    )
+
+
+def _print_lora_target_summary(summary: LoraTargetSummary) -> None:
+    print("Configured LoRA target modules:")
+    if summary.configured_targets:
+        for target in summary.configured_targets:
+            print(f"  - {target}")
+    else:
+        print("  - none")
+
+    print("Detected trainable LoRA target modules:")
+    if summary.configured_targets:
+        for target in summary.configured_targets:
+            stats = summary.target_stats[target]
+            print(
+                f"  - {target}: "
+                f"trainable_param_tensors={stats.tensor_count}, "
+                f"trainable_params={stats.param_count}"
+            )
+            if stats.examples:
+                print(f"    examples={stats.examples}")
+    else:
+        print("  - none")
+
+    print("Missing configured LoRA target modules:")
+    if summary.missing_targets:
+        for target in summary.missing_targets:
+            print(f"  - {target}")
+    else:
+        print("  - none")
+
+    print(f"Total trainable LoRA tensors: {summary.total_lora_tensors}")
+    print(f"Total trainable LoRA params: {summary.total_lora_params}")
+    print(f"Total trainable non-LoRA params: {summary.total_non_lora_params}")
 
 
 def _autocast_context(mixed_precision: str):
@@ -561,6 +674,16 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
     )
     student_model, student_processor, student_model_path, _student_device_map = _load_student(config)
     student_model, trainable_summary = _apply_student_train_setup(config, student_model)
+    lora_target_summary = None
+    if config.student.use_lora:
+        configured_targets = config.student.target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
+        lora_target_summary = summarize_trainable_lora_targets(student_model, configured_targets)
+        _print_lora_target_summary(lora_target_summary)
+        if lora_target_summary.missing_targets:
+            raise RuntimeError(
+                "Configured LoRA target modules were not found as trainable LoRA parameters: "
+                f"{lora_target_summary.missing_targets}"
+            )
     student_input_device = select_model_input_device(student_model, label="student")
 
     dataset = OnlineAlignDataset(rows, config, student_processor)
@@ -595,6 +718,7 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
     print("VSD enabled: false")
     print(f"trainable_param_count={trainable_summary.count}")
     print(f"trainable_param_ratio={trainable_summary.ratio:.6f}")
+    print(f"trainable_tensor_count={trainable_summary.tensor_count}")
 
     for epoch in range(int(config.training.epochs)):
         if total_target_steps is not None and global_step >= total_target_steps:
