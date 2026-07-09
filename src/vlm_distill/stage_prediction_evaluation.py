@@ -9,6 +9,8 @@ from .stage_evaluation import (
     _build_target,
     _extract_bbox,
     _mean,
+    _parsing_eval_payload,
+    _parsing_eval_target_payload,
     _parse_json,
     bbox_iou,
     element_f1,
@@ -63,8 +65,8 @@ def evaluate_predictions(config: PipelineConfig) -> Path:
             )
 
         if item["task"] == "parsing":
-            pred_json = _parse_json(prediction)
-            target_json = _parse_json(target)
+            pred_json = _parsing_eval_payload(row, prefix="student", answer_field="student_answer")
+            target_json = _parsing_eval_target_payload(target_row)
             precision, recall, f1 = element_f1(pred_json, target_json)
             item.update(
                 {

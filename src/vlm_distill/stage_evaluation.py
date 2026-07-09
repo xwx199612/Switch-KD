@@ -7,6 +7,7 @@ from typing import Any
 
 from .config_schema import PipelineConfig, resolve_label_path
 from .data_manifest import read_jsonl
+from .parsing_output_parser import parse_parsing_answer
 
 
 def normalize(text: str | None) -> str:
@@ -67,8 +68,8 @@ def evaluate(config: PipelineConfig) -> Path:
             )
 
         if row.get("task") == "parsing":
-            pred_json = _parse_json(prediction)
-            target_json = _parse_json(target)
+            pred_json = _parsing_eval_payload(row, prefix="teacher", answer_field="teacher_answer")
+            target_json = _parsing_eval_target_payload(row)
             precision, recall, f1 = element_f1(pred_json, target_json)
             item.update(
                 {
@@ -214,3 +215,30 @@ def _mean(values) -> float:
     values = list(values)
     return sum(values) / len(values) if values else 0.0
 
+
+def _parsing_eval_payload(
+    row: dict[str, Any],
+    *,
+    prefix: str,
+    answer_field: str,
+) -> dict[str, Any] | None:
+    parse_ok = row.get(f"{prefix}_parse_ok")
+    elements = row.get(f"{prefix}_elements")
+    if parse_ok is True and isinstance(elements, list):
+        return {"elements": elements}
+
+    answer = row.get(answer_field)
+    if not isinstance(answer, str) or not answer.strip():
+        return None
+
+    parsed = parse_parsing_answer(answer)
+    fallback_elements = parsed.get("elements")
+    if not parsed["parse_ok"] or not isinstance(fallback_elements, list):
+        return None
+    return {"elements": fallback_elements}
+
+
+def _parsing_eval_target_payload(row: dict[str, Any]) -> dict[str, Any] | None:
+    if isinstance(row.get("elements"), list):
+        return {"elements": row["elements"]}
+    return _parsing_eval_payload(row, prefix="teacher", answer_field="teacher_answer")

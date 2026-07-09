@@ -10,8 +10,8 @@ from typing import Protocol
 from .config_schema import PipelineConfig, resolve_prediction_path
 from .data_manifest import VlmSample, read_jsonl
 from .model_loading import apply_attn_implementation, resolve_model_path
+from .model_output_artifacts import attach_parsing_sidecar_outputs, refresh_parsing_sidecar_reports
 from .stage_teacher_precompute import (
-    _attach_parsing_sidecar_outputs,
     _format_prompt as _format_teacher_prompt,
     _load_teacher_image,
     _normalize_teacher_answer,
@@ -245,6 +245,7 @@ def create_student_predictions(config: PipelineConfig, samples: list[VlmSample])
     )
 
     if not pending_samples:
+        refresh_parsing_sidecar_reports(output_root=output_path.parent, role="student")
         print("No pending samples. Existing prediction output is already complete for this manifest.")
         return output_path
 
@@ -254,7 +255,7 @@ def create_student_predictions(config: PipelineConfig, samples: list[VlmSample])
         for index, sample in enumerate(pending_samples, start=1):
             started = time.perf_counter()
             row = _predict_sample(student, sample)
-            _attach_parsing_sidecar_outputs(
+            attach_parsing_sidecar_outputs(
                 row,
                 output_root=output_path.parent,
                 role="student",
@@ -270,6 +271,7 @@ def create_student_predictions(config: PipelineConfig, samples: list[VlmSample])
                 f"id={sample.id} elapsed={elapsed:.2f}s"
             )
 
+    refresh_parsing_sidecar_reports(output_root=output_path.parent, role="student")
     return output_path
 
 

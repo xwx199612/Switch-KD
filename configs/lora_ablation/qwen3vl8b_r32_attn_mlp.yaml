@@ -168,22 +168,22 @@ distillation:
     * settings rows, channel, setup, program, labels, adjustment, type -> "menu_item"
     * if unsure -> "other"
 
-    Return raw JSON only.
-    Do not explain.
-    Do not use markdown.
-    Do not include comments.
-    Do not include trailing commas.
+    Return one UI element per line using exactly this format:
+    <label> | <x1>,<y1>,<x2>,<y2> | <focused>
 
-    Use this schema:
-    {{
-    "elements": [
-    {{
-    "text": "...",
-    "type": "tab",
-    "focused": true
-    }}
-    ]
-    }}
+    Rules:
+    - Do not output JSON.
+    - Do not use markdown.
+    - Do not add explanations.
+    - Use pixel coordinates in the original image.
+    - x1,y1 is the top-left corner.
+    - x2,y2 is the bottom-right corner.
+    - focused must be true or false.
+
+    Example:
+    Picture | 145,238,276,292 | false
+    General | 145,348,276,404 | true
+    Network Settings | 705,396,807,432 | false
   lm_loss_weight: 1.0
   dbild_loss_weight: 1.0
   vsd_loss_weight: 0.0

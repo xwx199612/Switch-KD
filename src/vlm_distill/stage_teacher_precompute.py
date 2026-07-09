@@ -30,6 +30,10 @@ from .device_utils import (
     resolve_requested_device_map,
     select_model_input_device,
 )
+from .model_output_artifacts import (
+    attach_parsing_sidecar_outputs,
+    refresh_parsing_sidecar_reports,
+)
 from .model_loading import apply_attn_implementation, resolve_model_path
 from .parsing_output_parser import elements_to_line_format, parse_parsing_answer
 from .stage_visual_switch_logits import _compact_adaptive_sequence_logits
@@ -1609,6 +1613,7 @@ def create_teacher_precompute_dataset(config: PipelineConfig, samples: list[VlmS
         print(f"  first invalid row id/reason: {completed.first_invalid_keys}")
 
     if not pending_samples:
+        refresh_parsing_sidecar_reports(output_root=output_path.parent, role="teacher")
         return output_path
 
     if config.teacher.backend == "hf" and require_logits:
@@ -1632,7 +1637,7 @@ def create_teacher_precompute_dataset(config: PipelineConfig, samples: list[VlmS
                     include_logits=require_logits,
                 )
             row = {**asdict(sample), **generated}
-            _attach_parsing_sidecar_outputs(
+            attach_parsing_sidecar_outputs(
                 row,
                 output_root=output_path.parent,
                 role="teacher",
@@ -1651,6 +1656,7 @@ def create_teacher_precompute_dataset(config: PipelineConfig, samples: list[VlmS
                 f"pending={len(pending_samples) - completed_now} id={sample.id} "
                 f"elapsed_seconds_per_sample={elapsed:.2f}"
             )
+    refresh_parsing_sidecar_reports(output_root=output_path.parent, role="teacher")
     return output_path
 
 
@@ -1695,49 +1701,6 @@ def _canonicalize_line_teacher_answer(answer: str) -> str | None:
         [element for element in elements if isinstance(element, dict)]
     )
     return canonical or None
-
-
-def _attach_parsing_sidecar_outputs(
-    row: dict[str, Any],
-    *,
-    output_root: Path,
-    role: str,
-    answer_field: str,
-) -> None:
-    if row.get("task") != "parsing":
-        return
-
-    answer = str(row.get(answer_field) or "").strip()
-    raw_relative = Path("raw") / role / f"{row['id']}.txt"
-    json_relative = Path("json") / role / f"{row['id']}.json"
-    raw_path = output_root / raw_relative
-    json_path = output_root / json_relative
-    raw_path.parent.mkdir(parents=True, exist_ok=True)
-    json_path.parent.mkdir(parents=True, exist_ok=True)
-    raw_path.write_text(answer + ("\n" if answer else ""), encoding="utf-8")
-
-    parsed = parse_parsing_answer(answer)
-    payload = {
-        "source_file": str(raw_relative).replace("\\", "/"),
-        **parsed,
-    }
-    json_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-
-    prefix = "teacher" if role == "teacher" else "student"
-    row[f"{prefix}_raw_output_path"] = str(raw_relative).replace("\\", "/")
-    row[f"{prefix}_parsed_output_path"] = str(json_relative).replace("\\", "/")
-    row[f"{prefix}_parse_ok"] = bool(parsed["parse_ok"])
-    row[f"{prefix}_parse_error"] = parsed["parse_error"]
-    row[f"{prefix}_elements"] = parsed["elements"]
-    row[f"{prefix}_element_count"] = int(parsed["element_count"])
-    if not parsed["parse_ok"]:
-        print(
-            f"Warning: {prefix} parsing output did not parse cleanly for id={row.get('id')}: "
-            f"{parsed['parse_error']}"
-        )
 
 
 def _mock_answer_only_logits_payload(config: PipelineConfig, teacher_tokens: list[int], *, source: str) -> dict[str, Any]:
