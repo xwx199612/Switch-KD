@@ -478,7 +478,13 @@ def resolve_inference_image_dir(data: DataConfig) -> Path | None:
 
 
 def resolve_teacher_logits_path(data: DataConfig) -> Path:
-    return data.teacher_logits_path or resolve_label_path(data)
+    if data.teacher_logits_path is not None:
+        return data.teacher_logits_path
+
+    label_path = resolve_label_path(data)
+    suffix = "".join(label_path.suffixes) or ".jsonl"
+    stem = label_path.name[: -len(suffix)] if suffix else label_path.name
+    return label_path.with_name(f"{stem}_teacher_logits{suffix}")
 
 
 def resolve_switch_logits_path(data: DataConfig) -> Path:

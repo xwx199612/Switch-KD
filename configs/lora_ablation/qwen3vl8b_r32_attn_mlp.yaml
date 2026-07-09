@@ -17,11 +17,11 @@ data:
   training_manifest_path: outputs/lora_ablation/{task_name}_training_manifest.jsonl
   inference_manifest_path: outputs/lora_ablation/{task_name}_inference_manifest.jsonl
   distill_path: outputs/lora_ablation/{task_name}_switch_kd_{response_profile}.jsonl
-  # Canonical unified teacher output. Rows contain teacher_answer,
-  # teacher_tokens, and teacher_logits when distillation.teacher_logits=true.
+  # Canonical teacher label output. Keep this JSONL schema strict:
+  # id, image, task, query, teacher_answer, teacher_tokens, teacher_element_count.
   label_path: outputs/lora_ablation/{task_name}_teacher_labels_{label_profile}.jsonl
-  # Deprecated: teacher_logits_path is intentionally omitted from this workflow.
-  # Legacy configs may still set it, but switch-kd now reads teacher logits from label_path.
+  # Teacher logits are written to a separate sidecar artifact and merged by id during training.
+  teacher_logits_path: outputs/lora_ablation/{task_name}_teacher_logits_{label_profile}.jsonl
   switch_logits_path: outputs/lora_ablation/{task_name}_switch_logits_{response_profile}.jsonl
   eval_path: outputs/lora_ablation/{task_name}_switch_kd_{response_profile}.jsonl
   prediction_path: outputs/lora_ablation/{task_name}_switch_kd_{response_profile}/student_predictions.jsonl
@@ -93,8 +93,8 @@ training:
 
 distillation:
   method: switch_kd
-  # Unified teacher precompute: label writes teacher_answer, teacher_tokens,
-  # and answer-only teacher_logits together. Set false for answer/tokens only.
+  # When true, teacher-precompute writes cached teacher logits to teacher_logits_path,
+  # not to data.label_path.
   teacher_logits: true
   confidence_weighting: true
   min_teacher_confidence: 0.35

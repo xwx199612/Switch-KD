@@ -8,6 +8,7 @@ import mimetypes
 import os
 import re
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from io import BytesIO
 from dataclasses import asdict
@@ -19,6 +20,7 @@ from .config_schema import (
     PipelineConfig,
     format_prompt,
     resolve_label_path,
+    resolve_teacher_logits_path,
     resolve_training_manifest_path,
 )
 from .data_manifest import VlmSample, read_jsonl, validate_manifest
@@ -1170,6 +1172,15 @@ def _build_parsing_retry_prompt(sample: VlmSample) -> str:
 DistillationMode = Literal["response", "adaptive_topk", "switch_kd"]
 
 INACTIVE_LOGIT = -1.0e4
+STRICT_TEACHER_LABEL_KEYS = {
+    "id",
+    "image",
+    "task",
+    "query",
+    "teacher_answer",
+    "teacher_tokens",
+    "teacher_element_count",
+}
 
 
 @dataclass(frozen=True)
@@ -1570,26 +1581,58 @@ def create_teacher_precompute_dataset(config: PipelineConfig, samples: list[VlmS
         max_samples=config.data.max_samples,
     )
     output_path = resolve_label_path(config.data)
-    completed = _load_completed_teacher_rows(output_path, config=config, require_logits=require_logits)
+    logits_output_path = resolve_teacher_logits_path(config.data) if require_logits else None
+    if logits_output_path == output_path:
+        raise ValueError(
+            "Teacher label rows now use a strict schema and cannot share a file with teacher logits. "
+            "Set data.teacher_logits_path to a separate artifact path."
+        )
+
+    completed = _load_completed_teacher_rows(output_path, config=config, require_logits=False)
     if completed.invalid_count:
-        _rewrite_valid_teacher_rows(output_path, config=config, require_logits=require_logits)
-    completed_ids = completed.ids
-    pending_samples = [sample for sample in samples if sample.id not in completed_ids]
+        _rewrite_valid_teacher_rows(output_path, config=config, require_logits=False)
+
+    logits_completed = CompletedLogitsRows(ids=set(), valid_count=0, invalid_count=0, first_invalid_keys=None)
+    if require_logits and logits_output_path is not None:
+        logits_completed = _load_completed_ids(
+            logits_output_path,
+            field_name=config.distillation.teacher_logits_field,
+            require_logits=True,
+        )
+        if logits_completed.invalid_count:
+            _rewrite_valid_completed_rows(
+                logits_output_path,
+                field_name=config.distillation.teacher_logits_field,
+            )
+
+    pending_samples = [
+        sample
+        for sample in samples
+        if sample.id not in completed.ids or (require_logits and sample.id not in logits_completed.ids)
+    ]
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if logits_output_path is not None:
+        logits_output_path.parent.mkdir(parents=True, exist_ok=True)
 
     print("Unified teacher precompute:")
     print(f"  distillation.method: {_resolve_distillation_mode(config)}")
     print(f"  distillation.teacher_logits: {require_logits}")
     print(f"  label_path: {output_path}")
-    print("  teacher_logits_path: deprecated; canonical output is label_path")
-    print("  unified_output: single_path")
+    if logits_output_path is not None:
+        print(f"  teacher_logits_path: {logits_output_path}")
+    print("  unified_output: split_files")
     print(f"  total samples: {len(samples)}")
-    print(f"  valid completed rows: {completed.valid_count}")
-    print(f"  invalid stale rows: {completed.invalid_count}")
+    print(f"  valid completed label rows: {completed.valid_count}")
+    print(f"  invalid stale label rows: {completed.invalid_count}")
+    if require_logits:
+        print(f"  valid completed logits rows: {logits_completed.valid_count}")
+        print(f"  invalid stale logits rows: {logits_completed.invalid_count}")
     print(f"  pending rows: {len(pending_samples)}")
     if completed.first_invalid_keys:
-        print(f"  first invalid row id/reason: {completed.first_invalid_keys}")
+        print(f"  first invalid label row id/reason: {completed.first_invalid_keys}")
+    if require_logits and logits_completed.first_invalid_keys:
+        print(f"  first invalid logits row keys: {logits_completed.first_invalid_keys}")
 
     if not pending_samples:
         refresh_parsing_sidecar_reports(output_root=output_path.parent, role="teacher")
@@ -1604,37 +1647,56 @@ def create_teacher_precompute_dataset(config: PipelineConfig, samples: list[VlmS
 
     completed_now = 0
     with output_path.open("a", encoding="utf-8") as label_handle:
-        for sample in pending_samples:
-            started = time.perf_counter()
-            if isinstance(generator, TeacherLogitsGenerator):
-                generated = generator.generate_for_sample(sample, mode=mode)
-            else:
-                generated = _generate_label_with_optional_mock_logits(
-                    config,
-                    generator,
-                    sample,
-                    include_logits=require_logits,
+        with (
+            logits_output_path.open("a", encoding="utf-8")
+            if require_logits and logits_output_path is not None
+            else nullcontext()
+        ) as logits_handle:
+            for sample in pending_samples:
+                started = time.perf_counter()
+                needs_label = sample.id not in completed.ids
+                needs_logits = require_logits and sample.id not in logits_completed.ids
+                if isinstance(generator, TeacherLogitsGenerator):
+                    generated = generator.generate_for_sample(sample, mode=mode)
+                else:
+                    generated = _generate_label_with_optional_mock_logits(
+                        config,
+                        generator,
+                        sample,
+                        include_logits=require_logits,
+                    )
+
+                if needs_label:
+                    row = _build_teacher_output_row(sample, generated)
+                    attach_parsing_sidecar_outputs(
+                        row,
+                        output_root=output_path.parent,
+                        role="teacher",
+                        answer_field="teacher_answer",
+                    )
+                    encoded = json.dumps(row, ensure_ascii=False) + "\n"
+                    label_handle.write(encoded)
+                    label_handle.flush()
+
+                if needs_logits and logits_handle is not None:
+                    logits_row = _build_teacher_logits_output_row(
+                        sample,
+                        generated,
+                        field_name=config.distillation.teacher_logits_field,
+                    )
+                    _assert_teacher_logits_answer_length(logits_row, config.distillation.teacher_logits_field)
+                    logits_handle.write(json.dumps(logits_row, ensure_ascii=False) + "\n")
+                    logits_handle.flush()
+
+                completed_now += 1
+                elapsed = time.perf_counter() - started
+                print(
+                    "[teacher-precompute] "
+                    f"total={len(samples)} completed={len(samples) - (len(pending_samples) - completed_now)} "
+                    f"pending={len(pending_samples) - completed_now} id={sample.id} "
+                    f"label_written={needs_label} logits_written={needs_logits} "
+                    f"elapsed_seconds_per_sample={elapsed:.2f}"
                 )
-            row = _build_teacher_output_row(sample, generated)
-            attach_parsing_sidecar_outputs(
-                row,
-                output_root=output_path.parent,
-                role="teacher",
-                answer_field="teacher_answer",
-            )
-            if require_logits:
-                _assert_teacher_logits_answer_length(row, config.distillation.teacher_logits_field)
-            encoded = json.dumps(row, ensure_ascii=False) + "\n"
-            label_handle.write(encoded)
-            label_handle.flush()
-            completed_now += 1
-            elapsed = time.perf_counter() - started
-            print(
-                "[teacher-precompute] "
-                f"total={len(samples)} completed={len(completed_ids) + completed_now} "
-                f"pending={len(pending_samples) - completed_now} id={sample.id} "
-                f"elapsed_seconds_per_sample={elapsed:.2f}"
-            )
     refresh_parsing_sidecar_reports(output_root=output_path.parent, role="teacher")
     return output_path
 
@@ -1653,10 +1715,19 @@ def _base_output_row(sample: VlmSample) -> dict[str, Any]:
 
 
 def _build_teacher_output_row(sample: VlmSample, generated: dict[str, Any]) -> dict[str, Any]:
-    allowed_prefixes = (
-        "teacher_logits",
-        "switch_logits",
-    )
+    return {
+        **_base_output_row(sample),
+        "teacher_answer": str(generated["teacher_answer"]),
+        "teacher_tokens": [int(token_id) for token_id in generated.get("teacher_tokens", [])],
+    }
+
+
+def _build_teacher_logits_output_row(
+    sample: VlmSample,
+    generated: dict[str, Any],
+    *,
+    field_name: str,
+) -> dict[str, Any]:
     row: dict[str, Any] = {
         **_base_output_row(sample),
         "teacher_answer": str(generated["teacher_answer"]),
@@ -1665,7 +1736,7 @@ def _build_teacher_output_row(sample: VlmSample, generated: dict[str, Any]) -> d
     for key, value in generated.items():
         if key in row:
             continue
-        if key.startswith(allowed_prefixes):
+        if key.startswith(field_name):
             row[key] = value
     return row
 
@@ -1857,7 +1928,7 @@ def _assert_teacher_logits_answer_length(row: dict[str, Any], field_name: str) -
     from .teacher_validation import validate_teacher_row
     valid, reason = validate_teacher_row(row, require_teacher_logits=True, logits_field=field_name)
     if not valid:
-        raise ValueError(f"Unified teacher row failed validation id={row.get('id')}: {reason}")
+        raise ValueError(f"Teacher logits sidecar row failed validation id={row.get('id')}: {reason}")
 
 
 def _load_completed_teacher_rows(
@@ -1866,7 +1937,7 @@ def _load_completed_teacher_rows(
     config: PipelineConfig,
     require_logits: bool,
 ) -> CompletedLogitsRows:
-    from .teacher_validation import build_teacher_token_decoder, validate_teacher_row
+    from .teacher_validation import build_teacher_token_decoder
     if not path.exists():
         return CompletedLogitsRows(ids=set(), valid_count=0, invalid_count=0, first_invalid_keys=None)
     completed_ids: set[str] = set()
@@ -1878,7 +1949,7 @@ def _load_completed_teacher_rows(
         sample_id = row.get("id")
         if sample_id is None:
             continue
-        valid, reason = validate_teacher_row(
+        valid, reason = _validate_teacher_label_row(
             row,
             require_teacher_logits=require_logits,
             decode_tokens=decoder,
@@ -1899,11 +1970,11 @@ def _load_completed_teacher_rows(
 
 
 def _rewrite_valid_teacher_rows(path: Path, *, config: PipelineConfig, require_logits: bool) -> None:
-    from .teacher_validation import build_teacher_token_decoder, validate_teacher_row
+    from .teacher_validation import build_teacher_token_decoder
     decoder = build_teacher_token_decoder(config)
     valid_rows = [
         row for row in read_jsonl(path)
-        if validate_teacher_row(
+        if _validate_teacher_label_row(
             row,
             require_teacher_logits=require_logits,
             decode_tokens=decoder,
@@ -1969,6 +2040,34 @@ def _is_valid_logits_row(row: dict[str, Any], field_name: str) -> bool:
     if not indices_shape or not values_shape:
         return False
     return indices_shape == values_shape
+
+
+def _validate_teacher_label_row(
+    row: dict[str, Any],
+    *,
+    require_teacher_logits: bool,
+    decode_tokens,
+) -> tuple[bool, str | None]:
+    from .teacher_validation import validate_teacher_row
+
+    valid, reason = validate_teacher_row(
+        row,
+        require_teacher_logits=require_teacher_logits,
+        decode_tokens=decode_tokens,
+    )
+    if not valid:
+        return valid, reason
+
+    if str(row.get("task") or "").strip() == "parsing":
+        row_keys = set(row.keys())
+        if row_keys != STRICT_TEACHER_LABEL_KEYS:
+            return (
+                False,
+                "teacher label row keys do not match strict parsing schema: "
+                f"expected={sorted(STRICT_TEACHER_LABEL_KEYS)} actual={sorted(row_keys)}",
+            )
+
+    return True, None
 
 
 def _nested_shape(value: Any) -> tuple[int, ...]:

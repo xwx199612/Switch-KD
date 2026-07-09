@@ -1184,10 +1184,10 @@ def _load_switch_base_rows(config: PipelineConfig) -> list[dict[str, Any]]:
 def _validate_unified_teacher_base_row(row: dict[str, Any], *, require_logits: bool) -> None:
     from .teacher_validation import validate_teacher_row
 
-    valid, reason = validate_teacher_row(row, require_teacher_logits=require_logits)
+    valid, reason = validate_teacher_row(row, require_teacher_logits=False)
     if not valid:
         raise ValueError(
-            "Switch logits generation requires a schema-valid unified teacher row "
+            "Switch logits generation requires a schema-valid teacher label row "
             f"from data.label_path. id={row.get('id')}, reason={reason}, row_keys={sorted(row.keys())}"
         )
 

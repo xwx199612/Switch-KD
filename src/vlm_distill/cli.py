@@ -11,6 +11,7 @@ from .config_schema import (
     resolve_inference_manifest_path,
     resolve_label_path,
     resolve_prediction_path,
+    resolve_teacher_logits_path,
     resolve_switch_logits_path,
     resolve_training_manifest_path,
 )
@@ -135,7 +136,10 @@ def main() -> None:
 
     if args.command == "validate-teacher":
         decoder = teacher_validation.build_teacher_token_decoder(config)
-        require_logits = bool(config.distillation.teacher_logits)
+        require_logits = (
+            bool(config.distillation.teacher_logits)
+            and resolve_teacher_logits_path(config.data) == resolve_label_path(config.data)
+        )
         if decoder is None:
             raise RuntimeError(
                 "Teacher tokenizer unavailable; cannot validate teacher_tokens."

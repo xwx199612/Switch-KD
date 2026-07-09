@@ -10,6 +10,7 @@ from .config_schema import (
     PipelineConfig,
     format_prompt,
     resolve_label_path,
+    resolve_teacher_logits_path,
     resolve_switch_logits_path,
 )
 from .data_manifest import read_jsonl
@@ -1211,6 +1212,8 @@ def _print_training_row_summary(config: PipelineConfig, rows: list[dict[str, Any
         path_rows = read_jsonl(path) if exists else []
         first_keys = sorted(path_rows[0].keys()) if path_rows else None
         label = "label_path"
+        if path == resolve_teacher_logits_path(config.data):
+            label = "teacher_logits_path"
         if path == resolve_switch_logits_path(config.data):
             label = "switch_logits_path"
         print(
@@ -1234,6 +1237,7 @@ def _print_training_row_summary(config: PipelineConfig, rows: list[dict[str, Any
 def _training_data_paths(config: PipelineConfig) -> list[Path]:
     candidates = [
         resolve_label_path(config.data),
+        resolve_teacher_logits_path(config.data),
         resolve_switch_logits_path(config.data),
     ]
     ordered: list[Path] = []
