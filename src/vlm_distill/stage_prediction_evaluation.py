@@ -68,9 +68,11 @@ def evaluate_predictions(config: PipelineConfig) -> Path:
             pred_json = _parsing_eval_payload(row, prefix="student", answer_field="student_answer")
             target_json = _parsing_eval_target_payload(target_row)
             precision, recall, f1 = element_f1(pred_json, target_json)
+            parse_ok = float(pred_json is not None)
             item.update(
                 {
-                    "valid_json": float(pred_json is not None),
+                    "valid_json": parse_ok,
+                    "parse_ok": parse_ok,
                     "element_precision": precision,
                     "element_recall": recall,
                     "element_f1": f1,
@@ -86,6 +88,7 @@ def evaluate_predictions(config: PipelineConfig) -> Path:
         "exact_match": _mean(item["exact_match"] for item in predictions),
         "token_f1": _mean(item["token_f1"] for item in predictions),
         "valid_json_rate": _mean(item.get("valid_json", 1.0) for item in predictions),
+        "parse_ok_rate": _mean(item.get("parse_ok", 1.0) for item in predictions),
         "mean_iou": _mean(item.get("bbox_iou", 0.0) for item in predictions if item.get("task") == "grounding"),
         "accuracy_iou_50": _mean(item.get("iou_50", 0.0) for item in predictions if item.get("task") == "grounding"),
         "label_match_rate": _mean(item.get("label_match", 0.0) for item in predictions if item.get("task") == "grounding"),
