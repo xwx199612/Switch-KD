@@ -102,16 +102,16 @@ distillation:
     Do not use markdown.
 
     Use this schema:
-    {
+    {{
       "elements": [
-        {
+        {{
           "text": "...",
           "bbox_norm": [x1, y1, x2, y2],
           "focused": false
-        }
+        }}
       ],
       "coordinate_system": "normalized_0_1000"
-    }
+    }}
 
     Rules:
     - Do not include type.
