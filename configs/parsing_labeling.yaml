@@ -94,7 +94,8 @@ distillation:
           "bbox_norm": [x1, y1, x2, y2],
           "focused": true
         }}
-      ]
+      ],
+      "coordinate_system": "normalized_0_1000"
     }}
 
 evaluation:

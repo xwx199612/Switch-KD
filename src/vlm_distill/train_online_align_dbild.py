@@ -287,12 +287,17 @@ class OnlineAlignDataset(VlmTrainingDataset):
         item["prompt_token_len"] = encoded.prompt_token_len
         if not self._token_identity_debug_printed:
             student_supervised_label_count = int((item["labels"] != -100).sum().item())
-            cached_teacher_tokens = row.get("teacher_tokens")
-            cached_teacher_tokens_len = len(cached_teacher_tokens) if cached_teacher_tokens is not None else 0
+            runtime_target_token_count = len(
+                self.processor.tokenizer(
+                    target,
+                    add_special_tokens=False,
+                    return_attention_mask=False,
+                )["input_ids"]
+            )
             print("Online DBiLD first sample label debug:")
             print(f"  sample_id={row['id']}")
             print(f"  student_supervised_label_count={student_supervised_label_count}")
-            print(f"  cached_teacher_tokens_len={cached_teacher_tokens_len}")
+            print(f"  runtime_target_token_count={runtime_target_token_count}")
             print("  note=startup validation enforces target_text/tokenizer identity before training")
             self._token_identity_debug_printed = True
         item["sample_id"] = str(row["id"])

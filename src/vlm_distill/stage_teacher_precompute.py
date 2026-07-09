@@ -896,11 +896,12 @@ def create_teacher_precompute_dataset(config: PipelineConfig, samples: list[VlmS
 
             completed_now += 1
             elapsed = time.perf_counter() - started
+            label_written = row is not None
             print(
                 "[teacher-precompute] "
                 f"total={len(samples)} completed={len(samples) - (len(pending_samples) - completed_now)} "
                 f"pending={len(pending_samples) - completed_now} id={sample.id} "
-                f"label_written=True elapsed_seconds_per_sample={elapsed:.2f}"
+                f"label_written={label_written} elapsed_seconds_per_sample={elapsed:.2f}"
             )
     refresh_parsing_sidecar_reports(output_root=output_path.parent, role="teacher")
     return output_path
