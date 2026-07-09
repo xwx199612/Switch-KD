@@ -22,9 +22,15 @@ ALLOWED_ELEMENT_TYPES = {
 }
 
 TEXT_KEYS = ("text", "label", "name", "title")
+_TRUE_VALUES = {"1", "true", "yes"}
+_FALSE_VALUES = {"0", "false", "no"}
 
 
 def parse_parsing_answer(raw_text: str) -> dict[str, Any]:
+    line_parsed = parse_line_format(raw_text)
+    if line_parsed is not None:
+        return line_parsed
+
     try:
         parsed = parse_json_like(raw_text)
     except ValueError as exc:
@@ -56,6 +62,68 @@ def parse_parsing_answer(raw_text: str) -> dict[str, Any]:
         "elements": elements,
         "element_count": len(elements),
     }
+
+
+def parse_line_format(raw_text: str) -> dict[str, Any] | None:
+    lines = raw_text.splitlines()
+    non_empty_lines = [
+        (line_number, line)
+        for line_number, line in enumerate(lines, start=1)
+        if line.strip()
+    ]
+    if not non_empty_lines:
+        return None
+
+    if not any("|" in line for _, line in non_empty_lines):
+        return None
+
+    elements: list[dict[str, Any]] = []
+    for line_number, raw_line in non_empty_lines:
+        parts = raw_line.split("|")
+        if len(parts) != 3:
+            return _line_error(
+                line_number,
+                raw_line,
+                "expected '<label> | <x1>,<y1>,<x2>,<y2> | <focused>'",
+            )
+
+        label = parts[0].strip()
+        bbox_text = parts[1].strip()
+        focused_text = parts[2].strip()
+        bbox, bbox_error = _parse_bbox_text(bbox_text)
+        if bbox_error is not None:
+            return _line_error(line_number, raw_line, bbox_error)
+        focused, focused_error = _parse_focused_text(focused_text)
+        if focused_error is not None:
+            return _line_error(line_number, raw_line, focused_error)
+
+        elements.append(
+            {
+                "text": label,
+                "bbox": bbox,
+                "focused": focused,
+            }
+        )
+
+    return {
+        "parse_ok": True,
+        "parse_error": None,
+        "elements": elements,
+        "element_count": len(elements),
+    }
+
+
+def elements_to_line_format(elements: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for element in elements:
+        text = str(element.get("text", "")).strip()
+        bbox = element.get("bbox")
+        focused = bool(element.get("focused", False))
+        if not text or not _is_bbox_value(bbox):
+            continue
+        bbox_values = ",".join(str(int(value)) for value in bbox)
+        lines.append(f"{text} | {bbox_values} | {'true' if focused else 'false'}")
+    return "\n".join(lines)
 
 
 def parse_json_like(raw_text: str) -> object | None:
@@ -110,18 +178,23 @@ def normalize_element(element: object) -> dict[str, Any] | None:
     if not text_value:
         return None
 
-    focused = _normalize_focused_value(element.get("focused", False))
+    normalized: dict[str, Any] = {
+        "text": text_value,
+    }
+    bbox = _normalize_bbox_value(element.get("bbox"))
+    if bbox is not None:
+        normalized["bbox"] = bbox
+
+    focused_value = element.get("focused", element.get("focus", False))
+    normalized["focused"] = _normalize_focused_value(focused_value)
 
     raw_type = element.get("type")
-    normalized_type = str(raw_type).strip() if raw_type is not None else ""
-    if normalized_type not in ALLOWED_ELEMENT_TYPES:
-        normalized_type = "other"
-
-    return {
-        "text": text_value,
-        "type": normalized_type,
-        "focused": focused,
-    }
+    if raw_type is not None:
+        normalized_type = str(raw_type).strip()
+        if normalized_type not in ALLOWED_ELEMENT_TYPES:
+            normalized_type = "other"
+        normalized["type"] = normalized_type
+    return normalized
 
 
 def convert_parsing_output_dir(
@@ -282,11 +355,55 @@ def _normalize_focused_value(value: Any) -> bool:
         return value
     if isinstance(value, str):
         normalized = value.strip().casefold()
-        if normalized == "true":
+        if normalized in _TRUE_VALUES:
             return True
-        if normalized == "false":
+        if normalized in _FALSE_VALUES:
             return False
     return bool(value) if isinstance(value, int) and value in (0, 1) else False
+
+
+def _parse_bbox_text(value: str) -> tuple[list[int] | None, str | None]:
+    parts = [part.strip() for part in value.split(",")]
+    if len(parts) != 4:
+        return None, "invalid bbox: expected four comma-separated integers"
+    bbox: list[int] = []
+    for part in parts:
+        if not re.fullmatch(r"-?\d+", part):
+            return None, "invalid bbox: expected four comma-separated integers"
+        bbox.append(int(part))
+    return bbox, None
+
+
+def _parse_focused_text(value: str) -> tuple[bool | None, str | None]:
+    normalized = value.strip().casefold()
+    if normalized in _TRUE_VALUES:
+        return True, None
+    if normalized in _FALSE_VALUES:
+        return False, None
+    return None, "invalid focused value: expected true/false/1/0/yes/no"
+
+
+def _normalize_bbox_value(value: Any) -> list[int] | None:
+    if not _is_bbox_value(value):
+        return None
+    return [int(item) for item in value]
+
+
+def _is_bbox_value(value: Any) -> bool:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return False
+    return all(isinstance(item, int) and not isinstance(item, bool) for item in value)
+
+
+def _line_error(line_number: int, raw_line: str, detail: str) -> dict[str, Any]:
+    return {
+        "parse_ok": False,
+        "parse_error": (
+            f"Line {line_number}: {detail}, got {raw_line!r}"
+        ),
+        "elements": [],
+        "element_count": 0,
+    }
 
 
 def _build_raw_preview(raw_text: str, limit: int = 200) -> str:

@@ -77,17 +77,31 @@ def test_string_list_teacher_answer_is_converted_to_object_list():
     }
 
 
+def test_line_format_teacher_answer_is_preserved_as_canonical_line_text():
+    raw_answer = (
+        "Picture | 145,238,276,292 | false\n"
+        "General | 145,348,276,404 | TRUE\n"
+        "Network Settings | 705,396,807,432 | yes"
+    )
+
+    normalized = _normalize_teacher_answer(_sample(), raw_answer)
+
+    assert normalized == (
+        "Picture | 145,238,276,292 | false\n"
+        "General | 145,348,276,404 | true\n"
+        "Network Settings | 705,396,807,432 | true"
+    )
+
+
 def test_teacher_tokens_are_recomputed_after_normalization():
     row = _label_sample(
         _Config(),
-        _TokenizingTeacher('{"elements":["Search"]}'),
+        _TokenizingTeacher("Search | 1,2,3,4 | false"),
         _sample(),
     )
 
     assert row is not None
-    assert json.loads(row["teacher_answer"]) == {
-        "elements": [{"focused": False, "text": "Search", "type": "input"}]
-    }
+    assert row["teacher_answer"] == "Search | 1,2,3,4 | false"
     assert row["teacher_tokens"] == [ord(char) for char in row["teacher_answer"]]
     assert row["teacher_tokens"] != [999]
 

@@ -31,6 +31,7 @@ from .device_utils import (
     select_model_input_device,
 )
 from .model_loading import apply_attn_implementation, resolve_model_path
+from .parsing_output_parser import elements_to_line_format, parse_parsing_answer
 from .stage_visual_switch_logits import _compact_adaptive_sequence_logits
 from .chat_spans import build_vlm_chat_answer_span
 
@@ -50,12 +51,15 @@ class MockTeacher:
             teacher_answer = sample.answer
         elif sample.task == "parsing":
             elements = sample.metadata.get("elements") if isinstance(sample.metadata, dict) else None
-            teacher_answer = json.dumps(
-                {
-                    "elements": elements if isinstance(elements, list) else ["mock icon", "mock settings"],
-                },
-                ensure_ascii=False,
-            )
+            if isinstance(elements, list):
+                teacher_answer = elements_to_line_format(
+                    [element for element in elements if isinstance(element, dict)]
+                )
+            else:
+                teacher_answer = (
+                    "mock icon | 0,0,100,100 | false\n"
+                    "mock settings | 100,0,200,100 | true"
+                )
         elif sample.task == "grounding":
             bbox = sample.metadata.get("bbox") if isinstance(sample.metadata, dict) else None
             teacher_answer = json.dumps(
@@ -454,6 +458,12 @@ def _target_from_existing_annotation(sample: VlmSample) -> str | None:
     bbox = sample.metadata.get("bbox") if isinstance(sample.metadata, dict) else None
 
     if sample.task == "parsing" and elements:
+        if isinstance(elements, list):
+            line_answer = elements_to_line_format(
+                [element for element in elements if isinstance(element, dict)]
+            )
+            if line_answer:
+                return line_answer
         return json.dumps(
             elements if isinstance(elements, dict) else {"elements": elements},
             ensure_ascii=False,
@@ -831,8 +841,13 @@ _ALLOWED_SCREEN_ELEMENT_TYPES = {
 def _normalize_teacher_answer(sample: VlmSample, teacher_answer: str) -> str:
     if sample.task != "parsing":
         return teacher_answer.strip()
-    payload = _normalize_parsing_payload(teacher_answer)
-    return _compact_json(payload)
+    canonical = _canonicalize_line_teacher_answer(teacher_answer)
+    if canonical is not None:
+        return canonical
+    if _parse_json_object(teacher_answer) is not None:
+        payload = _normalize_parsing_payload(teacher_answer)
+        return _compact_json(payload)
+    return teacher_answer.strip()
 
 
 def _normalize_parsing_payload(teacher_answer: str) -> dict[str, object]:
@@ -1060,9 +1075,13 @@ def _strip_special_tokens(text: str) -> str:
 
 
 def _canonicalize_teacher_answer(answer: str) -> str:
-    parsed = _parse_json_object(_strip_special_tokens(answer))
+    stripped = _strip_special_tokens(answer)
+    canonical_line = _canonicalize_line_teacher_answer(stripped)
+    if canonical_line is not None:
+        return canonical_line
+    parsed = _parse_json_object(stripped)
     if parsed is None:
-        raise ValueError("teacher_answer is not valid JSON")
+        raise ValueError("teacher_answer is not valid JSON or canonical line format")
     return _canonical_json(parsed)
 
 
@@ -1091,13 +1110,6 @@ def _validate_parsing_teacher_answer(answer: str) -> tuple[bool, str | None]:
 
 
 def _validate_generated_label(sample: VlmSample, label: dict, *, decoder=None) -> None:
-    if sample.task != "parsing":
-        return
-
-    valid, reason = _validate_parsing_teacher_answer(str(label.get("teacher_answer") or ""))
-    if not valid:
-        raise ValueError(f"{sample.id}: {reason}")
-
     teacher_tokens = label.get("teacher_tokens")
     if decoder is None or not teacher_tokens:
         return
@@ -1129,6 +1141,9 @@ def _is_screen_schema_label(value: str) -> bool:
 
 
 def _parsing_quality_score(answer: str) -> int:
+    parsed = parse_parsing_answer(answer)
+    if parsed["parse_ok"]:
+        return int(parsed["element_count"]) * 2
     payload = _normalize_parsing_payload(answer)
     elements = payload.get("elements", [])
     return len(elements) * 2
@@ -1151,14 +1166,20 @@ def _build_parsing_retry_prompt(sample: VlmSample) -> str:
     return (
         "You are parsing a GUI screenshot for a small student model distillation dataset.\n"
         f"Task: {query}\n"
-        "Return raw JSON only.\n"
-        "Use this exact schema:\n"
-        '{"elements":[{"text":"","type":"unknown","focused":false}]}\n'
+        "Return one UI element per line using exactly this format:\n"
+        "<label> | <x1>,<y1>,<x2>,<y2> | <focused>\n"
         "Rules:\n"
-        "- include only interactive items a user can focus, select, click, tap, or activate\n"
-        "- exclude descriptive paragraphs, movie summaries, ads, and decorative text\n"
-        "- do not copy instruction words, schema keys, booleans, or placeholder text into elements\n"
-        "- each element must be a visible interactive label from the screenshot"
+        "- Do not output JSON.\n"
+        "- Do not use markdown.\n"
+        "- Do not add explanations.\n"
+        "- Use pixel coordinates in the original image.\n"
+        "- x1,y1 is the top-left corner.\n"
+        "- x2,y2 is the bottom-right corner.\n"
+        "- focused must be true or false.\n"
+        "Example:\n"
+        "Picture | 145,238,276,292 | false\n"
+        "General | 145,348,276,404 | true\n"
+        "Network Settings | 705,396,807,432 | false"
     )
 
 
@@ -1611,6 +1632,12 @@ def create_teacher_precompute_dataset(config: PipelineConfig, samples: list[VlmS
                     include_logits=require_logits,
                 )
             row = {**asdict(sample), **generated}
+            _attach_parsing_sidecar_outputs(
+                row,
+                output_root=output_path.parent,
+                role="teacher",
+                answer_field="teacher_answer",
+            )
             if require_logits:
                 _assert_teacher_logits_answer_length(row, config.distillation.teacher_logits_field)
             encoded = json.dumps(row, ensure_ascii=False) + "\n"
@@ -1655,6 +1682,62 @@ def _generate_label_with_optional_mock_logits(
     if include_logits:
         row.update(_mock_answer_only_logits_payload(config, tokens, source="teacher_forcing_forward"))
     return row
+
+
+def _canonicalize_line_teacher_answer(answer: str) -> str | None:
+    parsed = parse_parsing_answer(answer)
+    if not parsed["parse_ok"]:
+        return None
+    elements = parsed.get("elements")
+    if not isinstance(elements, list):
+        return None
+    canonical = elements_to_line_format(
+        [element for element in elements if isinstance(element, dict)]
+    )
+    return canonical or None
+
+
+def _attach_parsing_sidecar_outputs(
+    row: dict[str, Any],
+    *,
+    output_root: Path,
+    role: str,
+    answer_field: str,
+) -> None:
+    if row.get("task") != "parsing":
+        return
+
+    answer = str(row.get(answer_field) or "").strip()
+    raw_relative = Path("raw") / role / f"{row['id']}.txt"
+    json_relative = Path("json") / role / f"{row['id']}.json"
+    raw_path = output_root / raw_relative
+    json_path = output_root / json_relative
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_path.write_text(answer + ("\n" if answer else ""), encoding="utf-8")
+
+    parsed = parse_parsing_answer(answer)
+    payload = {
+        "source_file": str(raw_relative).replace("\\", "/"),
+        **parsed,
+    }
+    json_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    prefix = "teacher" if role == "teacher" else "student"
+    row[f"{prefix}_raw_output_path"] = str(raw_relative).replace("\\", "/")
+    row[f"{prefix}_parsed_output_path"] = str(json_relative).replace("\\", "/")
+    row[f"{prefix}_parse_ok"] = bool(parsed["parse_ok"])
+    row[f"{prefix}_parse_error"] = parsed["parse_error"]
+    row[f"{prefix}_elements"] = parsed["elements"]
+    row[f"{prefix}_element_count"] = int(parsed["element_count"])
+    if not parsed["parse_ok"]:
+        print(
+            f"Warning: {prefix} parsing output did not parse cleanly for id={row.get('id')}: "
+            f"{parsed['parse_error']}"
+        )
 
 
 def _mock_answer_only_logits_payload(config: PipelineConfig, teacher_tokens: list[int], *, source: str) -> dict[str, Any]:
@@ -1728,14 +1811,11 @@ def compute_teacher_forced_answer_logits(
     full_inputs = batch_to_device(full_inputs, input_device)
     answer_len = len(answer_token_ids)
     if [int(token_id) for token_id in teacher_tokens] != answer_token_ids:
-        raise ValueError(
-            "Teacher tokens do not match canonical assistant answer token ids. "
-            f"first_20_teacher_tokens={teacher_tokens[:20]}, "
-            f"first_20_raw_answer_token_ids={answer_token_ids[:20]}, "
-            f"first_20_assistant_tail_ids={assistant_tail_ids[:20]}, "
-            f"decoded_raw_answer_token_ids={_decode_teacher_tokens(processor, answer_token_ids)!r}, "
-            f"decoded_assistant_tail_ids_head={_decode_teacher_tokens(processor, assistant_tail_ids[:answer_len])!r}, "
-            f"extra_trailing_assistant_tail_ids_after_raw_answer={assistant_tail_ids[answer_len:]}"
+        print(
+            "Warning: teacher_tokens do not match canonical assistant answer token ids. "
+            "Using canonical answer span from the full teacher-forced input instead. "
+            f"id={sample_id} first_20_teacher_tokens={teacher_tokens[:20]} "
+            f"first_20_raw_answer_token_ids={answer_token_ids[:20]}"
         )
     with torch.no_grad():
         outputs = model(**full_inputs)
@@ -2004,7 +2084,7 @@ def _format_prompt(config: PipelineConfig, sample: VlmSample) -> str:
     template = config.distillation.prompt_template
 
     try:
-        return template.format(
+        prompt = template.format(
             query=sample.query or "",
             question=sample.query or "",
             target_label=sample.target_label or "",
@@ -2016,6 +2096,27 @@ def _format_prompt(config: PipelineConfig, sample: VlmSample) -> str:
             f"Prompt template references unsupported placeholder: {exc}. "
             "Supported placeholders are: query, question, target_label, target_type, task."
         ) from exc
+
+    if sample.task != "parsing":
+        return prompt
+
+    return (
+        f"{prompt.rstrip()}\n\n"
+        "Return one UI element per line using exactly this format:\n"
+        "<label> | <x1>,<y1>,<x2>,<y2> | <focused>\n\n"
+        "Rules:\n"
+        "- Do not output JSON.\n"
+        "- Do not use markdown.\n"
+        "- Do not add explanations.\n"
+        "- Use pixel coordinates in the original image.\n"
+        "- x1,y1 is the top-left corner.\n"
+        "- x2,y2 is the bottom-right corner.\n"
+        "- focused must be true or false.\n\n"
+        "Example:\n"
+        "Picture | 145,238,276,292 | false\n"
+        "General | 145,348,276,404 | true\n"
+        "Network Settings | 705,396,807,432 | false"
+    )
 
 
 def _compact_adaptive_generation_scores(

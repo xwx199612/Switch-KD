@@ -42,6 +42,7 @@ def test_create_student_predictions_writes_mock_predictions(tmp_path: Path):
 
     config = PipelineConfig(
         data=DataConfig(
+            training_manifest_path=manifest,
             manifest_path=manifest,
             distill_path=tmp_path / "distill.jsonl",
             prediction_path=tmp_path / "predictions.jsonl",
@@ -91,6 +92,7 @@ def test_evaluate_predictions_scores_against_eval_labels(tmp_path: Path):
 
     config = PipelineConfig(
         data=DataConfig(
+            training_manifest_path=tmp_path / "manifest.jsonl",
             manifest_path=tmp_path / "manifest.jsonl",
             distill_path=tmp_path / "distill.jsonl",
             prediction_path=prediction_path,
@@ -107,3 +109,42 @@ def test_evaluate_predictions_scores_against_eval_labels(tmp_path: Path):
     assert report["metrics"]["num_predictions"] == 1
     assert report["metrics"]["num_scored_samples"] == 1
     assert report["metrics"]["exact_match"] == 1.0
+
+
+def test_create_student_predictions_writes_parsing_sidecars(tmp_path: Path):
+    image_root = tmp_path / "images"
+    _make_image(image_root / "sample.jpg")
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(
+        json.dumps(
+            {
+                "id": "parsing-000001",
+                "image": "sample.jpg",
+                "task": "parsing",
+                "query": "List all visible UI elements.",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = PipelineConfig(
+        data=DataConfig(
+            training_manifest_path=manifest,
+            manifest_path=manifest,
+            distill_path=tmp_path / "distill.jsonl",
+            prediction_path=tmp_path / "predictions.jsonl",
+            image_root=image_root,
+        ),
+        teacher=TeacherConfig(model_name="mock-teacher"),
+        student=StudentConfig(model_name="mock-student", output_dir=tmp_path / "out", adapter_dir=tmp_path / "adapter"),
+    )
+
+    samples = validate_manifest(manifest, image_root=image_root)
+    output_path = create_student_predictions(config, samples)
+    rows = read_jsonl(output_path)
+
+    assert rows[0]["student_raw_output_path"] == "raw/student/parsing-000001.txt"
+    assert rows[0]["student_parsed_output_path"] == "json/student/parsing-000001.json"
+    assert rows[0]["student_parse_ok"] is True
+    assert rows[0]["student_element_count"] == 2

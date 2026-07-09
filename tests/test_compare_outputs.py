@@ -9,7 +9,11 @@ def test_build_teacher_student_unique_rows_reports_counts_and_contents():
             "id": "parsing-000001",
             "image": "a.png",
             "task": "parsing",
-            "teacher_answer": '{"elements":["Home","Search","YouTube"]}',
+            "teacher_answer": (
+                "Home | 0,0,10,10 | true\n"
+                "Search | 10,0,20,10 | false\n"
+                "YouTube | 20,0,30,10 | false"
+            ),
         }
     ]
     student_rows = [
@@ -17,7 +21,10 @@ def test_build_teacher_student_unique_rows_reports_counts_and_contents():
             "id": "parsing-000001",
             "image": "a.png",
             "task": "parsing",
-            "student_answer": '{"elements":["Home","Netflix"]}',
+            "student_answer": (
+                "Home | 0,0,10,10 | true\n"
+                "Netflix | 30,0,40,10 | false"
+            ),
         }
     ]
 

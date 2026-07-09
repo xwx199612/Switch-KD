@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from PIL import Image
+import torch
 import vlm_distill.stage_teacher_precompute as stage_teacher_precompute
 
 from vlm_distill.config_schema import (
@@ -83,7 +84,11 @@ def test_grounding_manifest_requires_target_label(tmp_path: Path):
 
 def test_grounding_prompt_formats_target_label(tmp_path: Path):
     config = PipelineConfig(
-        data=DataConfig(manifest_path=tmp_path / "manifest.jsonl", distill_path=tmp_path / "distill.jsonl"),
+        data=DataConfig(
+            training_manifest_path=tmp_path / "manifest.jsonl",
+            manifest_path=tmp_path / "manifest.jsonl",
+            distill_path=tmp_path / "distill.jsonl",
+        ),
         teacher=TeacherConfig(model_name="mock-teacher"),
         student=StudentConfig(model_name="mock-student", output_dir=tmp_path / "out", adapter_dir=tmp_path / "adapter"),
         distillation=DistillationConfig(prompt_template="Target label: {target_label}\nTask: {task}"),
@@ -222,6 +227,7 @@ student:
 def test_teacher_logits_command_uses_adaptive_topk_for_switch_kd_config(tmp_path: Path):
     config = PipelineConfig(
         data=DataConfig(
+            training_manifest_path=tmp_path / "manifest.jsonl",
             manifest_path=tmp_path / "manifest.jsonl",
             distill_path=tmp_path / "distill.jsonl",
         ),
@@ -280,6 +286,7 @@ def test_teacher_precompute_switch_kd_mock_writes_logits_dict_to_label_path(tmp_
     output_path = tmp_path / "labels.jsonl"
     config = PipelineConfig(
         data=DataConfig(
+            training_manifest_path=manifest,
             manifest_path=manifest,
             distill_path=tmp_path / "distill.jsonl",
             label_path=output_path,
@@ -356,6 +363,7 @@ def test_teacher_logits_uses_teacher_resize_setting(tmp_path: Path, monkeypatch)
 
     config = PipelineConfig(
         data=DataConfig(
+            training_manifest_path=tmp_path / "manifest.jsonl",
             manifest_path=tmp_path / "manifest.jsonl",
             distill_path=tmp_path / "distill.jsonl",
             image_root=image_root,
@@ -393,9 +401,15 @@ def test_teacher_logits_uses_teacher_resize_setting(tmp_path: Path, monkeypatch)
             return [[4]]
 
     class DummyProcessor:
-        def __call__(self, text, return_tensors=None):
-            del return_tensors
-            return {"input_ids": [[ord(char) for char in text[0]]]}
+        tokenizer = None
+
+        def __call__(self, text, images=None, return_tensors=None, add_special_tokens=False):
+            del images, return_tensors, add_special_tokens
+            if isinstance(text, str):
+                return {"input_ids": [ord(char) for char in text]}
+            return {"input_ids": torch.tensor([[ord(char) for char in text[0]]], dtype=torch.long)}
+
+    DummyProcessor.tokenizer = DummyProcessor()
 
     def fake_load_teacher_image(path: Path, resize_mode: str):
         captured["path"] = str(path)

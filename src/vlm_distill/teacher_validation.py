@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .data_manifest import read_jsonl
+from .parsing_output_parser import parse_parsing_answer
 from .stage_teacher_precompute import (
     _canonicalize_teacher_answer,
     _parse_json_object,
@@ -195,20 +196,28 @@ def _analyze_teacher_row(
         return _report(False, "teacher_tokens missing or empty")
 
     raw_answer = str(answer)
-    parsed = _parse_json_object(raw_answer)
-    if parsed is None:
-        return _report(False, "teacher_answer is not valid JSON")
-    valid_json = True
-
-    schema_valid, schema_reason, string_list_row = _validate_teacher_answer_schema(parsed)
-    if not schema_valid:
-        return _report(
-            False,
-            schema_reason or "teacher_answer schema is invalid",
-            valid_json=valid_json,
-            schema_valid=False,
-            string_list_row=string_list_row,
-        )
+    valid_json = False
+    schema_valid = False
+    string_list_row = False
+    if str(row.get("task") or "").strip() == "parsing":
+        parsed_answer = parse_parsing_answer(raw_answer)
+        if parsed_answer["parse_ok"]:
+            valid_json = True
+            schema_valid = True
+    else:
+        parsed = _parse_json_object(raw_answer)
+        if parsed is None:
+            return _report(False, "teacher_answer is not valid JSON")
+        valid_json = True
+        schema_valid, schema_reason, string_list_row = _validate_teacher_answer_schema(parsed)
+        if not schema_valid:
+            return _report(
+                False,
+                schema_reason or "teacher_answer schema is invalid",
+                valid_json=valid_json,
+                schema_valid=False,
+                string_list_row=string_list_row,
+            )
 
     answer_token_match = False
     logits_present = row.get(logits_field) is not None

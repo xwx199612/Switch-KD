@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .parsing_output_parser import parse_parsing_answer
+
 
 def build_teacher_student_unique_rows(
     *,
@@ -78,14 +80,9 @@ def _row_key(row: dict[str, Any]) -> tuple[str, str]:
 
 
 def _ordered_labels(value: Any) -> dict[str, str]:
-    payload = _parse_json_like(value)
-    if not isinstance(payload, dict):
-        return {}
-
-    elements = payload.get("elements")
-    if elements is None:
-        elements = payload.get("selectable_elements")
-    if not isinstance(elements, list):
+    parsed = parse_parsing_answer(str(value or ""))
+    elements = parsed.get("elements")
+    if not parsed["parse_ok"] or not isinstance(elements, list):
         return {}
 
     labels: dict[str, str] = {}

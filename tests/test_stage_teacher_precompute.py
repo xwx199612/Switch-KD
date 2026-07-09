@@ -15,6 +15,7 @@ from vlm_distill.stage_teacher_precompute import TeacherLogitsGenerator, compute
 def _make_config(tmp_path: Path) -> PipelineConfig:
     return PipelineConfig(
         data=DataConfig(
+            training_manifest_path=tmp_path / "manifest.jsonl",
             manifest_path=tmp_path / "manifest.jsonl",
             distill_path=tmp_path / "labels.jsonl",
             image_root=tmp_path,
@@ -28,15 +29,29 @@ def _make_config(tmp_path: Path) -> PipelineConfig:
 class _FakeProcessor:
     def __init__(self, token_map: dict[str, list[int]]):
         self._token_map = token_map
+        self.tokenizer = self
 
     def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
         del tokenize, add_generation_prompt
-        return messages[0]["content"][1]["text"]
+        parts: list[str] = []
+        for message in messages:
+            for content in message["content"]:
+                text = content.get("text")
+                if text:
+                    parts.append(text)
+        return " ".join(parts)
 
-    def __call__(self, *, text, images, return_tensors="pt"):
-        del images, return_tensors
+    def __call__(self, text, images=None, return_tensors="pt", add_special_tokens=False):
+        del images, return_tensors, add_special_tokens
+        if isinstance(text, str):
+            token_ids = self._token_map[text]
+            return {"input_ids": token_ids}
         token_ids = self._token_map[text[0]]
         return {"input_ids": torch.tensor([token_ids], dtype=torch.long)}
+
+    def decode(self, token_ids, skip_special_tokens=False, clean_up_tokenization_spaces=False):
+        del skip_special_tokens, clean_up_tokenization_spaces
+        return " ".join(str(token_id) for token_id in token_ids)
 
 
 class _FakeModel(torch.nn.Module):
@@ -58,6 +73,7 @@ def test_teacher_forcing_uses_full_input_answer_span_as_canonical_teacher_tokens
     processor = _FakeProcessor(
         {
             prompt: [101, 102],
+            teacher_answer: [4913, 5890],
             f"{prompt} {teacher_answer}": [101, 102, 4913, 5890],
         }
     )
@@ -89,6 +105,7 @@ def test_teacher_logits_generator_fallback_overwrites_teacher_tokens_with_canoni
     processor = _FakeProcessor(
         {
             prompt: [11, 12],
+            teacher_answer: [55, 66],
             f"{prompt} {teacher_answer}": [11, 12, 55, 66],
         }
     )

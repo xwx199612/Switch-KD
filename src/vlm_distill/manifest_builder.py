@@ -12,6 +12,7 @@ from .config_schema import (
     resolve_training_image_dir,
     resolve_training_manifest_path,
 )
+from .parsing_output_parser import parse_parsing_answer
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -191,19 +192,13 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _extract_elements(row: dict[str, Any]) -> list[Any]:
-    parsed = _parse_json_like(row.get("teacher_answer"))
+    teacher_elements = row.get("teacher_elements")
+    if isinstance(teacher_elements, list):
+        return teacher_elements
 
-    if not isinstance(parsed, dict):
-        return []
-
+    parsed = parse_parsing_answer(str(row.get("teacher_answer") or ""))
     elements = parsed.get("elements")
-    if elements is None:
-        elements = parsed.get("selectable_elements")
-
-    if not isinstance(elements, list):
-        return []
-
-    return elements
+    return elements if parsed["parse_ok"] and isinstance(elements, list) else []
 
 
 def _parse_json_like(value: Any) -> dict[str, Any] | None:

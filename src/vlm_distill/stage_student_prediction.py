@@ -7,10 +7,15 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
 
-from .config_schema import PipelineConfig, format_prompt, resolve_prediction_path
+from .config_schema import PipelineConfig, resolve_prediction_path
 from .data_manifest import VlmSample, read_jsonl
 from .model_loading import apply_attn_implementation, resolve_model_path
-from .stage_teacher_precompute import _load_teacher_image, _normalize_teacher_answer
+from .stage_teacher_precompute import (
+    _attach_parsing_sidecar_outputs,
+    _format_prompt as _format_teacher_prompt,
+    _load_teacher_image,
+    _normalize_teacher_answer,
+)
 
 
 class StudentBackend(Protocol):
@@ -27,12 +32,9 @@ class MockStudent:
         if sample.answer:
             student_answer = sample.answer
         elif sample.task == "parsing":
-            elements = sample.metadata.get("elements") if isinstance(sample.metadata, dict) else None
-            student_answer = json.dumps(
-                {
-                    "elements": elements if isinstance(elements, list) else ["mock icon", "mock settings"],
-                },
-                ensure_ascii=False,
+            student_answer = (
+                "mock icon | 0,0,100,100 | false\n"
+                "mock settings | 100,0,200,100 | true"
             )
         elif sample.task == "grounding":
             bbox = sample.metadata.get("bbox") if isinstance(sample.metadata, dict) else None
@@ -131,13 +133,7 @@ class HuggingFaceStudent:
         self.model.eval()
 
     def answer(self, sample: VlmSample) -> dict:
-        prompt = format_prompt(
-            self.config.distillation.prompt_template,
-            query=sample.query,
-            target_label=sample.target_label,
-            target_type=sample.target_type,
-            task=sample.task,
-        )
+        prompt = _format_teacher_prompt(self.config, sample)
         image_path = self.config.data.image_root / sample.image
         image = _load_teacher_image(image_path, self.config.training.image_resize)
 
@@ -258,6 +254,12 @@ def create_student_predictions(config: PipelineConfig, samples: list[VlmSample])
         for index, sample in enumerate(pending_samples, start=1):
             started = time.perf_counter()
             row = _predict_sample(student, sample)
+            _attach_parsing_sidecar_outputs(
+                row,
+                output_root=output_path.parent,
+                role="student",
+                answer_field="student_answer",
+            )
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
             handle.flush()
             completed_now += 1
