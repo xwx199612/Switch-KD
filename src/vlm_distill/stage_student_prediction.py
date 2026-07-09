@@ -32,9 +32,14 @@ class MockStudent:
         if sample.answer:
             student_answer = sample.answer
         elif sample.task == "parsing":
-            student_answer = (
-                "mock icon | 0,0,100,100 | false\n"
-                "mock settings | 100,0,200,100 | true"
+            student_answer = "\n".join(
+                [
+                    "BEGIN_ELEMENTS",
+                    "text | type | x1 | y1 | x2 | y2 | focused",
+                    "mock icon | app_icon | 0 | 0 | 100 | 100 | false",
+                    "mock settings | button | 100 | 0 | 200 | 100 | true",
+                    "END_ELEMENTS",
+                ]
             )
         else:
             student_answer = f"mock answer for {sample.task}"

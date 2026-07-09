@@ -80,6 +80,16 @@ def bbox_iou(box_a: list[float], box_b: list[float]) -> float:
     return inter_area / union if union > 0 else 0.0
 
 
+def bbox_center_distance(box_a: list[float], box_b: list[float]) -> float:
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+    center_a = ((ax1 + ax2) / 2.0, (ay1 + ay2) / 2.0)
+    center_b = ((bx1 + bx2) / 2.0, (by1 + by2) / 2.0)
+    dx = center_a[0] - center_b[0]
+    dy = center_a[1] - center_b[1]
+    return (dx * dx + dy * dy) ** 0.5
+
+
 def element_f1(pred: dict[str, Any], target: dict[str, Any]) -> tuple[float, float, float]:
     pred_labels = _element_labels(pred)
     target_labels = _element_labels(target)
@@ -129,6 +139,7 @@ def _build_parsing_eval_item(*, prediction: str, target: str) -> dict[str, Any]:
         )
         focused_accuracy = _focused_accuracy(pred_parsed, target_parsed)
         bbox_iou = _mean(_matching_label_ious(pred_parsed, target_parsed))
+        bbox_center_distance = _mean(_matching_label_center_distances(pred_parsed, target_parsed))
     else:
         precision = recall = f1 = 0.0
         element_count_abs_diff = abs(
@@ -136,6 +147,7 @@ def _build_parsing_eval_item(*, prediction: str, target: str) -> dict[str, Any]:
         )
         focused_accuracy = 0.0
         bbox_iou = 0.0
+        bbox_center_distance = 0.0
 
     return {
         "parse_ok": float(pred_ok),
@@ -146,6 +158,7 @@ def _build_parsing_eval_item(*, prediction: str, target: str) -> dict[str, Any]:
         "element_count_abs_diff": float(element_count_abs_diff),
         "focused_accuracy": focused_accuracy,
         "bbox_iou": bbox_iou,
+        "bbox_center_distance": bbox_center_distance,
         "prediction_element_count": int(pred_parsed["element_count"]),
         "target_element_count": int(target_parsed["element_count"]),
     }
@@ -163,6 +176,7 @@ def _aggregate_prediction_metrics(predictions: list[dict[str, Any]], *, sample_k
         "element_count_abs_diff": _mean(item.get("element_count_abs_diff", 0.0) for item in parsing_predictions),
         "focused_accuracy": _mean(item.get("focused_accuracy", 0.0) for item in parsing_predictions),
         "bbox_iou": _mean(item.get("bbox_iou", 0.0) for item in parsing_predictions),
+        "bbox_center_distance": _mean(item.get("bbox_center_distance", 0.0) for item in parsing_predictions),
     }
 
 
@@ -208,8 +222,24 @@ def _matching_label_ious(pred: dict[str, Any], target: dict[str, Any]) -> list[f
     return ious
 
 
+def _matching_label_center_distances(pred: dict[str, Any], target: dict[str, Any]) -> list[float]:
+    pred_by_label = _elements_by_label(pred)
+    target_by_label = _elements_by_label(target)
+    distances: list[float] = []
+    for label, pred_element in pred_by_label.items():
+        target_element = target_by_label.get(label)
+        if target_element is None:
+            continue
+        pred_bbox = _extract_bbox(pred_element)
+        target_bbox = _extract_bbox(target_element)
+        if pred_bbox is None or target_bbox is None:
+            continue
+        distances.append(bbox_center_distance(pred_bbox, target_bbox))
+    return distances
+
+
 def _extract_bbox(data: dict[str, Any]) -> list[float] | None:
-    bbox = data.get("bbox")
+    bbox = data.get("bbox_norm", data.get("bbox"))
     if isinstance(bbox, list) and len(bbox) == 4:
         return [float(value) for value in bbox]
     return None

@@ -32,6 +32,7 @@ from .logits_cache_utils import (
     vocab_sizes_compatible,
 )
 from .model_loading import apply_attn_implementation, resolve_model_path
+from .parsing_output_parser import elements_to_line_format, parse_parsing_answer
 from .token_alignment import build_token_mismatch_details, coerce_token_ids
 
 
@@ -1181,7 +1182,48 @@ def _load_training_rows(config: PipelineConfig) -> list[dict[str, Any]]:
             else:
                 rows_by_id[row_id].update(row)
 
-    return [rows_by_id[row_id] for row_id in ordered_ids]
+    rows = [rows_by_id[row_id] for row_id in ordered_ids]
+    return _prepare_training_rows(rows)
+
+
+def _prepare_training_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    prepared: list[dict[str, Any]] = []
+    dropped_unusable = 0
+    repaired_answers = 0
+
+    for row in rows:
+        if str(row.get("task") or "").strip() != "parsing":
+            prepared.append(row)
+            continue
+
+        parsed = parse_parsing_answer(str(row.get("teacher_answer") or ""))
+        if not parsed.get("usable"):
+            dropped_unusable += 1
+            continue
+
+        elements = parsed.get("elements")
+        if not isinstance(elements, list):
+            dropped_unusable += 1
+            continue
+
+        canonical_answer = elements_to_line_format([element for element in elements if isinstance(element, dict)])
+        updated_row = dict(row)
+        if canonical_answer != str(row.get("teacher_answer") or ""):
+            repaired_answers += 1
+        updated_row["teacher_answer"] = canonical_answer
+        updated_row["elements"] = elements
+        updated_row["coordinate_system"] = parsed.get("coordinate_system")
+        updated_row["parse_ok"] = bool(parsed.get("parse_ok"))
+        updated_row["usable"] = True
+        updated_row["parse_errors"] = parsed.get("parse_errors", [])
+        updated_row["teacher_element_count"] = int(parsed.get("element_count", 0))
+        prepared.append(updated_row)
+
+    if dropped_unusable > 0:
+        print(f"Warning: dropped unusable parsing rows from training set: {dropped_unusable}")
+    if repaired_answers > 0:
+        print(f"Normalized parsing teacher_answer rows for training: {repaired_answers}")
+    return prepared
 
 
 def _print_training_row_summary(config: PipelineConfig, rows: list[dict[str, Any]]) -> None:

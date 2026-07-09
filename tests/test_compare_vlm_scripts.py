@@ -19,7 +19,7 @@ def _make_images(image_dir: Path) -> list[Path]:
     return image_paths
 
 
-def test_compare_vlm_object_listing_writes_three_reports(
+def test_compare_vlm_object_listing_writes_debug_outputs(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -30,7 +30,10 @@ def test_compare_vlm_object_listing_writes_three_reports(
     monkeypatch.setattr(
         compare_vlm_object_listing,
         "load_processor_and_model",
-        lambda model_path, torch_dtype, device_map: ({"model_path": model_path}, {"model_path": model_path}),
+        lambda model_path, torch_dtype, device_map, quantization=None: (
+            {"model_path": model_path},
+            {"model_path": model_path},
+        ),
     )
     monkeypatch.setattr(compare_vlm_object_listing, "cleanup_model", lambda model, processor: None)
 
@@ -68,28 +71,31 @@ def test_compare_vlm_object_listing_writes_three_reports(
             str(output_dir),
             "--model-32b",
             "qwen32b",
-            "--model-8b",
-            "qwen8b",
-            "--model-distilled",
-            "distilled",
-        ],
-    )
+                "--model-8b",
+                "qwen8b",
+                "--model-distilled",
+                "distilled",
+                "--output-format",
+                "json",
+            ],
+        )
 
     compare_vlm_object_listing.main()
 
-    for report_name in (
-        "qwen3vl_32b_objects.txt",
-        "qwen3vl_8b_objects.txt",
-        "distilled_32to8b_objects.txt",
-    ):
-        report = (output_dir / report_name).read_text(encoding="utf-8")
-        assert "Image: sample_001.jpg" in report
-        assert "Object count:" in report
-        assert "Objects:" in report
+    for model_dir_name in ("qwen3vl_32b", "qwen3vl_8b", "distilled_32to8b"):
+        model_dir = output_dir / model_dir_name
+        assert model_dir.is_dir()
+        assert (model_dir / "raw" / "sample_001.txt").exists()
+        assert (model_dir / "parsed" / "sample_001.txt").exists()
+        assert (model_dir / "json" / "sample_001.json").exists()
 
-    distilled_report = (output_dir / "distilled_32to8b_objects.txt").read_text(encoding="utf-8")
-    assert "Status: parse_failed" in distilled_report
-    assert "not json" in distilled_report
+    qwen8b_payload = json.loads((output_dir / "qwen3vl_8b" / "json" / "sample_001.json").read_text(encoding="utf-8"))
+    assert qwen8b_payload["objects"] == ["Picture", "Sound", "General"]
+
+    distilled_payload = json.loads(
+        (output_dir / "distilled_32to8b" / "json" / "sample_001.json").read_text(encoding="utf-8")
+    )
+    assert distilled_payload["parse_error"].startswith("ValueError:")
 
 
 def test_compare_vlm_bbox_grounding_writes_annotations_and_debug_outputs(
@@ -103,7 +109,10 @@ def test_compare_vlm_bbox_grounding_writes_annotations_and_debug_outputs(
     monkeypatch.setattr(
         compare_vlm_bbox_grounding,
         "load_processor_and_model",
-        lambda model_path, torch_dtype, device_map: ({"model_path": model_path}, {"model_path": model_path}),
+        lambda model_path, torch_dtype, device_map, quantization=None: (
+            {"model_path": model_path},
+            {"model_path": model_path},
+        ),
     )
     monkeypatch.setattr(compare_vlm_bbox_grounding, "cleanup_model", lambda model, processor: None)
 
@@ -113,23 +122,14 @@ def test_compare_vlm_bbox_grounding_writes_annotations_and_debug_outputs(
         fake_run_vlm_inference.calls[name] += 1
         if name == "distilled" and fake_run_vlm_inference.calls[name] == 1:
             return "invalid json"
-        return json.dumps(
-            {
-                "elements": [
-                    {
-                        "text": "Picture",
-                        "bbox": [100, 100, 300, 300],
-                        "focused": name == "qwen32b",
-                        "confidence": 0.9,
-                        "type": "menu_item",
-                    },
-                    {
-                        "text": "SkipBad",
-                        "bbox": [1, 2],
-                        "focused": False,
-                    },
-                ]
-            }
+        return "\n".join(
+            [
+                "BEGIN_ELEMENTS",
+                "text | type | x1 | y1 | x2 | y2 | focused",
+                f"Picture | card | 100 | 100 | 300 | 300 | {'true' if name == 'qwen32b' else 'false'}",
+                "SkipBad | card | 1 | 2 | 1 | 2 | false",
+                "END_ELEMENTS",
+            ]
         )
 
     fake_run_vlm_inference.calls = {}
@@ -167,12 +167,12 @@ def test_compare_vlm_bbox_grounding_writes_annotations_and_debug_outputs(
 
     parsed = json.loads((output_dir / "qwen3vl_32b" / "json" / "sample_001.json").read_text(encoding="utf-8"))
     assert parsed["elements"][0]["text"] == "Picture"
-    assert "skipped_elements" in parsed
+    assert parsed["elements"][0]["bbox_norm"] == [100, 100, 300, 300]
 
     distilled_debug = json.loads(
         (output_dir / "distilled_32to8b" / "json" / "sample_001.json").read_text(encoding="utf-8")
     )
-    assert distilled_debug["parse_error"].startswith("ValueError:")
+    assert distilled_debug["parse_error"] == "no_valid_lines"
 
     annotated = Image.open(output_dir / "qwen3vl_32b" / "sample_001_annotated.jpg")
     try:

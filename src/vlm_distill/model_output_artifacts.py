@@ -29,6 +29,7 @@ def attach_parsing_sidecar_outputs(
     parsed = parse_parsing_answer(answer)
     payload = {
         "source_file": str(raw_relative).replace("\\", "/"),
+        "raw_answer": answer,
         **parsed,
         "answer": answer,
     }
@@ -38,8 +39,11 @@ def attach_parsing_sidecar_outputs(
     )
 
     prefix = "teacher" if role == "teacher" else "student"
+    row[f"{prefix}_parse_ok"] = bool(parsed["parse_ok"])
+    row[f"{prefix}_usable"] = bool(parsed.get("usable"))
     row[f"{prefix}_element_count"] = int(parsed["element_count"])
-    if not parsed["parse_ok"]:
+    row[f"{prefix}_coordinate_system"] = parsed.get("coordinate_system")
+    if not parsed.get("usable"):
         row[f"{prefix}_element_count"] = 0
         print(
             f"Warning: {prefix} parsing output did not parse cleanly for id={row.get('id')}: "
@@ -74,6 +78,7 @@ def refresh_parsing_sidecar_reports(*, output_root: Path, role: str) -> dict[str
         raw_relative = Path("raw") / role / source_path.name
         output_payload = {
             "source_file": str(raw_relative).replace("\\", "/"),
+            "raw_answer": raw_text.rstrip("\n"),
             **parsed,
             "answer": raw_text.rstrip("\n"),
         }

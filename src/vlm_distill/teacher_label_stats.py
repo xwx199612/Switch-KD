@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .data_manifest import read_jsonl
-from .stage_teacher_precompute import _parse_json_object
+from .parsing_output_parser import parse_parsing_answer
 
 
 SCHEMA_WORD_ELEMENTS = {
@@ -58,7 +58,8 @@ def _parse_teacher_answer(answer: object) -> dict[str, object] | None:
     if isinstance(answer, dict):
         return answer
     if isinstance(answer, str):
-        return _parse_json_object(answer)
+        parsed = parse_parsing_answer(answer)
+        return parsed if parsed.get("usable") else None
     return None
 
 

@@ -31,9 +31,8 @@ def test_create_student_predictions_writes_mock_predictions(tmp_path: Path):
             {
                 "id": "sample-1",
                 "image": "sample.jpg",
-                "task": "vqa",
-                "query": "What is shown?",
-                "answer": "a white square",
+                "task": "parsing",
+                "query": "List all visible UI elements.",
             }
         )
         + "\n",
@@ -56,8 +55,8 @@ def test_create_student_predictions_writes_mock_predictions(tmp_path: Path):
     output_path = create_student_predictions(config, samples)
     rows = read_jsonl(output_path)
 
-    assert rows[0]["student_answer"] == "a white square"
-    assert rows[0]["student_rationale"]
+    assert "BEGIN_ELEMENTS" in rows[0]["student_answer"]
+    assert rows[0]["student_parse_ok"] is True
 
 
 def test_evaluate_predictions_scores_against_eval_labels(tmp_path: Path):
@@ -144,7 +143,7 @@ def test_create_student_predictions_writes_parsing_sidecars(tmp_path: Path):
     output_path = create_student_predictions(config, samples)
     rows = read_jsonl(output_path)
 
-    assert rows[0]["student_raw_output_path"] == "raw/student/parsing-000001.txt"
-    assert rows[0]["student_parsed_output_path"] == "json/student/parsing-000001.json"
     assert rows[0]["student_parse_ok"] is True
     assert rows[0]["student_element_count"] == 2
+    assert (tmp_path / "raw" / "student" / "parsing-000001.txt").exists()
+    assert (tmp_path / "json" / "student" / "parsing-000001.json").exists()

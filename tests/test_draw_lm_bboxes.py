@@ -26,7 +26,7 @@ def _file_hash(path: Path) -> str:
 def test_extract_json_from_text_skips_prefix() -> None:
     text = """qwen3-vl-32b-instruct
 Some markdown text.
-{"elements":[{"text":"Picture","bbox":[1,2,3,4],"focused":false,"confidence":0.5}]}
+{"elements":[{"text":"Picture","bbox_norm":[1,2,3,4],"focused":false,"confidence":0.5}]}
 """
 
     parsed = extract_json_from_text(text)
@@ -53,7 +53,7 @@ def test_clamp_bbox_clamps_to_image_bounds() -> None:
 
 
 def test_infer_coord_system_detects_normalized_1000_for_large_images() -> None:
-    elements = [{"bbox": [283, 700, 518, 754]}]
+    elements = [{"bbox_norm": [283, 700, 518, 754]}]
 
     assert infer_coord_system(elements, width=1920, height=1080) == COORD_SYSTEM_NORMALIZED_1000
     assert infer_coord_system(elements, width=800, height=600) == COORD_SYSTEM_PIXEL
@@ -83,21 +83,21 @@ def test_draw_bboxes_creates_output_without_modifying_original(tmp_path: Path) -
         "elements": [
             {
                 "text": "Picture",
-                "bbox": [10, 10, 60, 60],
+                "bbox_norm": [10, 10, 60, 60],
                 "focused": False,
                 "confidence": 0.95,
                 "type": "menu_item",
             },
             {
                 "text": "General",
-                "bbox": [20, 70, 100, 110],
+                "bbox_norm": [20, 70, 100, 110],
                 "focused": True,
                 "confidence": 0.98,
                 "type": "menu_item",
             },
             {
                 "text": "Skip",
-                "bbox": [25, 25],
+                "bbox_norm": [25, 25],
                 "focused": False,
             },
         ]
@@ -119,7 +119,7 @@ def test_draw_bboxes_supports_normalized_1000_bboxes(tmp_path: Path) -> None:
         "elements": [
             {
                 "text": "External Devices",
-                "bbox": [283, 700, 518, 754],
+                "bbox_norm": [283, 700, 518, 754],
                 "focused": True,
                 "confidence": 0.98,
                 "type": "menu_item",

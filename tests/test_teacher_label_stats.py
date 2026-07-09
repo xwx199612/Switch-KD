@@ -14,19 +14,29 @@ def test_summarize_teacher_label_file_reports_unknown_empty_and_schema_counts(tm
                 json.dumps(
                     {
                         "id": "row-1",
-                        "teacher_answer": {
-                            "elements": [
-                                {"text": "focused", "type": "unknown", "focused": False},
-                                {"text": "", "type": "other", "focused": False},
+                        "teacher_answer": "\n".join(
+                            [
+                                "BEGIN_ELEMENTS",
+                                "text | type | x1 | y1 | x2 | y2 | focused",
+                                "focused | unknown | 1 | 2 | 3 | 4 | false",
+                                "Blank | unknown | 10 | 20 | 30 | 40 | false",
+                                "END_ELEMENTS",
                             ]
-                        },
+                        ),
                     }
                 )
                 + "\n",
                 json.dumps(
                     {
                         "id": "row-2",
-                        "teacher_answer": '{"elements":[{"text":"Home","type":"tab","focused":true}]}',
+                        "teacher_answer": "\n".join(
+                            [
+                                "BEGIN_ELEMENTS",
+                                "text | type | x1 | y1 | x2 | y2 | focused",
+                                "Home | tab | 10 | 20 | 30 | 40 | true",
+                                "END_ELEMENTS",
+                            ]
+                        ),
                     }
                 )
                 + "\n",
@@ -39,8 +49,8 @@ def test_summarize_teacher_label_file_reports_unknown_empty_and_schema_counts(tm
 
     assert summary["total_samples"] == 2
     assert summary["total_elements"] == 3
-    assert summary["unknown_type_ratio"] == 1 / 3
-    assert summary["empty_elements_ratio"] == 1 / 3
+    assert summary["unknown_type_ratio"] == 2 / 3
+    assert summary["empty_elements_ratio"] == 0.0
     assert summary["schema_word_element_count"] == 1
 
 

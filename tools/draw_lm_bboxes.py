@@ -53,7 +53,7 @@ def infer_coord_system(elements: list[Any], width: int, height: int) -> str:
         if not isinstance(element, dict):
             continue
 
-        bbox = element.get("bbox")
+        bbox = element.get("bbox_norm", element.get("bbox"))
         if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
             continue
 
@@ -184,7 +184,12 @@ def draw_bboxes(
         if not isinstance(element, dict):
             continue
 
-        pixel_bbox = convert_bbox_to_pixels(element.get("bbox"), width, height, resolved_coord_system)
+        pixel_bbox = convert_bbox_to_pixels(
+            element.get("bbox_norm", element.get("bbox")),
+            width,
+            height,
+            resolved_coord_system,
+        )
         clamped_bbox = clamp_bbox(pixel_bbox, width, height)
         label = label_text(
             element,

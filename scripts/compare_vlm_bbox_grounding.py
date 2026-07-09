@@ -36,27 +36,22 @@ LINE_PROMPT = """You are an Android TV visual grounding assistant.
 
 Analyze the screenshot and list all visible interactive UI elements.
 
-Return line-based TSV-like output only.
-Each line must be:
-text | x_min,y_min,x_max,y_max | focused
-
-Example:
-Picture | 145,238,276,292 | false
-General | 145,348,276,404 | true
-Network Settings | 705,396,807,432 | false
+Return only the table below. No JSON, no markdown, no explanation.
+BEGIN_ELEMENTS
+text | type | x1 | y1 | x2 | y2 | focused
+...
+END_ELEMENTS
 
 Rules:
-Do not return JSON.
-Do not return markdown.
-Do not return explanations.
-One visible interactive UI element per line.
-Use normalized 0-1000 coordinates.
-Include all visible interactive UI elements.
-Do not impose a maximum number of elements.
-Do not include decorative background graphics.
-Do not include duplicate elements.
-Do not include long helper descriptions unless the text itself is a distinct clickable UI element.
-Use concise labels only."""
+- Each line must contain exactly 7 fields separated by " | ".
+- type must be one of: button, tab, app_icon, card, menu_item, input, unknown.
+- Use normalized 0-1000 coordinates, not pixel coordinates.
+- x1, y1, x2, y2 must be integers only.
+- Coordinates must satisfy 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000.
+- Do not combine coordinates into one field.
+- Do not use commas in coordinates.
+- focused must be exactly true or false.
+- If a valid bbox cannot be provided, omit that element."""
 
 JSON_PROMPT = """You are an Android TV visual grounding assistant.
 
@@ -166,7 +161,7 @@ def normalize_elements(parsed_json: dict[str, Any]) -> tuple[list[dict[str, Any]
         normalized.append(
             {
                 "text": text_value.strip(),
-                "bbox": normalized_bbox,
+                "bbox_norm": normalized_bbox,
                 "focused": bool(element.get("focused", False)),
             }
         )

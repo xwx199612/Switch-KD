@@ -34,7 +34,11 @@ from .model_output_artifacts import (
     refresh_parsing_sidecar_reports,
 )
 from .model_loading import apply_attn_implementation, resolve_model_path
-from .parsing_output_parser import elements_to_line_format, parse_parsing_answer
+from .parsing_output_parser import (
+    COORDINATE_SYSTEM_NORMALIZED_0_1000,
+    elements_to_line_format,
+    parse_parsing_answer,
+)
 
 
 class TeacherBackend(Protocol):
@@ -57,9 +61,14 @@ class MockTeacher:
                     [element for element in elements if isinstance(element, dict)]
                 )
             else:
-                teacher_answer = (
-                    "mock icon | 0,0,100,100 | false\n"
-                    "mock settings | 100,0,200,100 | true"
+                teacher_answer = "\n".join(
+                    [
+                        "BEGIN_ELEMENTS",
+                        "text | type | x1 | y1 | x2 | y2 | focused",
+                        "mock icon | app_icon | 0 | 0 | 100 | 100 | false",
+                        "mock settings | button | 100 | 0 | 200 | 100 | true",
+                        "END_ELEMENTS",
+                    ]
                 )
         else:
             teacher_answer = f"mock answer for {sample.task}"
@@ -491,10 +500,11 @@ def _label_sample(
     if label["teacher_confidence"] < config.distillation.min_teacher_confidence:
         return None
 
-    return {
+    row = {
         **_base_output_row(sample),
         **label,
     }
+    return _attach_parsing_metadata(sample, row)
 
 
 def _load_completed_ids(path: Path) -> set[str]:
@@ -806,14 +816,9 @@ _ALLOWED_SCREEN_ELEMENT_TYPES = {
     "tab",
     "button",
     "app_icon",
-    "app_tile",
     "menu_item",
-    "tile",
-    "toggle",
+    "card",
     "input",
-    "icon",
-    "link",
-    "other",
     "unknown",
 }
 
@@ -821,12 +826,11 @@ _ALLOWED_SCREEN_ELEMENT_TYPES = {
 def _normalize_teacher_answer(sample: VlmSample, teacher_answer: str) -> str:
     if sample.task != "parsing":
         return teacher_answer.strip()
-    canonical = _canonicalize_line_teacher_answer(teacher_answer)
-    if canonical is not None:
-        return canonical
-    if _parse_json_object(teacher_answer) is not None:
-        payload = _normalize_parsing_payload(teacher_answer)
-        return _compact_json(payload)
+    parsed = parse_parsing_answer(teacher_answer)
+    if parsed.get("usable"):
+        elements = parsed.get("elements")
+        if isinstance(elements, list):
+            return elements_to_line_format([element for element in elements if isinstance(element, dict)])
     return teacher_answer.strip()
 
 
@@ -849,6 +853,7 @@ def _normalize_parsing_payload(teacher_answer: str) -> dict[str, object]:
 def _empty_parsing_payload() -> dict[str, object]:
     return {
         "elements": [],
+        "coordinate_system": COORDINATE_SYSTEM_NORMALIZED_0_1000,
     }
 
 
@@ -914,10 +919,20 @@ def _normalize_screen_elements(raw_elements: object) -> list[dict[str, object]]:
         seen.add(lowered)
         normalized_type = _normalize_screen_element_type(element_type)
         normalized_type = _repair_screen_element_type(cleaned_label, normalized_type)
+        raw_bbox = None
+        if isinstance(raw_element, dict):
+            raw_bbox = raw_element.get("bbox_norm", raw_element.get("bbox"))
+        if (
+            not isinstance(raw_bbox, list)
+            or len(raw_bbox) != 4
+            or not all(isinstance(value, int) for value in raw_bbox)
+        ):
+            continue
         elements.append(
             {
                 "text": cleaned_label,
                 "type": normalized_type,
+                "bbox_norm": raw_bbox,
                 "focused": _normalize_screen_element_focused(focused),
             }
         )
@@ -945,7 +960,14 @@ def _labels_to_screen_elements(labels: list[str]) -> list[dict[str, object]]:
     elements: list[dict[str, object]] = []
     for label in labels:
         normalized_type = _repair_screen_element_type(label, "unknown")
-        elements.append({"text": label, "type": normalized_type, "focused": False})
+        elements.append(
+            {
+                "text": label,
+                "type": normalized_type,
+                "bbox_norm": [0, 0, 1, 1],
+                "focused": False,
+            }
+        )
     return elements
 
 
@@ -964,7 +986,7 @@ def _normalize_screen_element_type(value: object) -> str:
     if snake in _ALLOWED_SCREEN_ELEMENT_TYPES:
         return snake
     if snake == "unknown":
-        return "other"
+        return "unknown"
 
     tokens = [token for token in snake.split("_") if token]
     token_set = set(tokens)
@@ -972,28 +994,16 @@ def _normalize_screen_element_type(value: object) -> str:
     if token_set & {"app", "application"}:
         return "app_icon"
     if token_set & {"tile", "card", "carousel", "recommend", "movie", "content", "poster", "banner"}:
-        return "tile"
+        return "card"
     if "menu" in token_set:
         return "menu_item"
     if token_set & {"nav", "navigation"}:
         return "tab"
     if token_set & {"search", "search_box", "searchbar", "search_bar", "input", "text_box", "textbox", "text"}:
         return "input"
-    if token_set & {"toggle", "switch"}:
-        return "toggle"
-    if token_set & {"icon", "setting", "settings"}:
-        return "icon"
-    if "link" in token_set:
-        return "link"
     if token_set & {"button", "btn"}:
         return "button"
-    if token_set & {"text", "label", "image"}:
-        return "other"
-
-    if "unknown" in token_set:
-        return "other"
-
-    return "other"
+    return "unknown"
 
 
 def _should_drop_screen_element_label(label: str) -> bool:
@@ -1007,10 +1017,8 @@ def _repair_screen_element_type(label: str, normalized_type: str) -> str:
 
     if lowered in _COMMON_TOP_TABS and normalized_type in {"unknown", "other", "input"}:
         return "tab"
-    if normalized_type == "unknown":
-        if heuristic_type != "unknown":
-            return heuristic_type
-        return "other"
+    if normalized_type == "unknown" and heuristic_type != "unknown":
+        return heuristic_type
     return normalized_type
 
 
@@ -1029,7 +1037,7 @@ def _infer_screen_element_type_from_text(label: str) -> str:
     if any(token in lowered for token in ("channel", "setup", "program", "labels", "adjustment", "type")):
         return "menu_item"
     if any(token in lowered for token in ("recommended", "popular", "top selling", "movie", "show")):
-        return "tile"
+        return "card"
     return "unknown"
 
 
@@ -1061,31 +1069,18 @@ def _canonicalize_teacher_answer(answer: str) -> str:
         return canonical_line
     parsed = _parse_json_object(stripped)
     if parsed is None:
-        raise ValueError("teacher_answer is not valid JSON or canonical line format")
-    return _canonical_json(parsed)
+        raise ValueError("teacher_answer is not valid JSON or canonical table format")
+    payload = _normalize_parsing_payload(stripped)
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        raise ValueError("teacher_answer JSON did not contain serializable elements")
+    return elements_to_line_format([element for element in elements if isinstance(element, dict)])
 
 
 def _validate_parsing_teacher_answer(answer: str) -> tuple[bool, str | None]:
-    parsed = _parse_json_object(answer)
-    if parsed is None:
-        return False, "teacher_answer is not valid JSON"
-    elements = parsed.get("elements")
-    if not isinstance(elements, list):
-        return False, "teacher_answer.elements is not a list"
-    for index, element in enumerate(elements):
-        if isinstance(element, str):
-            return False, f"teacher_answer.elements[{index}] is a string-list item"
-        if not isinstance(element, dict):
-            return False, f"teacher_answer.elements[{index}] is not an object"
-        missing = {"text", "type", "focused"} - set(element)
-        if missing:
-            return False, f"teacher_answer.elements[{index}] missing {sorted(missing)}"
-        if not isinstance(element.get("text"), str):
-            return False, f"teacher_answer.elements[{index}].text is not a string"
-        if not isinstance(element.get("type"), str):
-            return False, f"teacher_answer.elements[{index}].type is not a string"
-        if not isinstance(element.get("focused"), bool):
-            return False, f"teacher_answer.elements[{index}].focused is not a boolean"
+    parsed = parse_parsing_answer(answer)
+    if not parsed.get("usable"):
+        return False, str(parsed.get("parse_error") or "teacher_answer has no usable parsed elements")
     return True, None
 
 
@@ -1122,11 +1117,9 @@ def _is_screen_schema_label(value: str) -> bool:
 
 def _parsing_quality_score(answer: str) -> int:
     parsed = parse_parsing_answer(answer)
-    if parsed["parse_ok"]:
+    if parsed.get("usable"):
         return int(parsed["element_count"]) * 2
-    payload = _normalize_parsing_payload(answer)
-    elements = payload.get("elements", [])
-    return len(elements) * 2
+    return 0
 
 
 def _looks_degenerate_screen_output(answer: str) -> bool:
@@ -1146,20 +1139,21 @@ def _build_parsing_retry_prompt(sample: VlmSample) -> str:
     return (
         "You are parsing a GUI screenshot for a small student model distillation dataset.\n"
         f"Task: {query}\n"
-        "Return one UI element per line using exactly this format:\n"
-        "<label> | <x1>,<y1>,<x2>,<y2> | <focused>\n"
+        "Return only the table below. No JSON, no markdown, no explanation.\n"
+        "BEGIN_ELEMENTS\n"
+        "text | type | x1 | y1 | x2 | y2 | focused\n"
+        "...\n"
+        "END_ELEMENTS\n"
         "Rules:\n"
-        "- Do not output JSON.\n"
-        "- Do not use markdown.\n"
-        "- Do not add explanations.\n"
-        "- Use pixel coordinates in the original image.\n"
-        "- x1,y1 is the top-left corner.\n"
-        "- x2,y2 is the bottom-right corner.\n"
-        "- focused must be true or false.\n"
-        "Example:\n"
-        "Picture | 145,238,276,292 | false\n"
-        "General | 145,348,276,404 | true\n"
-        "Network Settings | 705,396,807,432 | false"
+        "- Each line must contain exactly 7 fields separated by \" | \".\n"
+        "- type must be one of: button, tab, app_icon, card, menu_item, input, unknown.\n"
+        "- Use normalized 0-1000 coordinates, not pixel coordinates.\n"
+        "- x1, y1, x2, y2 must be integers only.\n"
+        "- Coordinates must satisfy 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000.\n"
+        "- Do not combine coordinates into one field.\n"
+        "- Do not use commas in coordinates.\n"
+        "- focused must be exactly true or false.\n"
+        "- If a valid bbox cannot be provided, omit that element."
     )
 
 
@@ -1170,8 +1164,14 @@ STRICT_TEACHER_LABEL_KEYS = {
     "task",
     "query",
     "teacher_answer",
+    "raw_answer",
     "teacher_tokens",
     "teacher_element_count",
+    "elements",
+    "usable",
+    "parse_ok",
+    "parse_errors",
+    "coordinate_system",
 }
 
 
@@ -1262,11 +1262,13 @@ def _base_output_row(sample: VlmSample) -> dict[str, Any]:
 
 
 def _build_teacher_output_row(sample: VlmSample, generated: dict[str, Any]) -> dict[str, Any]:
-    return {
+    row = {
         **_base_output_row(sample),
         "teacher_answer": str(generated["teacher_answer"]),
+        "raw_answer": str(generated.get("raw_answer", generated["teacher_answer"])),
         "teacher_tokens": [int(token_id) for token_id in generated.get("teacher_tokens", [])],
     }
+    return _attach_parsing_metadata(sample, row)
 
 
 def _generate_label_row(
@@ -1274,7 +1276,8 @@ def _generate_label_row(
     sample: VlmSample,
 ) -> dict[str, Any]:
     label = teacher.answer(sample)
-    answer = _normalize_teacher_answer(sample, str(label["teacher_answer"])).strip()
+    raw_answer = str(label["teacher_answer"]).strip()
+    answer = _normalize_teacher_answer(sample, raw_answer).strip()
     tokenizer = getattr(teacher, "tokenize_teacher_answer", None)
     if callable(tokenizer):
         tokens = [int(token_id) for token_id in tokenizer(answer)]
@@ -1282,16 +1285,30 @@ def _generate_label_row(
         tokens = [ord(char) for char in answer]
     row = {
         "teacher_answer": answer,
+        "raw_answer": raw_answer,
         "teacher_tokens": tokens,
         "teacher_confidence": float(label.get("teacher_confidence", 1.0)),
         "teacher_rationale": label.get("teacher_rationale", "Generated by teacher backend."),
     }
+    return _attach_parsing_metadata(sample, row)
+
+
+def _attach_parsing_metadata(sample: VlmSample, row: dict[str, Any]) -> dict[str, Any]:
+    if sample.task != "parsing":
+        return row
+    parsed = parse_parsing_answer(str(row.get("teacher_answer") or ""))
+    row["elements"] = parsed.get("elements", [])
+    row["parse_ok"] = bool(parsed.get("parse_ok"))
+    row["usable"] = bool(parsed.get("usable"))
+    row["parse_errors"] = parsed.get("parse_errors", [])
+    row["coordinate_system"] = parsed.get("coordinate_system")
+    row["teacher_element_count"] = int(parsed.get("element_count", 0))
     return row
 
 
 def _canonicalize_line_teacher_answer(answer: str) -> str | None:
     parsed = parse_parsing_answer(answer)
-    if not parsed["parse_ok"]:
+    if not parsed.get("usable"):
         return None
     elements = parsed.get("elements")
     if not isinstance(elements, list):
@@ -1457,20 +1474,21 @@ def _format_prompt(config: PipelineConfig, sample: VlmSample) -> str:
 
     return (
         f"{prompt.rstrip()}\n\n"
-        "Return one UI element per line using exactly this format:\n"
-        "<label> | <x1>,<y1>,<x2>,<y2> | <focused>\n\n"
+        "Return only the table below. No JSON, no markdown, no explanation.\n"
+        "BEGIN_ELEMENTS\n"
+        "text | type | x1 | y1 | x2 | y2 | focused\n"
+        "...\n"
+        "END_ELEMENTS\n\n"
         "Rules:\n"
-        "- Do not output JSON.\n"
-        "- Do not use markdown.\n"
-        "- Do not add explanations.\n"
-        "- Use pixel coordinates in the original image.\n"
-        "- x1,y1 is the top-left corner.\n"
-        "- x2,y2 is the bottom-right corner.\n"
-        "- focused must be true or false.\n\n"
-        "Example:\n"
-        "Picture | 145,238,276,292 | false\n"
-        "General | 145,348,276,404 | true\n"
-        "Network Settings | 705,396,807,432 | false"
+        "- Each line must contain exactly 7 fields separated by \" | \".\n"
+        "- type must be one of: button, tab, app_icon, card, menu_item, input, unknown.\n"
+        "- Use normalized 0-1000 coordinates, not pixel coordinates.\n"
+        "- x1, y1, x2, y2 must be integers only.\n"
+        "- Coordinates must satisfy 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000.\n"
+        "- Do not combine coordinates into one field.\n"
+        "- Do not use commas in coordinates.\n"
+        "- focused must be exactly true or false.\n"
+        "- If a valid bbox cannot be provided, omit that element."
     )
 
 
@@ -1479,23 +1497,14 @@ def _mock_answer(sample: VlmSample) -> str:
         return sample.answer
 
     if sample.task == "parsing":
-        return json.dumps(
-            {
-                "focused_element": "mock settings",
-                "elements": [
-                    {
-                        "label": "mock icon",
-                        "type": "app_icon",
-                        "bbox": [0, 0, 100, 100],
-                    },
-                    {
-                        "label": "mock settings",
-                        "type": "button",
-                        "bbox": [120, 0, 220, 100],
-                    },
-                ],
-            },
-            ensure_ascii=False,
+        return "\n".join(
+            [
+                "BEGIN_ELEMENTS",
+                "text | type | x1 | y1 | x2 | y2 | focused",
+                "mock icon | app_icon | 0 | 0 | 100 | 100 | false",
+                "mock settings | button | 120 | 0 | 220 | 100 | true",
+                "END_ELEMENTS",
+            ]
         )
 
     return f"mock answer for {sample.task}"

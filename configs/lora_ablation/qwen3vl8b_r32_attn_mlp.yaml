@@ -26,7 +26,7 @@ data:
   inference_image_dir: /mnt/nvme0/vlm_distill/validation_data
   image_root: .
   # Keep this small for the first smoke test. Set to empty/null for full training.
-  max_samples: 
+  max_samples: 5
 
 teacher:
   backend: hf
@@ -93,52 +93,43 @@ distillation:
   confidence_weighting: true
   min_teacher_confidence: 0.35
   prompt_template: |
-    You are an Android TV GUI parsing assistant.
+    You are an Android TV visual grounding assistant.
 
-    Task:
-    {query}
+    Analyze the screenshot and list all visible interactive UI elements.
 
-    Identify all visible interactive UI elements in this screenshot.
+    Return line-based output only.
+    Each line must use exactly this format:
 
-    Interactive elements include:
+    text | x_min,y_min,x_max,y_max | focused
 
-    * tabs
-    * buttons
-    * app icons
-    * app tiles
-    * menu items
-    * carousel tiles
-    * focused or highlighted items
-    * toggles or switches
-    * search boxes or text inputs
-    * clickable text links
-    * settings, account, search, or navigation icons
-
-    Exclude:
-
-    * movie descriptions
-    * recommendation summaries
-    * long informational text
-    * advertisements
-    * decorative or non-interactive text
+    Use normalized 0-1000 coordinates:
+    - top-left of the image is 0,0
+    - bottom-right of the image is 1000,1000
+    - x_min,y_min is the top-left corner of the element
+    - x_max,y_max is the bottom-right corner of the element
 
     Rules:
+    - One visible interactive UI element per line.
+    - Each line must contain exactly two " | " separators.
+    - The coordinate field must contain exactly four integers separated by commas.
+    - Coordinates must be integers from 0 to 1000.
+    - x_min < x_max and y_min < y_max.
+    - Do not concatenate coordinates.
+    - Do not use decimals, negative numbers, or extra coordinates.
+    - focused must be exactly true or false.
+    - Include all visible interactive UI elements.
+    - Include tabs, buttons, app icons, app tiles, menu items, carousel tiles, focused items, toggles, search boxes, clickable text, and navigation icons.
+    - Do not include decorative graphics, duplicate elements, or long non-clickable descriptions.
+    - Use concise labels only.
+    - Do not return JSON, markdown, explanations, bullets, numbering, headers, or comments.
 
-    * Prefer recall over brevity.
-    * Do not return only the top navigation bar.
-    * Include every visible app icon, tile, card, tab, button, menu item, and focused item.
-    * If there are multiple rows or carousels, inspect all visible rows.
-    * If the text is unreadable but the element is clearly interactive, use a short visual name.
+    Example:
+    Picture | 145,238,276,292 | false
+    General | 145,348,276,404 | true
+    Network Settings | 705,396,807,432 | false
 
-    Return one UI element per line using exactly this format:
-    <label> | <x1>,<y1>,<x2>,<y2> | <focused>
+    Now output only the lines.
 
-    Rules:
-    - Do not output JSON.
-    - Do not use markdown.
-    - Do not add explanations.
-    - Use pixel coordinates in the original image.
-    - focused must be true or false.
   kd_temperature: 2.0
   dbild_top_k: 64
   dbild_top_k_mode: kneedle

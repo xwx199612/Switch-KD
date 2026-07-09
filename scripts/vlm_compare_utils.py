@@ -529,27 +529,45 @@ def _parse_focused_value(value: str) -> bool | None:
 
 def parse_line_bbox_elements(raw_text: str) -> list[dict[str, Any]]:
     elements: list[dict[str, Any]] = []
+    lines = raw_text.splitlines()
+    begin_index = next((index for index, line in enumerate(lines) if line.strip() == "BEGIN_ELEMENTS"), None)
+    end_index = next((index for index, line in enumerate(lines) if line.strip() == "END_ELEMENTS"), None)
+    if begin_index is None or end_index is None or end_index <= begin_index:
+        return elements
 
-    for raw_line in raw_text.splitlines():
+    saw_header = False
+    for raw_line in lines[begin_index + 1 : end_index]:
         line = raw_line.strip()
         if not line:
             continue
 
         parts = [part.strip() for part in line.split("|")]
-        if len(parts) != 3:
+        if not saw_header and tuple(part.casefold() for part in parts) == (
+            "text",
+            "type",
+            "x1",
+            "y1",
+            "x2",
+            "y2",
+            "focused",
+        ):
+            saw_header = True
+            continue
+        if len(parts) != 7:
             continue
 
-        text, bbox_text, focused_text = parts
+        text, element_type, raw_x1, raw_y1, raw_x2, raw_y2, focused_text = parts
         text = _strip_common_line_prefix(text)
         if not text or _looks_like_non_object_line(text):
             continue
-
-        bbox_parts = [part.strip() for part in bbox_text.split(",")]
-        if len(bbox_parts) != 4:
+        if element_type not in {"button", "tab", "app_icon", "card", "menu_item", "input", "unknown"}:
             continue
+
         try:
-            bbox = [float(value) for value in bbox_parts]
+            bbox = [int(raw_x1), int(raw_y1), int(raw_x2), int(raw_y2)]
         except (TypeError, ValueError):
+            continue
+        if not (0 <= bbox[0] < bbox[2] <= 1000 and 0 <= bbox[1] < bbox[3] <= 1000):
             continue
 
         focused = _parse_focused_value(focused_text)
@@ -559,7 +577,8 @@ def parse_line_bbox_elements(raw_text: str) -> list[dict[str, Any]]:
         elements.append(
             {
                 "text": text,
-                "bbox": bbox,
+                "type": element_type,
+                "bbox_norm": bbox,
                 "focused": focused,
             }
         )
