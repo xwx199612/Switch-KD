@@ -81,3 +81,14 @@ def test_partial_accumulation_scaling_and_empty_window_are_safe():
     model.weight.grad = None
     _scale_partial_accumulation_gradients(model, grad_accum_steps=4, micro_step=0)
     assert model.weight.grad is None
+
+
+def test_partial_accumulation_scaling_uses_current_window_step():
+    import torch
+
+    model = torch.nn.Linear(1, 1, bias=False)
+    model.weight.grad = torch.tensor([[1.0]])
+
+    _scale_partial_accumulation_gradients(model, grad_accum_steps=8, micro_step=10)
+
+    assert model.weight.grad.item() == pytest.approx(4.0)

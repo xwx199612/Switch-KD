@@ -820,7 +820,7 @@ def _scale_partial_accumulation_gradients(model, *, grad_accum_steps: int, micro
     """Convert a partial window's full-window-scaled gradients to a true mean."""
     if micro_step <= 0 or micro_step % grad_accum_steps == 0:
         return
-    partial_scale = grad_accum_steps / micro_step
+    partial_scale = grad_accum_steps / (micro_step % grad_accum_steps)
     for parameter in model.parameters():
         if parameter.grad is not None:
             parameter.grad.mul_(partial_scale)
