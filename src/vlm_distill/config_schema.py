@@ -42,6 +42,7 @@ class TeacherConfig:
     temperature: float = 0.2
     max_new_tokens: int = 128
     image_resize: str = "original"
+    retry_on_invalid_parsing_json: bool = False
 
 
 @dataclass

@@ -107,19 +107,43 @@ def test_format_prompt_returns_exact_yaml_formatted_prompt_for_parsing(tmp_path:
     )
 
 
-def test_retry_prompt_reuses_original_prompt_with_generic_json_retry_prefix() -> None:
-    prompt = stage_teacher_precompute._build_parsing_retry_prompt("Task:\nList UI elements")
+def test_huggingface_teacher_does_not_retry_parsing_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _make_config(tmp_path)
+    sample = VlmSample(id="parsing-000004", image="screen.png", task="parsing", query="List UI elements")
+    calls: list[str] = []
+
+    teacher = object.__new__(stage_teacher_precompute.HuggingFaceTeacher)
+    teacher.config = config
+    monkeypatch.setattr(stage_teacher_precompute, "_load_teacher_image", lambda *_args, **_kwargs: object())
+
+    def _generate(**kwargs):
+        calls.append(kwargs["prompt"])
+        return '{"elements":[{"text":"Home"}]}', []
+
+    teacher._generate = _generate
+
+    answer = teacher.answer(sample)
+
+    assert answer["teacher_answer"] == '{"elements":[{"text":"Home"}]}'
+    assert calls == [stage_teacher_precompute._format_prompt(config, sample)]
+
+
+def test_retry_prompt_wraps_original_yaml_prompt_without_schema_duplication() -> None:
+    prompt = stage_teacher_precompute._build_retry_prompt("Task:\nList UI elements")
 
     assert prompt == (
-        "Previous response was not valid JSON. Retry. "
-        "Follow the original instructions exactly. Return valid JSON only.\n\n"
+        "Previous response was not valid JSON. Retry using the exact same instructions. "
+        "Return valid JSON only.\n\n"
         "Task:\nList UI elements"
     )
 
 
 def test_qwen_parsing_prompt_template_formats_successfully_and_escapes_json_braces() -> None:
     config = load_config("configs/qwen3vl8b_r32_attn_mlp.yaml")
-    sample = VlmSample(id="parsing-000004", image="screen.png", task="parsing", query="Find the focused tile.")
+    sample = VlmSample(id="parsing-000005", image="screen.png", task="parsing", query="Find the focused tile.")
 
     prompt = stage_teacher_precompute._format_prompt(config, sample)
 
@@ -132,3 +156,7 @@ def test_qwen_parsing_prompt_template_formats_successfully_and_escapes_json_brac
 
 def test_parsing_output_instructions_function_is_removed() -> None:
     assert not hasattr(stage_teacher_precompute, "_parsing_output_instructions")
+
+
+def test_legacy_parsing_retry_prompt_function_is_removed() -> None:
+    assert not hasattr(stage_teacher_precompute, "_build_parsing_retry_prompt")

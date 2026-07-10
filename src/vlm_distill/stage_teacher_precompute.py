@@ -170,19 +170,17 @@ class HuggingFaceTeacher:
         prompt = _format_prompt(self.config, sample)
         answer, _generated_ids = self._generate(image=image, prompt=prompt, sample=sample)
         answer = _normalize_teacher_answer(sample, answer)
-
-        if sample.task == "parsing" and _parsing_quality_score(answer) <= 2:
-            retry_prompt = _build_parsing_retry_prompt(prompt)
-            retry_answer, _retry_ids = self._generate(
-                image=image,
-                prompt=retry_prompt,
-                sample=sample,
-                repetition_penalty=1.05,
-                no_repeat_ngram_size=3,
-            )
-            retry_answer = _normalize_teacher_answer(sample, retry_answer)
-            if _parsing_quality_score(retry_answer) >= _parsing_quality_score(answer):
-                answer = retry_answer
+        if sample.task == "parsing" and self.config.teacher.retry_on_invalid_parsing_json:
+            parsed = parse_parsing_answer(answer)
+            if not parsed.get("usable"):
+                retry_answer, _retry_ids = self._generate(
+                    image=image,
+                    prompt=_build_retry_prompt(prompt),
+                    sample=sample,
+                    repetition_penalty=1.05,
+                    no_repeat_ngram_size=3,
+                )
+                answer = _normalize_teacher_answer(sample, retry_answer)
 
         return {
             "teacher_answer": answer.strip(),
@@ -757,13 +755,6 @@ def _validate_generated_label(sample: VlmSample, label: dict, *, decoder=None) -
         raise ValueError(f"{sample.id}: decoded teacher_tokens do not match teacher_answer")
 
 
-def _parsing_quality_score(answer: str) -> int:
-    parsed = parse_parsing_answer(answer)
-    if parsed.get("usable"):
-        return int(parsed["element_count"]) * 2
-    return 0
-
-
 def _looks_degenerate_screen_output(answer: str) -> bool:
     stripped = answer.strip()
     if not stripped:
@@ -776,10 +767,10 @@ def _looks_degenerate_screen_output(answer: str) -> bool:
     return False
 
 
-def _build_parsing_retry_prompt(prompt: str) -> str:
+def _build_retry_prompt(prompt: str) -> str:
     return (
-        "Previous response was not valid JSON. Retry. "
-        "Follow the original instructions exactly. Return valid JSON only.\n\n"
+        "Previous response was not valid JSON. Retry using the exact same instructions. "
+        "Return valid JSON only.\n\n"
         f"{prompt}"
     )
 

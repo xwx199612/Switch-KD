@@ -71,6 +71,7 @@ distillation:
 
     config = load_config(config_path)
     assert config.distillation.prompt_template == "Query: {query}\nAnswer:"
+    assert config.teacher.retry_on_invalid_parsing_json is False
 
 
 def test_load_config_interpolates_response_options(tmp_path: Path):
