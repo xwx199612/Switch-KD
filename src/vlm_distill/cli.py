@@ -23,7 +23,7 @@ from .stage_merge_adapter import merge_student_adapter
 from .stage_prediction_evaluation import evaluate_predictions
 from .stage_student_prediction import create_student_predictions
 from .stage_teacher_precompute import create_teacher_precompute_dataset
-from .stage_student_training import train_student
+from .train_online_align_dbild import run_training
 from .stage_visual_switch_logits import create_visual_switch_dataset
 from .switch_logits_validation import validate_switch_logits_file
 from .teacher_label_stats import format_teacher_label_summary, summarize_teacher_label_file
@@ -205,7 +205,8 @@ def main() -> None:
         return
 
     if args.command == "train":
-        artifact = train_student(config)
+        print("Training backend: online_align_dbild")
+        artifact = run_training(config)
         print(f"OK student artifact written: {artifact}")
         return
 

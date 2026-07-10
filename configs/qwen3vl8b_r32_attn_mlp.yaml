@@ -89,7 +89,10 @@ training:
 
 
 distillation:
-  method: response
+  method: online_align_dbild
+  lm_loss_weight: 1.0
+  dbild_loss_weight: 0.5
+  vsd_loss_weight: 0.0
   confidence_weighting: true
   min_teacher_confidence: 0.35
   prompt_template: |

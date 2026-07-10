@@ -185,8 +185,31 @@ vlm-distill switch-logits \
 
 ```powershell
 vlm-distill train \
-  --config configs/switch_kd_4060ti.yaml
+  --config configs/qwen3vl8b_r32_attn_mlp.yaml
 ```
+
+The official `train` command executes `src/vlm_distill/train_online_align_dbild.py`
+through `run_training(config)` and is named **Online Align DBiLD**. The equivalent
+module invocation is:
+
+```bash
+python -m vlm_distill.cli train \
+  --config configs/qwen3vl8b_r32_attn_mlp.yaml
+```
+
+Its implemented objective is:
+
+```text
+L = lambda_lm * L_LM + lambda_align * L_DBiLD
+```
+
+Teacher logits and student logits are produced online on every training step for
+the same answer span; offline teacher logits are not read. Startup validation
+checks teacher-token identity, teacher/student tokenizer identity, and strict
+teacher/student answer-position logit alignment. Dynamic Top-K / Kneedle DBiLD
+is used. The student vision encoder is frozen, and VSD is disabled because this
+experiment assumes teacher and student share the same vision backbone. The
+configured LoRA targets include both attention and MLP modules.
 
 Single-process single-GPU training with model sharding:
 
@@ -743,14 +766,14 @@ Notes for Qwen2.5-VL:
 * If you want to measure the gap between the distilled 3B student and the 7B teacher, keep the teacher label JSONL as the evaluation reference and run `vlm-distill evaluate` after training.
 
 ---
-# Online DBiLD Workflow
+# Online Align DBiLD Workflow
 
 Teacher-label generation plus online DBiLD training:
 
 ```bash
 python -m vlm_distill.cli teacher-precompute --config configs/parsing_switch_kd.yaml
 python -m vlm_distill.cli validate-teacher --config configs/parsing_switch_kd.yaml
-python -m vlm_distill.train_online_align_dbild --config configs/lora_ablation/qwen3vl8b_r32_attn_mlp.yaml --max-steps 1
+python -m vlm_distill.cli train --config configs/qwen3vl8b_r32_attn_mlp.yaml
 ```
 
 This project no longer stores offline teacher logits. Online DBiLD computes
@@ -759,8 +782,12 @@ teacher/student logits on the fly during training.
 Training objective:
 
 ```text
-L_total = LM Loss + DBiLD Loss
+L = lambda_lm * L_LM + lambda_align * L_DBiLD
 ```
+
+This is the online Align DBiLD experiment, not the complete original-paper
+Switch-KD implementation with VSD enabled. `training.batch_size` is intentionally
+limited to `1` so answer logits remain densely and strictly aligned.
 
 ---
 

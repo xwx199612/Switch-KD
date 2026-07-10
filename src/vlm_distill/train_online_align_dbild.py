@@ -812,6 +812,20 @@ def _build_optimizer(config, model):
     return torch.optim.AdamW(trainable_parameters, lr=config.training.learning_rate)
 
 
+def _weighted_online_align_loss(lm_loss, align_loss, *, lm_loss_weight: float, dbild_loss_weight: float):
+    return lm_loss_weight * lm_loss + dbild_loss_weight * align_loss
+
+
+def _scale_partial_accumulation_gradients(model, *, grad_accum_steps: int, micro_step: int) -> None:
+    """Convert a partial window's full-window-scaled gradients to a true mean."""
+    if micro_step <= 0 or micro_step % grad_accum_steps == 0:
+        return
+    partial_scale = grad_accum_steps / micro_step
+    for parameter in model.parameters():
+        if parameter.grad is not None:
+            parameter.grad.mul_(partial_scale)
+
+
 def _dataloader(dataset, processor, batch_size: int):
     import torch
 
@@ -880,11 +894,30 @@ def _format_device_map_summary(device_map: Any) -> str:
 def run_training(config, *, max_steps_override: int | None = None) -> Path:
     import torch
 
+    if config.distillation.method != "online_align_dbild":
+        raise ValueError(
+            "The train command uses online Align DBiLD and requires "
+            "distillation.method='online_align_dbild'."
+        )
+    if config.distillation.vsd_loss_weight != 0.0:
+        raise ValueError(
+            "Online Align DBiLD training does not implement a VSD forward path; "
+            "distillation.vsd_loss_weight must be 0.0."
+        )
     if config.training.batch_size != 1:
         raise ValueError(
             "This online full-logits DBiLD script currently requires training.batch_size == 1 "
             "for strict causal shifted teacher/student answer-logit alignment."
         )
+
+    print("Online Align DBiLD training")
+    print("offline_teacher_logits=disabled")
+    print("teacher/student logits source=online forward pass during training")
+    print("student vision frozen: true")
+    print("VSD enabled: false")
+    print(f"lm_loss_weight={config.distillation.lm_loss_weight}")
+    print(f"dbild_loss_weight={config.distillation.dbild_loss_weight}")
+    print(f"vsd_loss_weight={config.distillation.vsd_loss_weight}")
 
     rows = _validate_rows(config)
     teacher_model, teacher_processor, teacher_model_path, _teacher_device_map, teacher_input_device = _load_teacher(config)
@@ -935,9 +968,6 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
         "vocab_prefix_alignment_used": 0,
     }
 
-    print("Online Align DBiLD training")
-    print("offline_teacher_logits=disabled")
-    print("teacher/student logits source=online forward pass during training")
     print(f"teacher_model_path={teacher_model_path}")
     print(f"student_model_path={student_model_path}")
     print(f"teacher_quantization={config.teacher.quantization}")
@@ -946,8 +976,6 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
     print(f"teacher_hf_device_map={_format_device_map_summary(getattr(teacher_model, 'hf_device_map', None))}")
     print(f"teacher_input_device={teacher_input_device}")
     print(f"mixed_precision={config.training.mixed_precision}")
-    print("student vision frozen: true")
-    print("VSD enabled: false")
     print(f"trainable_param_count={trainable_summary.count}")
     print(f"trainable_param_ratio={trainable_summary.ratio:.6f}")
     print(f"trainable_tensor_count={trainable_summary.tensor_count}")
@@ -956,6 +984,7 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
         if total_target_steps is not None and global_step >= total_target_steps:
             break
         optimizer.zero_grad(set_to_none=True)
+        micro_step = 0
         for micro_step, batch in enumerate(dataloader, start=1):
             if total_target_steps is not None and global_step >= total_target_steps:
                 break
@@ -1043,7 +1072,12 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
                 )
                 # VSD is intentionally disabled because teacher and student share the same vision backbone.
                 # This script targets online full-logits DBiLD L_Align reproduction, not full Switch-KD with VSD.
-                total_loss = lm_loss + align_loss
+                total_loss = _weighted_online_align_loss(
+                    lm_loss,
+                    align_loss,
+                    lm_loss_weight=config.distillation.lm_loss_weight,
+                    dbild_loss_weight=config.distillation.dbild_loss_weight,
+                )
                 last_step_log_values = {
                     "lm_loss": float(lm_loss.detach().float().item()),
                     "align_loss": float(align_loss.detach().float().item()),
@@ -1101,7 +1135,14 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
                 if total_target_steps is not None and global_step >= total_target_steps:
                     break
 
-        if micro_step % grad_accum_steps != 0 and (total_target_steps is None or global_step < total_target_steps):
+        if micro_step > 0 and micro_step % grad_accum_steps != 0 and (
+            total_target_steps is None or global_step < total_target_steps
+        ):
+            _scale_partial_accumulation_gradients(
+                student_model,
+                grad_accum_steps=grad_accum_steps,
+                micro_step=micro_step,
+            )
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             global_step += 1
