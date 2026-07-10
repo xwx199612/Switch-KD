@@ -35,13 +35,16 @@ _SCHEMA_TOKEN_TEXTS = {
 
 def parse_parsing_answer(raw_text: str) -> dict[str, Any]:
     try:
-        parsed = parse_json_like(raw_text)
+        parsed, salvage_metadata = _parse_json_like_with_metadata(raw_text)
     except ValueError as exc:
         return _parsed_payload(
             elements=[],
             parse_errors=[],
             parse_error=str(exc),
             coordinate_system=None,
+            salvaged=False,
+            salvage_reason=None,
+            dropped_tail_element=False,
         )
 
     if not isinstance(parsed, dict):
@@ -50,6 +53,9 @@ def parse_parsing_answer(raw_text: str) -> dict[str, Any]:
             parse_errors=[],
             parse_error="Parsed JSON must be an object.",
             coordinate_system=None,
+            salvaged=False,
+            salvage_reason=None,
+            dropped_tail_element=False,
         )
 
     raw_elements = parsed.get("elements")
@@ -59,6 +65,9 @@ def parse_parsing_answer(raw_text: str) -> dict[str, Any]:
             parse_errors=[],
             parse_error="Parsed JSON did not contain an elements list.",
             coordinate_system=None,
+            salvaged=False,
+            salvage_reason=None,
+            dropped_tail_element=False,
         )
 
     coordinate_system = parsed.get("coordinate_system")
@@ -111,6 +120,9 @@ def parse_parsing_answer(raw_text: str) -> dict[str, Any]:
         ],
         parse_error=parse_error,
         coordinate_system=normalized_coordinate_system if elements else None,
+        salvaged=salvage_metadata["salvaged"],
+        salvage_reason=salvage_metadata["salvage_reason"],
+        dropped_tail_element=salvage_metadata["dropped_tail_element"],
     )
 
 
@@ -134,6 +146,11 @@ def serialize_parsing_label(row: dict[str, Any]) -> str:
 
 
 def parse_json_like(raw_text: str) -> object:
+    parsed, _salvage_metadata = _parse_json_like_with_metadata(raw_text)
+    return parsed
+
+
+def _parse_json_like_with_metadata(raw_text: str) -> tuple[object, dict[str, Any]]:
     text = raw_text.strip()
     if not text:
         raise ValueError("Empty raw text.")
@@ -151,9 +168,21 @@ def parse_json_like(raw_text: str) -> object:
     errors: list[str] = []
     for label, candidate in attempts:
         try:
-            return json.loads(_normalize_json_typography(candidate))
+            return json.loads(_normalize_json_typography(candidate)), {
+                "salvaged": False,
+                "salvage_reason": None,
+                "dropped_tail_element": False,
+            }
         except json.JSONDecodeError as exc:
             errors.append(f"{label}: {exc.msg} at line {exc.lineno} column {exc.colno}")
+
+    salvaged_json = _salvage_truncated_tail_elements(_normalize_json_typography(unfenced))
+    if salvaged_json is not None:
+        return json.loads(salvaged_json), {
+            "salvaged": True,
+            "salvage_reason": "truncated_tail_element_dropped",
+            "dropped_tail_element": True,
+        }
 
     raise ValueError("; ".join(errors) if errors else "Unable to parse JSON content.")
 
@@ -190,6 +219,9 @@ def _parsed_payload(
     parse_errors: list[dict[str, Any]],
     parse_error: str | None,
     coordinate_system: str | None,
+    salvaged: bool,
+    salvage_reason: str | None,
+    dropped_tail_element: bool,
 ) -> dict[str, Any]:
     usable = bool(elements)
     parse_ok = usable and not parse_errors and coordinate_system == COORDINATE_SYSTEM_NORMALIZED_0_1000
@@ -201,6 +233,9 @@ def _parsed_payload(
         "elements": elements,
         "element_count": len(elements),
         "coordinate_system": coordinate_system,
+        "salvaged": salvaged,
+        "salvage_reason": salvage_reason,
+        "dropped_tail_element": dropped_tail_element,
     }
 
 
@@ -245,6 +280,103 @@ def _extract_first_balanced_block(text: str, open_char: str, close_char: str) ->
 
 def _normalize_json_typography(text: str) -> str:
     return text.replace("“", '"').replace("”", '"').replace("：", ":")
+
+
+def _salvage_truncated_tail_elements(text: str) -> str | None:
+    array_start = _find_elements_array_start(text)
+    if array_start is None:
+        return None
+
+    complete_objects: list[str] = []
+    index = array_start
+    expect_element = True
+
+    while True:
+        index = _skip_json_whitespace(text, index)
+        if expect_element:
+            if index >= len(text):
+                return None
+            if text[index] == "]":
+                return None
+            if text[index] != "{":
+                return None
+            object_block, next_index = _extract_balanced_object_at(text, index)
+            if object_block is None:
+                break
+            try:
+                parsed_object = json.loads(object_block)
+            except json.JSONDecodeError:
+                return None
+            if not isinstance(parsed_object, dict):
+                return None
+            complete_objects.append(object_block)
+            index = next_index
+            expect_element = False
+            continue
+
+        if index >= len(text):
+            return None
+        if text[index] == ",":
+            index += 1
+            expect_element = True
+            continue
+        if text[index] == "]":
+            return None
+        return None
+
+    if not complete_objects:
+        return None
+
+    elements_payload = ",".join(complete_objects)
+    return (
+        "{"
+        f'"elements":[{elements_payload}],'
+        f'"coordinate_system":"{COORDINATE_SYSTEM_NORMALIZED_0_1000}"'
+        "}"
+    )
+
+
+def _find_elements_array_start(text: str) -> int | None:
+    match = re.search(r'"elements"\s*:', text)
+    if match is None:
+        return None
+    index = _skip_json_whitespace(text, match.end())
+    if index >= len(text) or text[index] != "[":
+        return None
+    return index + 1
+
+
+def _skip_json_whitespace(text: str, index: int) -> int:
+    while index < len(text) and text[index] in " \t\r\n":
+        index += 1
+    return index
+
+
+def _extract_balanced_object_at(text: str, start: int) -> tuple[str | None, int]:
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            depth += 1
+            continue
+        if char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1], index + 1
+    return None, start
 
 
 def _normalize_bbox_value(value: Any) -> list[int] | None:

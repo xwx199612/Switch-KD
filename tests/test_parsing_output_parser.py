@@ -30,6 +30,9 @@ def test_parser_accepts_valid_json_schema() -> None:
         ],
         "element_count": 2,
         "coordinate_system": "normalized_0_1000",
+        "salvaged": False,
+        "salvage_reason": None,
+        "dropped_tail_element": False,
     }
 
 
@@ -38,6 +41,7 @@ def test_parser_rejects_pipe_table_format() -> None:
 
     assert parsed["parse_ok"] is False
     assert parsed["usable"] is False
+    assert parsed["salvaged"] is False
     assert "JSON" in str(parsed["parse_error"])
 
 
@@ -57,6 +61,7 @@ def test_parser_ignores_type_if_json_includes_it() -> None:
     )
 
     assert parsed["parse_ok"] is True
+    assert parsed["salvaged"] is False
     assert parsed["elements"] == [{"text": "Search", "bbox_norm": [1, 2, 3, 4], "focused": False}]
 
 
@@ -73,6 +78,7 @@ def test_parser_drops_schema_label_text_rows() -> None:
     )
 
     assert parsed["parse_ok"] is True
+    assert parsed["salvaged"] is False
     assert parsed["element_count"] == 1
     assert parsed["elements"][0]["text"] == "Search"
 
@@ -90,6 +96,7 @@ def test_invalid_bbox_norm_is_rejected() -> None:
 
     assert parsed["parse_ok"] is False
     assert parsed["usable"] is False
+    assert parsed["salvaged"] is False
 
 
 def test_missing_bbox_norm_is_rejected() -> None:
@@ -105,6 +112,7 @@ def test_missing_bbox_norm_is_rejected() -> None:
 
     assert parsed["parse_ok"] is False
     assert parsed["usable"] is False
+    assert parsed["salvaged"] is False
 
 
 def test_missing_focused_defaults_to_false() -> None:
@@ -119,6 +127,7 @@ def test_missing_focused_defaults_to_false() -> None:
     )
 
     assert parsed["parse_ok"] is True
+    assert parsed["salvaged"] is False
     assert parsed["elements"][0]["focused"] is False
 
 
@@ -129,4 +138,74 @@ def test_parser_normalizes_safe_json_typography_only() -> None:
     )
 
     assert parsed["parse_ok"] is True
+    assert parsed["salvaged"] is False
     assert parsed["elements"] == [{"text": "Search", "bbox_norm": [1, 2, 3, 4], "focused": False}]
+
+
+def test_parser_salvages_complete_elements_from_truncated_tail() -> None:
+    raw_text = (
+        '{\n'
+        '  "elements": [\n'
+        '    {"text": "Home", "bbox_norm": [250, 180, 300, 225], "focused": true},\n'
+        '    {"text": "Broken", "bbox_norm": [200, 745, 3\n'
+    )
+
+    parsed = parse_parsing_answer(raw_text)
+
+    assert parsed["parse_ok"] is True
+    assert parsed["usable"] is True
+    assert parsed["salvaged"] is True
+    assert parsed["salvage_reason"] == "truncated_tail_element_dropped"
+    assert parsed["dropped_tail_element"] is True
+    assert parsed["elements"] == [
+        {"text": "Home", "bbox_norm": [250, 180, 300, 225], "focused": True}
+    ]
+
+
+def test_salvaged_elements_still_go_through_normalize_element() -> None:
+    raw_text = (
+        '{\n'
+        '  "elements": [\n'
+        '    {"text": "  Home  ", "bbox_norm": [250, 180, 300, 225]},\n'
+        '    {"text": "Broken", "bbox_norm": [200, 745, 3\n'
+    )
+
+    parsed = parse_parsing_answer(raw_text)
+
+    assert parsed["parse_ok"] is True
+    assert parsed["salvaged"] is True
+    assert parsed["elements"] == [
+        {"text": "Home", "bbox_norm": [250, 180, 300, 225], "focused": False}
+    ]
+
+
+def test_salvage_does_not_accept_malformed_key_variants() -> None:
+    raw_text = (
+        '{\n'
+        '  "elements": [\n'
+        '    {"text": "Home", "box_norm": [250, 180, 300, 225], "focused": true},\n'
+        '    {"text": "Broken", "bbox_norm": [200, 745, 3\n'
+    )
+
+    parsed = parse_parsing_answer(raw_text)
+
+    assert parsed["salvaged"] is True
+    assert parsed["parse_ok"] is False
+    assert parsed["usable"] is False
+    assert parsed["elements"] == []
+    assert "bbox_norm is required" in str(parsed["parse_error"])
+
+
+def test_salvage_fails_when_no_complete_elements_exist() -> None:
+    raw_text = (
+        '{\n'
+        '  "elements": [\n'
+        '    {"text": "Broken", "bbox_norm": [200, 745, 3\n'
+    )
+
+    parsed = parse_parsing_answer(raw_text)
+
+    assert parsed["parse_ok"] is False
+    assert parsed["usable"] is False
+    assert parsed["salvaged"] is False
+    assert parsed["elements"] == []
