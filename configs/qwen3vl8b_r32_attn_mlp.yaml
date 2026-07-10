@@ -26,7 +26,7 @@ data:
   inference_image_dir: /mnt/nvme0/vlm_distill/validation_data
   image_root: .
   # Keep this small for the first smoke test. Set to empty/null for full training.
-  max_samples: 5
+  max_samples: 
 
 teacher:
   backend: hf
@@ -36,7 +36,7 @@ teacher:
   quantization: "{teacher_quantization}"
   attn_implementation: sdpa
   temperature: 0.0
-  max_new_tokens: 768
+  max_new_tokens: 1280
   image_resize: "{quality}"
 
 student:
