@@ -172,7 +172,7 @@ class HuggingFaceTeacher:
         answer = _normalize_teacher_answer(sample, answer)
 
         if sample.task == "parsing" and _parsing_quality_score(answer) <= 2:
-            retry_prompt = _build_parsing_retry_prompt(sample)
+            retry_prompt = _build_parsing_retry_prompt(prompt)
             retry_answer, _retry_ids = self._generate(
                 image=image,
                 prompt=retry_prompt,
@@ -776,12 +776,11 @@ def _looks_degenerate_screen_output(answer: str) -> bool:
     return False
 
 
-def _build_parsing_retry_prompt(sample: VlmSample) -> str:
-    query = sample.query or "List all visible interactive UI elements on this screen."
+def _build_parsing_retry_prompt(prompt: str) -> str:
     return (
-        "You are parsing a GUI screenshot for a small student model distillation dataset.\n"
-        f"Task: {query}\n"
-        f"{_parsing_output_instructions()}"
+        "Previous response was not valid JSON. Retry. "
+        "Follow the original instructions exactly. Return valid JSON only.\n\n"
+        f"{prompt}"
     )
 
 
@@ -1059,41 +1058,6 @@ def _warn_offline_teacher_logits_disabled(config: PipelineConfig) -> None:
         )
 
 
-def _parsing_output_instructions() -> str:
-    return (
-        "Return valid JSON only.\n"
-        'Use ASCII double quotes only: ".\n'
-        'Do not use smart quotes: “ ”.\n'
-        "Do not use markdown.\n"
-        "Do not explain.\n"
-        "Use this exact schema:\n"
-        "{\n"
-        '  "elements": [\n'
-        "    {\n"
-        '      "text": "visible UI element name",\n'
-        '      "bbox_norm": [80,120,140,180],\n'
-        '      "focused": false\n'
-        "    }\n"
-        "  ],\n"
-        '  "coordinate_system": "normalized_0_1000"\n'
-        "}\n"
-        "Rules:\n"
-        '- Every element must use exactly these keys: "text", "bbox_norm", "focused".\n'
-        "- Do not include type.\n"
-        "- Do not use alternative bbox key names: bbox, box_norm, bx_norm, bbox norm, bboxNorm, boxed_norm.\n"
-        "- bbox_norm must be an array of exactly four integers, e.g. [80,120,140,180].\n"
-        "- Do not write bbox_norm as comma-separated text.\n"
-        "- Coordinates must satisfy 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000.\n"
-        "- text must be the visible UI label or a short visual name of the element.\n"
-        "- Do not use schema words such as text, button, tab, app_icon, menu_item, icon, bbox_norm, coordinate_system, or elements as text unless that exact word is visibly displayed on screen.\n"
-        "- focused must be exactly true or false.\n"
-        "- If focused is not visually clear, use false.\n"
-        '- Include "coordinate_system": "normalized_0_1000".\n'
-        "- Prioritize valid JSON over recall.\n"
-        "- If unsure about an element bbox, omit that element."
-    )
-
-
 def _format_prompt(config: PipelineConfig, sample: VlmSample) -> str:
     template = config.distillation.prompt_template
 
@@ -1109,13 +1073,7 @@ def _format_prompt(config: PipelineConfig, sample: VlmSample) -> str:
             "Supported placeholders are: query, question, task."
         ) from exc
 
-    if sample.task != "parsing":
-        return prompt
-
-    return (
-        f"{prompt.rstrip()}\n\n"
-        f"{_parsing_output_instructions()}"
-    )
+    return prompt
 
 
 def _mock_answer(sample: VlmSample) -> str:

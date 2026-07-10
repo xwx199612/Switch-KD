@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from vlm_distill.config_schema import DataConfig, DistillationConfig, PipelineConfig, StudentConfig, TeacherConfig
+from vlm_distill.config_schema import DataConfig, DistillationConfig, PipelineConfig, StudentConfig, TeacherConfig, load_config
 from vlm_distill.data_manifest import VlmSample
 import vlm_distill.stage_teacher_precompute as stage_teacher_precompute
 
@@ -83,32 +83,52 @@ def test_teacher_precompute_skips_invalid_parsing_rows_and_writes_sidecar_only(
     assert failure["json_sidecar"] == "json/teacher/parsing-000002.json"
 
 
-def test_format_prompt_is_canonical_source_of_strict_parsing_schema(tmp_path: Path) -> None:
+def test_format_prompt_returns_exact_yaml_formatted_prompt_for_parsing(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
-    config.distillation.prompt_template = "List visible UI elements."
+    config.distillation.prompt_template = (
+        "Task:\n"
+        "{query}\n\n"
+        "Use this exact schema:\n"
+        "{{\n"
+        '  "elements": []\n'
+        "}}"
+    )
     sample = VlmSample(id="parsing-000003", image="screen.png", task="parsing", query="List UI elements")
 
     prompt = stage_teacher_precompute._format_prompt(config, sample)
 
-    assert "List visible UI elements." in prompt
-    assert 'Use ASCII double quotes only: ".' in prompt
-    assert 'Do not use smart quotes: “ ”.' in prompt
-    assert 'Every element must use exactly these keys: "text", "bbox_norm", "focused".' in prompt
-    assert "Do not include type." in prompt
-    assert "Do not use alternative bbox key names: bbox, box_norm, bx_norm, bbox norm, bboxNorm, boxed_norm." in prompt
-    assert "bbox_norm must be an array of exactly four integers, e.g. [80,120,140,180]." in prompt
-    assert 'Include "coordinate_system": "normalized_0_1000".' in prompt
-    assert "If unsure about an element bbox, omit that element." in prompt
-    assert "Return at most" not in prompt
+    assert prompt == (
+        "Task:\n"
+        "List UI elements\n\n"
+        "Use this exact schema:\n"
+        "{\n"
+        '  "elements": []\n'
+        "}"
+    )
 
 
-def test_retry_prompt_uses_same_strict_parsing_rules() -> None:
-    sample = VlmSample(id="parsing-000004", image="screen.png", task="parsing", query="List UI elements")
+def test_retry_prompt_reuses_original_prompt_with_generic_json_retry_prefix() -> None:
+    prompt = stage_teacher_precompute._build_parsing_retry_prompt("Task:\nList UI elements")
 
-    prompt = stage_teacher_precompute._build_parsing_retry_prompt(sample)
+    assert prompt == (
+        "Previous response was not valid JSON. Retry. "
+        "Follow the original instructions exactly. Return valid JSON only.\n\n"
+        "Task:\nList UI elements"
+    )
 
-    assert "Prioritize valid JSON over recall." in prompt
-    assert 'Every element must use exactly these keys: "text", "bbox_norm", "focused".' in prompt
-    assert "bbox_norm must be an array of exactly four integers, e.g. [80,120,140,180]." in prompt
-    assert "Do not write bbox_norm as comma-separated text." in prompt
-    assert "Return at most" not in prompt
+
+def test_qwen_parsing_prompt_template_formats_successfully_and_escapes_json_braces() -> None:
+    config = load_config("configs/qwen3vl8b_r32_attn_mlp.yaml")
+    sample = VlmSample(id="parsing-000004", image="screen.png", task="parsing", query="Find the focused tile.")
+
+    prompt = stage_teacher_precompute._format_prompt(config, sample)
+
+    assert "Task:\nFind the focused tile." in prompt
+    assert '"elements": [' in prompt
+    assert '"coordinate_system": "normalized_0_1000"' in prompt
+    assert "{{" not in prompt
+    assert "}}" not in prompt
+
+
+def test_parsing_output_instructions_function_is_removed() -> None:
+    assert not hasattr(stage_teacher_precompute, "_parsing_output_instructions")

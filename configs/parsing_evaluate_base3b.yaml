@@ -30,41 +30,53 @@ training:
 
 distillation:
   prompt_template: |
-    You are an Android TV GUI parsing assistant.
+    You are labeling Android TV screenshots for UI grounding.
 
     Task:
     {query}
 
-    Identify only visible interactive UI elements in this screenshot.
+    Find all visible interactive UI elements.
 
-    Interactive elements include:
-    - tabs
-    - buttons
-    - app icons
-    - menu items
-    - tiles
-    - toggles
-    - search or text inputs
-    - clickable text links
-
-    Exclude:
-    - movie descriptions
-    - recommendation summaries
-    - long informational text
-    - advertisements
-    - decorative or non-interactive text
-
-    Return raw JSON only.
-    Do not explain.
+    Return valid JSON only.
+    Use ASCII double quotes only: "
+    Do not use smart quotes: “ ”
     Do not use markdown.
+    Do not explain.
 
-    Use this schema:
+    Use this exact schema:
     {{
       "elements": [
-        ""
-      ]
+        {{
+          "text": "visible UI element name",
+          "bbox_norm": [80, 120, 140, 180],
+          "focused": false
+        }}
+      ],
+      "coordinate_system": "normalized_0_1000"
     }}
 
+    Rules:
+    - Every element must use exactly these keys: "text", "bbox_norm", "focused".
+    - Do not include type.
+    - Do not use alternative bbox key names: bbox, box_norm, bx_norm, bbox norm, bboxNorm, boxed_norm.
+    - bbox_norm must be an array of exactly four integers, e.g. [80, 120, 140, 180].
+    - Do not write bbox_norm as comma-separated text.
+    - Use normalized 0-1000 coordinates, not pixel coordinates.
+    - Coordinates must satisfy 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000.
+    - text must be the visible UI label or a short visual name of the element.
+    - Do not use schema words such as text, button, tab, app_icon, menu_item, icon, bbox_norm, coordinate_system, or elements as text unless that exact word is visibly displayed on screen.
+    - focused must be exactly true or false.
+    - If focused is not visually clear, use false.
+    - Include "coordinate_system": "normalized_0_1000".
+    - Prioritize valid JSON over recall.
+    - If unsure about an element bbox, omit that element.
+    - Keep text short. If visible text is very long, summarize it into a short label.
+
+    Important:
+    Because Python .format() is used on prompt_template:
+    - Keep placeholders as single braces: {query}, {question}, {task}
+    - Escape literal JSON braces as double braces: {{ and }}
+    - Do not use unescaped JSON braces in YAML.
 evaluation:
   output_path: outputs/evaluate_base3b/parsing_teacher_vs_base3b_eval_report.json
 

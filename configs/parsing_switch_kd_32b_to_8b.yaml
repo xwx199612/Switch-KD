@@ -93,91 +93,53 @@ distillation:
   confidence_weighting: true
   min_teacher_confidence: 0.35
   prompt_template: |
-    You are an Android TV GUI parsing assistant.
+    You are labeling Android TV screenshots for UI grounding.
 
     Task:
     {query}
 
-    Identify all visible interactive UI elements in this screenshot.
+    Find all visible interactive UI elements.
 
-    Interactive elements include:
+    Return valid JSON only.
+    Use ASCII double quotes only: "
+    Do not use smart quotes: “ ”
+    Do not use markdown.
+    Do not explain.
 
-    * tabs
-    * buttons
-    * app icons
-    * app tiles
-    * menu items
-    * carousel tiles
-    * focused or highlighted items
-    * toggles or switches
-    * search boxes or text inputs
-    * clickable text links
-    * settings, account, search, or navigation icons
-
-    Exclude:
-
-    * movie descriptions
-    * recommendation summaries
-    * long informational text
-    * advertisements
-    * decorative or non-interactive text
+    Use this exact schema:
+    {{
+      "elements": [
+        {{
+          "text": "visible UI element name",
+          "bbox_norm": [80, 120, 140, 180],
+          "focused": false
+        }}
+      ],
+      "coordinate_system": "normalized_0_1000"
+    }}
 
     Rules:
+    - Every element must use exactly these keys: "text", "bbox_norm", "focused".
+    - Do not include type.
+    - Do not use alternative bbox key names: bbox, box_norm, bx_norm, bbox norm, bboxNorm, boxed_norm.
+    - bbox_norm must be an array of exactly four integers, e.g. [80, 120, 140, 180].
+    - Do not write bbox_norm as comma-separated text.
+    - Use normalized 0-1000 coordinates, not pixel coordinates.
+    - Coordinates must satisfy 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000.
+    - text must be the visible UI label or a short visual name of the element.
+    - Do not use schema words such as text, button, tab, app_icon, menu_item, icon, bbox_norm, coordinate_system, or elements as text unless that exact word is visibly displayed on screen.
+    - focused must be exactly true or false.
+    - If focused is not visually clear, use false.
+    - Include "coordinate_system": "normalized_0_1000".
+    - Prioritize valid JSON over recall.
+    - If unsure about an element bbox, omit that element.
+    - Keep text short. If visible text is very long, summarize it into a short label.
 
-    * Prefer recall over brevity.
-    * Do not return only the top navigation bar.
-    * Include every visible app icon, tile, card, tab, button, menu item, and focused item.
-    * If there are multiple rows or carousels, inspect all visible rows.
-    * Mark the focused or highlighted element with `"focused": true`.
-    * Use `"focused": false` for all other elements.
-    * If the text is unreadable but the element is clearly interactive, use a short visual name.
-    * Use `"unknown"` only when the element is clearly interactive but its role truly cannot be inferred.
-    * For readable UI labels, always choose the closest allowed type.
-    * If unsure between `"unknown"` and `"other"`, use `"other"`.
-    * Each element must be an object with exactly these fields: `"text"`, `"type"`, and `"focused"`.
-    * Never output schema words as UI elements: `"text"`, `"type"`, `"focused"`, `"true"`, `"false"`, `"elements"`.
-
-    The `"type"` field is a closed enum.
-    For every element, `"type"` MUST be exactly one of:
-    ["tab", "button", "app_icon", "app_tile", "menu_item", "tile", "toggle", "input", "icon", "link", "other", "unknown"]
-
-    Do not invent new type names.
-    Do not output values such as:
-    "card", "movie", "navigation", "nav", "search_bar", "setting", "settings", "text", "label", "image", "poster", "banner", or "carousel".
-
-    Map ambiguous UI elements to the closest allowed type:
-
-    * card, movie, poster, banner, recommendation, content, carousel -> "tile"
-    * app, application -> "app_icon"
-    * navigation, nav -> "tab"
-    * search, search_bar, search_box -> "input"
-    * setting, settings -> "icon"
-    * text, label, image -> "other"
-    * Home, Shop, Discover, Apps -> "tab"
-    * Search -> "input" or "icon"
-    * Details, Dismiss -> "button"
-    * Netflix, YouTube, Prime Video, Sony Select, Music, LINE TV, Spotify, iQIYI -> "app_icon"
-    * + -> "button"
-    * Recommended, Popular, Top selling, movie cards, show cards -> "tile"
-    * settings rows, channel, setup, program, labels, adjustment, type -> "menu_item"
-    * if unsure -> "other"
-
-    Return raw JSON only.
-    Do not explain.
-    Do not use markdown.
-    Do not include comments.
-    Do not include trailing commas.
-
-    Use this schema:
-    {{
-    "elements": [
-    {{
-    "text": "...",
-    "bbox_norm": [0, 0, 1000, 1000],
-    "focused": false
-    }}
-    ]
-    }}
+    Important:
+    Because Python .format() is used on prompt_template:
+    - Keep placeholders as single braces: {query}, {question}, {task}
+    - Escape literal JSON braces as double braces: {{ and }}
+    - Do not use unescaped JSON braces in YAML.
   lm_loss_weight: 1.0
   dbild_loss_weight: 1.0
   vsd_loss_weight: 1.0
