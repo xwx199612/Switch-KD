@@ -97,31 +97,6 @@ distillation:
 
     Find all visible interactive UI elements.
 
-    Return raw JSON only.
-    Do not explain.
-    Do not use markdown.
-
-    Use this schema:
-    {{
-      "elements": [
-        {{
-          "text": "...",
-          "bbox_norm": [x1, y1, x2, y2],
-          "focused": false
-        }}
-      ],
-      "coordinate_system": "normalized_0_1000"
-    }}
-
-    Rules:
-    - Do not include type.
-    - Use normalized 0-1000 coordinates, not pixel coordinates.
-    - bbox_norm must contain exactly four integers.
-    - Coordinates must satisfy 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000.
-    - focused must be exactly true or false.
-    - If you cannot provide a valid bbox for an element, omit that element.
-    - Keep text short. If the visible text is very long, summarize it into a short label.
-
   kd_temperature: 2.0
   dbild_top_k: 64
   dbild_top_k_mode: kneedle

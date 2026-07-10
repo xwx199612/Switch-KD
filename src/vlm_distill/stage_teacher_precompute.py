@@ -16,7 +16,6 @@ from urllib.parse import urljoin
 
 from .config_schema import (
     PipelineConfig,
-    format_prompt,
     resolve_label_path,
     resolve_training_manifest_path,
 )
@@ -438,14 +437,6 @@ def build_teacher(config: PipelineConfig) -> TeacherBackend:
         return OllamaTeacher(config)
     raise ValueError(f"Unknown teacher backend: {config.teacher.backend}")
 
-def _format_prompt(config: PipelineConfig, sample: VlmSample) -> str:
-    return format_prompt(
-        config.distillation.prompt_template,
-        query=sample.query,
-        task=sample.task,
-    )
-
-
 def _target_from_existing_annotation(sample: VlmSample) -> str | None:
     elements = sample.metadata.get("elements") if isinstance(sample.metadata, dict) else None
 
@@ -790,28 +781,7 @@ def _build_parsing_retry_prompt(sample: VlmSample) -> str:
     return (
         "You are parsing a GUI screenshot for a small student model distillation dataset.\n"
         f"Task: {query}\n"
-        "Return only valid JSON. Do not use markdown. Do not explain.\n"
-        "Use this exact schema:\n"
-        "{\n"
-        '  "elements": [\n'
-        "    {\n"
-        '      "text": "visible UI element name",\n'
-        '      "bbox_norm": [x1, y1, x2, y2],\n'
-        '      "focused": false\n'
-        "    }\n"
-        "  ],\n"
-        '  "coordinate_system": "normalized_0_1000"\n'
-        "}\n"
-        "Rules:\n"
-        "- Do not include type.\n"
-        "- Use normalized 0-1000 coordinates, not pixel coordinates.\n"
-        "- bbox_norm must contain exactly four integers.\n"
-        "- Coordinates must satisfy 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000.\n"
-        "- text must be the visible UI label or a short visual name of the element.\n"
-        "- Do not use schema words such as text, button, tab, app_icon, menu_item, icon, bbox_norm, coordinate_system, or elements as text unless that exact word is visibly displayed on screen.\n"
-        "- focused must be true or false.\n"
-        "- If focused is not visually clear, use false.\n"
-        "- If a valid bbox cannot be provided, omit that element."
+        f"{_parsing_output_instructions()}"
     )
 
 
@@ -1089,6 +1059,41 @@ def _warn_offline_teacher_logits_disabled(config: PipelineConfig) -> None:
         )
 
 
+def _parsing_output_instructions() -> str:
+    return (
+        "Return valid JSON only.\n"
+        'Use ASCII double quotes only: ".\n'
+        'Do not use smart quotes: “ ”.\n'
+        "Do not use markdown.\n"
+        "Do not explain.\n"
+        "Use this exact schema:\n"
+        "{\n"
+        '  "elements": [\n'
+        "    {\n"
+        '      "text": "visible UI element name",\n'
+        '      "bbox_norm": [80,120,140,180],\n'
+        '      "focused": false\n'
+        "    }\n"
+        "  ],\n"
+        '  "coordinate_system": "normalized_0_1000"\n'
+        "}\n"
+        "Rules:\n"
+        '- Every element must use exactly these keys: "text", "bbox_norm", "focused".\n'
+        "- Do not include type.\n"
+        "- Do not use alternative bbox key names: bbox, box_norm, bx_norm, bbox norm, bboxNorm, boxed_norm.\n"
+        "- bbox_norm must be an array of exactly four integers, e.g. [80,120,140,180].\n"
+        "- Do not write bbox_norm as comma-separated text.\n"
+        "- Coordinates must satisfy 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000.\n"
+        "- text must be the visible UI label or a short visual name of the element.\n"
+        "- Do not use schema words such as text, button, tab, app_icon, menu_item, icon, bbox_norm, coordinate_system, or elements as text unless that exact word is visibly displayed on screen.\n"
+        "- focused must be exactly true or false.\n"
+        "- If focused is not visually clear, use false.\n"
+        '- Include "coordinate_system": "normalized_0_1000".\n'
+        "- Prioritize valid JSON over recall.\n"
+        "- If unsure about an element bbox, omit that element."
+    )
+
+
 def _format_prompt(config: PipelineConfig, sample: VlmSample) -> str:
     template = config.distillation.prompt_template
 
@@ -1109,28 +1114,7 @@ def _format_prompt(config: PipelineConfig, sample: VlmSample) -> str:
 
     return (
         f"{prompt.rstrip()}\n\n"
-        "Return only valid JSON. Do not use markdown. Do not explain.\n\n"
-        "Use this exact schema:\n"
-        "{\n"
-        '  "elements": [\n'
-        "    {\n"
-        '      "text": "visible UI element name",\n'
-        '      "bbox_norm": [x1, y1, x2, y2],\n'
-        '      "focused": false\n'
-        "    }\n"
-        "  ],\n"
-        '  "coordinate_system": "normalized_0_1000"\n'
-        "}\n\n"
-        "Rules:\n"
-        "- Do not include type.\n"
-        "- Use normalized 0-1000 coordinates, not pixel coordinates.\n"
-        "- bbox_norm must contain exactly four integers.\n"
-        "- Coordinates must satisfy 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000.\n"
-        "- text must be the visible UI label or a short visual name of the element.\n"
-        "- Do not use schema words such as text, button, tab, app_icon, menu_item, icon, bbox_norm, coordinate_system, or elements as text unless that exact word is visibly displayed on screen.\n"
-        "- focused must be true or false.\n"
-        "- If focused is not visually clear, use false.\n"
-        "- If a valid bbox cannot be provided, omit that element."
+        f"{_parsing_output_instructions()}"
     )
 
 

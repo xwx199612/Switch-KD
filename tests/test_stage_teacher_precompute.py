@@ -81,3 +81,34 @@ def test_teacher_precompute_skips_invalid_parsing_rows_and_writes_sidecar_only(
     assert sidecar["usable"] is False
     assert sidecar["elements"] == []
     assert failure["json_sidecar"] == "json/teacher/parsing-000002.json"
+
+
+def test_format_prompt_is_canonical_source_of_strict_parsing_schema(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    config.distillation.prompt_template = "List visible UI elements."
+    sample = VlmSample(id="parsing-000003", image="screen.png", task="parsing", query="List UI elements")
+
+    prompt = stage_teacher_precompute._format_prompt(config, sample)
+
+    assert "List visible UI elements." in prompt
+    assert 'Use ASCII double quotes only: ".' in prompt
+    assert 'Do not use smart quotes: “ ”.' in prompt
+    assert 'Every element must use exactly these keys: "text", "bbox_norm", "focused".' in prompt
+    assert "Do not include type." in prompt
+    assert "Do not use alternative bbox key names: bbox, box_norm, bx_norm, bbox norm, bboxNorm, boxed_norm." in prompt
+    assert "bbox_norm must be an array of exactly four integers, e.g. [80,120,140,180]." in prompt
+    assert 'Include "coordinate_system": "normalized_0_1000".' in prompt
+    assert "If unsure about an element bbox, omit that element." in prompt
+    assert "Return at most" not in prompt
+
+
+def test_retry_prompt_uses_same_strict_parsing_rules() -> None:
+    sample = VlmSample(id="parsing-000004", image="screen.png", task="parsing", query="List UI elements")
+
+    prompt = stage_teacher_precompute._build_parsing_retry_prompt(sample)
+
+    assert "Prioritize valid JSON over recall." in prompt
+    assert 'Every element must use exactly these keys: "text", "bbox_norm", "focused".' in prompt
+    assert "bbox_norm must be an array of exactly four integers, e.g. [80,120,140,180]." in prompt
+    assert "Do not write bbox_norm as comma-separated text." in prompt
+    assert "Return at most" not in prompt

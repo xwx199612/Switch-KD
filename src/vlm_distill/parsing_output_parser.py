@@ -151,7 +151,7 @@ def parse_json_like(raw_text: str) -> object:
     errors: list[str] = []
     for label, candidate in attempts:
         try:
-            return json.loads(candidate)
+            return json.loads(_normalize_json_typography(candidate))
         except json.JSONDecodeError as exc:
             errors.append(f"{label}: {exc.msg} at line {exc.lineno} column {exc.colno}")
 
@@ -241,6 +241,10 @@ def _extract_first_balanced_block(text: str, open_char: str, close_char: str) ->
             if depth == 0:
                 return text[start : index + 1]
     return None
+
+
+def _normalize_json_typography(text: str) -> str:
+    return text.replace("“", '"').replace("”", '"').replace("：", ":")
 
 
 def _normalize_bbox_value(value: Any) -> list[int] | None:

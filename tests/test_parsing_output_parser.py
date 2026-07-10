@@ -120,3 +120,13 @@ def test_missing_focused_defaults_to_false() -> None:
 
     assert parsed["parse_ok"] is True
     assert parsed["elements"][0]["focused"] is False
+
+
+def test_parser_normalizes_safe_json_typography_only() -> None:
+    parsed = parse_parsing_answer(
+        '{“elements”：[{"text":"Search","bbox_norm":[1,2,3,4],"focused":false}],'
+        '“coordinate_system”："normalized_0_1000"}'
+    )
+
+    assert parsed["parse_ok"] is True
+    assert parsed["elements"] == [{"text": "Search", "bbox_norm": [1, 2, 3, 4], "focused": False}]
