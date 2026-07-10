@@ -1,0 +1,137 @@
+seed: 42
+
+options:
+  task_name: parsing
+  quality: 1080p
+  teacher_quantization: 4bit
+  student_quantization: 4bit
+  # Derived automatically:
+  # label_profile = {quality}_{teacher_quantization}
+  # response_profile = {quality}_{teacher_quantization}_student_{student_quantization}
+
+# This config is intended for Qwen3-VL-32B-Instruct -> Qwen3-VL-8B-Instruct.
+# The current loaders resolve local model paths and load with local_files_only=True internally.
+# Do not add local_files_only / trust_remote_code here unless config_schema.py is updated.
+
+data:
+  training_manifest_path: outputs/lora_ablation/{task_name}_training_manifest.jsonl
+  inference_manifest_path: outputs/lora_ablation/{task_name}_inference_manifest.jsonl
+  distill_path: outputs/lora_ablation/{task_name}_online_dbild_{response_profile}.jsonl
+  # Canonical teacher label output. Keep this JSONL schema strict:
+  # id, image, task, query, serialized parsing target, cached answer token ids, teacher_element_count.
+  label_path: outputs/lora_ablation/{task_name}_teacher_labels_{label_profile}.jsonl
+  eval_path: outputs/lora_ablation/{task_name}_online_dbild_{response_profile}.jsonl
+  prediction_path: outputs/lora_ablation/{task_name}_online_dbild_{response_profile}/student_predictions.jsonl
+  training_image_dir: /mnt/nvme0/vlm_distill/TV_data
+  inference_image_dir: /mnt/nvme0/vlm_distill/validation_data
+  image_root: .
+  # Keep this small for the first smoke test. Set to empty/null for full training.
+  max_samples: 5
+
+teacher:
+  backend: hf
+  model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-32B-Instruct
+  device_map: auto
+  torch_dtype: bfloat16
+  quantization: "{teacher_quantization}"
+  attn_implementation: sdpa
+  temperature: 0.0
+  max_new_tokens: 768
+  image_resize: "{quality}"
+
+student:
+  model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-8B-Instruct
+  output_dir: outputs/lora_ablation/r32_attn_mlp
+  adapter_dir: outputs/lora_ablation/r32_attn_mlp/adapter
+  merged_model_path: 
+  #outputs/lora_ablation/{task_name}_switch_kd_{response_profile}/merged_model
+
+  # Prediction-time model/adapter controls.
+  # Leave inference_model_path empty to let predict prefer merged_model_path when it exists,
+  # otherwise fall back to model_name.
+  inference_model_path: 
+  inference_adapter_path: 
+  load_adapter: false
+  merge_adapter: false
+
+  device_map: auto
+  use_lora: true
+  lora_rank: 32
+  lora_alpha: 64
+  lora_dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+  quantization: "{student_quantization}"
+  attn_implementation: sdpa
+
+training:
+  epochs: 3
+  batch_size: 1
+  gradient_accumulation_steps: 8
+  learning_rate: 1.0e-4
+  warmup_ratio: 0.03
+  max_steps:
+  log_every: 50
+  save_every: 1000
+  mixed_precision: bf16
+  # Safer default for Qwen3-VL-8B + 1080p + max_length=4096.
+  gradient_checkpointing: true
+  image_resize: "{quality}"
+  max_length: 4096
+  freeze_vision_tower: true
+  mask_prompt_labels: true
+
+
+distillation:
+  method: response
+  confidence_weighting: true
+  min_teacher_confidence: 0.35
+  prompt_template: |
+    You are labeling Android TV screenshots for UI grounding.
+
+    Find all visible interactive UI elements.
+
+    Return raw JSON only.
+    Do not explain.
+    Do not use markdown.
+
+    Use this schema:
+    {{
+      "elements": [
+        {{
+          "text": "...",
+          "bbox_norm": [x1, y1, x2, y2],
+          "focused": false
+        }}
+      ],
+      "coordinate_system": "normalized_0_1000"
+    }}
+
+    Rules:
+    - Do not include type.
+    - Use normalized 0-1000 coordinates, not pixel coordinates.
+    - bbox_norm must contain exactly four integers.
+    - Coordinates must satisfy 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000.
+    - focused must be exactly true or false.
+    - If you cannot provide a valid bbox for an element, omit that element.
+    - Keep text short. If the visible text is very long, summarize it into a short label.
+
+  kd_temperature: 2.0
+  dbild_top_k: 64
+  dbild_top_k_mode: kneedle
+  dbild_kneedle_candidate_k: 256
+  dbild_min_top_k: 4
+  dbild_max_top_k: 128
+  dbild_kl_mode: reverse
+
+evaluation:
+  output_path: outputs/lora_ablation/{task_name}_online_dbild_{response_profile}/eval_report.json
+  metrics:
+    - exact_match
+    - token_f1
