@@ -193,9 +193,17 @@ def main() -> None:
                     "elements": normalized_elements,
                     "parse_format": args.output_format,
                 }
-                if not normalized_elements and raw_output.strip():
-                    debug_payload["parse_error"] = "no_valid_lines"
-                    debug_payload["hint"] = "The model output may be malformed. Inspect raw output."
+                if not normalized_elements:
+                    if raw_output.strip():
+                        debug_payload["parse_error"] = "no_valid_lines"
+                        debug_payload["hint"] = (
+                            "The model output may be malformed. Inspect raw output."
+                        )
+                    else:
+                        debug_payload["parse_error"] = "empty_output"
+                        debug_payload["hint"] = (
+                            "The model returned no output. Inspect generation settings and model behavior."
+                        )
                 if skipped:
                     debug_payload["skipped_elements"] = skipped
                 (json_dir / f"{debug_stem(image_path)}.json").write_text(json.dumps(debug_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -206,7 +214,8 @@ def main() -> None:
                     print(f"[done] image={image_path.name} elements={len(normalized_elements)}")
                 else:
                     parse_failed_images += 1
-                    print(f"[parse-failed] image={image_path.name} error=no_valid_lines")
+                    parse_error = debug_payload["parse_error"]
+                    print(f"[parse-failed] image={image_path.name} error={parse_error}")
             except Exception as exc:  # noqa: BLE001
                 runtime_failed_images += 1
                 print(f"[error] image={image_path.name} error={type(exc).__name__}: {exc}")

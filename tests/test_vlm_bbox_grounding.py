@@ -138,6 +138,28 @@ def test_non_empty_malformed_output_is_parse_failed_and_batch_continues(monkeypa
     assert (output_dir / "first_annotated.jpg").exists()
 
 
+def test_empty_output_is_parse_failed_and_batch_continues(monkeypatch, tmp_path: Path, capsys) -> None:
+    output_dir, calls = _run_cli(
+        monkeypatch,
+        tmp_path,
+        responses=[
+            " \t\n",
+            "BEGIN_ELEMENTS\ntext | type | x1 | y1 | x2 | y2 | focused\nPicture | card | 10 | 20 | 50 | 60 | false\nEND_ELEMENTS",
+        ],
+    )
+
+    summary = capsys.readouterr().out
+    assert "[parse-failed] image=first.jpg error=empty_output" in summary
+    assert "[complete] images=2 success=1 parse_failed=1 runtime_failed=0 failed=1 total_elements=1" in summary
+    assert calls["inference"] == 2
+    payload = json.loads((output_dir / "json" / "first.json").read_text(encoding="utf-8"))
+    assert payload["parse_error"] == "empty_output"
+    assert payload["hint"] == "The model returned no output. Inspect generation settings and model behavior."
+    assert (output_dir / "raw" / "first.txt").exists()
+    assert (output_dir / "first_annotated.jpg").exists()
+    assert len(json.loads((output_dir / "json" / "second.json").read_text(encoding="utf-8"))["elements"]) == 1
+
+
 def test_json_empty_elements_is_parse_failed(monkeypatch, tmp_path: Path, capsys) -> None:
     output_dir, _ = _run_cli(
         monkeypatch,
