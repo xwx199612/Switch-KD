@@ -162,7 +162,10 @@ def main() -> None:
         device_map=args.device_map,
         quantization=args.quantization,
     )
-    successful_images = failed_images = total_elements = 0
+    successful_images = 0
+    parse_failed_images = 0
+    runtime_failed_images = 0
+    total_elements = 0
     try:
         for index, image_path in enumerate(images, start=1):
             print(f"[infer] image={index}/{len(images)} filename={image_path.name}")
@@ -197,11 +200,15 @@ def main() -> None:
                     debug_payload["skipped_elements"] = skipped
                 (json_dir / f"{debug_stem(image_path)}.json").write_text(json.dumps(debug_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 draw_bboxes(image_path=image_path, lm_data=debug_payload, output_path=output_dir / annotated_name(image_path), coord_system=(COORD_SYSTEM_NORMALIZED_1000 if args.coord_system == "normalized_1000" else args.coord_system), font_size=args.font_size, line_width=args.line_width, font=args.font, include_focused_suffix=False)
-                successful_images += 1
-                total_elements += len(normalized_elements)
-                print(f"[done] image={image_path.name} elements={len(normalized_elements)}")
+                if normalized_elements:
+                    successful_images += 1
+                    total_elements += len(normalized_elements)
+                    print(f"[done] image={image_path.name} elements={len(normalized_elements)}")
+                else:
+                    parse_failed_images += 1
+                    print(f"[parse-failed] image={image_path.name} error=no_valid_lines")
             except Exception as exc:  # noqa: BLE001
-                failed_images += 1
+                runtime_failed_images += 1
                 print(f"[error] image={image_path.name} error={type(exc).__name__}: {exc}")
                 raw_text = raw_output or f"{type(exc).__name__}: {exc}\n{traceback.format_exc().strip()}"
                 (raw_dir / f"{debug_stem(image_path)}.txt").write_text(raw_text + "\n", encoding="utf-8")
@@ -211,7 +218,8 @@ def main() -> None:
                     draw_bboxes(image_path=image_path, lm_data={"elements": []}, output_path=output_dir / annotated_name(image_path), coord_system=(COORD_SYSTEM_NORMALIZED_1000 if args.coord_system == "normalized_1000" else args.coord_system), font_size=args.font_size, line_width=args.line_width, font=args.font, include_focused_suffix=False)
                 except Exception as draw_exc:  # pragma: no cover - only for unreadable input/output failures
                     print(f"[error] image={image_path.name} error={type(draw_exc).__name__}: {draw_exc}")
-        print(f"[complete] images={len(images)} success={successful_images} failed={failed_images} total_elements={total_elements} output_dir={output_dir}")
+        failed_images = parse_failed_images + runtime_failed_images
+        print(f"[complete] images={len(images)} success={successful_images} parse_failed={parse_failed_images} runtime_failed={runtime_failed_images} failed={failed_images} total_elements={total_elements} output_dir={output_dir}")
     finally:
         print("[cleanup] model")
         cleanup_model(model, processor)
