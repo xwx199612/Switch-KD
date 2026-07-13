@@ -830,3 +830,21 @@ vlm-distill teacher-precompute \
 * RTX 4060Ti 16GB can run Qwen2.5-VL-7B-Instruct with 4bit quantization comfortably.
 * Student/training sections remain in YAML because the project currently uses a unified configuration schema.
 * Screen Parsing is currently the most mature workflow in this repository.
+
+## Single-Model Bbox Grounding
+
+Run grounding against one standalone Hugging Face-compatible VLM without loading the teacher and base student:
+
+```bash
+python scripts/vlm_bbox_grounding.py \
+  --image-dir /mnt/nvme0/vlm_distill/test_images \
+  --output-dir outputs/r32_bbox_grounding \
+  --model outputs/lora_ablation/r32_attn_mlp/merged_model \
+  --quantization 4bit \
+  --torch-dtype bfloat16 \
+  --max-new-tokens 1280 \
+  --output-format line \
+  --coord-system normalized_1000
+```
+
+`compare_vlm_bbox_grounding.py` is intended for side-by-side three-model comparison. `vlm_bbox_grounding.py` is intended for testing one selected model without unnecessarily loading the teacher and base student.

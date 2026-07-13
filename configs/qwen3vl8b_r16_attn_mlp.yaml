@@ -14,14 +14,14 @@ options:
 # Do not add local_files_only / trust_remote_code here unless config_schema.py is updated.
 
 data:
-  training_manifest_path: outputs/lora_ablation/{task_name}_training_manifest.jsonl
-  inference_manifest_path: outputs/lora_ablation/{task_name}_inference_manifest.jsonl
+  training_manifest_path: outputs/lora_ablation_16/{task_name}_training_manifest.jsonl
+  inference_manifest_path: outputs/lora_ablation_16/{task_name}_inference_manifest.jsonl
   distill_path: outputs/lora_ablation/{task_name}_online_dbild_{response_profile}.jsonl
   # Canonical teacher label output. Keep this JSONL schema strict:
   # id, image, task, query, serialized parsing target, cached answer token ids, teacher_element_count.
   label_path: outputs/lora_ablation/{task_name}_teacher_labels_{label_profile}.jsonl
-  eval_path: outputs/lora_ablation/{task_name}_online_dbild_{response_profile}.jsonl
-  prediction_path: outputs/lora_ablation/{task_name}_online_dbild_{response_profile}/student_predictions.jsonl
+  eval_path: outputs/lora_ablation_16/{task_name}_online_dbild_{response_profile}.jsonl
+  prediction_path: outputs/lora_ablation_16/{task_name}_online_dbild_{response_profile}/student_predictions.jsonl
   training_image_dir: /mnt/nvme0/vlm_distill/TV_data
   inference_image_dir: /mnt/nvme0/vlm_distill/validation_data
   image_root: .
@@ -41,10 +41,10 @@ teacher:
 
 student:
   model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-8B-Instruct
-  output_dir: outputs/lora_ablation/r32_attn_mlp
-  adapter_dir: outputs/lora_ablation/r32_attn_mlp/adapter
-  merged_model_path: /mnt/nvme0/vlm_distill/models/r32_attn_mlp
-  #outputs/lora_ablation/{task_name}_switch_kd_{response_profile}/merged_model
+  output_dir: outputs/lora_ablation_16/r16_attn_mlp
+  adapter_dir: outputs/lora_ablation_16/r16_attn_mlp/adapter
+  merged_model_path: /mnt/nvme0/vlm_distill/models/r16_attn_mlp
+  #outputs/lora_ablation_16/{task_name}_switch_kd_{response_profile}/merged_model
 
   # Prediction-time model/adapter controls.
   # Leave inference_model_path empty to let predict prefer merged_model_path when it exists,
@@ -56,8 +56,8 @@ student:
 
   device_map: auto
   use_lora: true
-  lora_rank: 32
-  lora_alpha: 64
+  lora_rank: 16
+  lora_alpha: 32
   lora_dropout: 0.05
   target_modules:
     - q_proj
@@ -153,7 +153,7 @@ distillation:
   dbild_kl_mode: reverse
 
 evaluation:
-  output_path: outputs/lora_ablation/{task_name}_online_dbild_{response_profile}/eval_report.json
+  output_path: outputs/lora_ablation_16/{task_name}_online_dbild_{response_profile}/eval_report.json
   metrics:
     - exact_match
     - token_f1
