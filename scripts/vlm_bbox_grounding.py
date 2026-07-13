@@ -20,7 +20,6 @@ from scripts.vlm_compare_utils import (
     extract_json_from_text,
     list_images,
     load_processor_and_model,
-    parse_line_bbox_elements,
     run_vlm_inference,
 )
 from tools.draw_lm_bboxes import (
@@ -31,54 +30,49 @@ from tools.draw_lm_bboxes import (
 )
 
 
-LINE_PROMPT = """You are an Android TV visual grounding assistant.
+TRAINING_JSON_PROMPT_TEMPLATE = """You are labeling Android TV screenshots for UI grounding.
 
-Analyze the screenshot and list all visible interactive UI elements.
+Task:
+{query}
 
-Return only the table below. No JSON, no markdown, no explanation.
-BEGIN_ELEMENTS
-text | type | x1 | y1 | x2 | y2 | focused
-...
-END_ELEMENTS
-
-Rules:
-- Each line must contain exactly 7 fields separated by " | ".
-- type must be one of: button, tab, app_icon, card, menu_item, input, unknown.
-- Use normalized 0-1000 coordinates, not pixel coordinates.
-- x1, y1, x2, y2 must be integers only.
-- Coordinates must satisfy 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000.
-- Do not combine coordinates into one field.
-- Do not use commas in coordinates.
-- focused must be exactly true or false.
-- If a valid bbox cannot be provided, omit that element."""
-
-JSON_PROMPT = """You are an Android TV visual grounding assistant.
-
-Analyze the screenshot and list all visible interactive UI elements and visible object names.
-
-For each element, return:
-- text: the visible label text, or a short semantic name if it is icon-only
-- bbox: [x_min, y_min, x_max, y_max]
-- focused: true or false
-
-Coordinate rule:
-Return bbox coordinates in normalized 0-1000 coordinate system.
-The origin is the top-left corner of the image.
-x_min and y_min are the top-left corner.
-x_max and y_max are the bottom-right corner.
+Find all visible interactive UI elements.
 
 Return valid JSON only.
+Use ASCII double quotes only: "
+Do not use smart quotes: “ ”
+Do not use markdown.
+Do not explain.
 
-Output format:
-{
+Use this exact schema:
+{{
   "elements": [
-    {
-      "text": "Picture",
-      "bbox": [145, 238, 276, 292],
+    {{
+      "text": "visible UI element name",
+      "bbox_norm": [80, 120, 140, 180],
       "focused": false
-    }
-  ]
-}"""
+    }}
+  ],
+  "coordinate_system": "normalized_0_1000"
+}}
+
+Rules:
+- Every element must use exactly these keys: "text", "bbox_norm", "focused".
+- Do not include type.
+- Do not use alternative bbox key names: bbox, box_norm, bx_norm, bbox norm, bboxNorm, boxed_norm.
+- bbox_norm must be an array of exactly four integers, e.g. [80, 120, 140, 180].
+- Do not write bbox_norm as comma-separated text.
+- Use normalized 0-1000 coordinates, not pixel coordinates.
+- Coordinates must satisfy 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000.
+- text must be the visible UI label or a short visual name of the element.
+- Do not use schema words such as text, button, tab, app_icon, menu_item, icon, bbox_norm, coordinate_system, or elements as text unless that exact word is visibly displayed on screen.
+- focused must be exactly true or false.
+- If focused is not visually clear, use false.
+- Include "coordinate_system": "normalized_0_1000".
+- Prioritize valid JSON over recall.
+- If unsure about an element bbox, omit that element.
+- Keep text short. If visible text is very long, summarize it into a short label."""
+
+DEFAULT_QUERY = "List all visible interactive UI elements on this screen."
 
 
 def parse_args() -> argparse.Namespace:
@@ -94,7 +88,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--quantization", choices=("none", "4bit", "8bit"), default="none")
     parser.add_argument("--max-new-tokens", type=int, default=1024)
-    parser.add_argument("--output-format", choices=("line", "json"), default="line")
+    parser.add_argument("--query", default=DEFAULT_QUERY)
     parser.add_argument(
         "--coord-system",
         choices=(COORD_SYSTEM_PIXEL, COORD_SYSTEM_NORMALIZED_1000, "normalized_1000", COORD_SYSTEM_AUTO),
@@ -120,22 +114,29 @@ def normalize_elements(parsed_json: dict[str, Any]) -> tuple[list[dict[str, Any]
             continue
         text_value = element.get("text")
         if not isinstance(text_value, str) or not text_value.strip():
-            text_value = element.get("name")
-        if not isinstance(text_value, str) or not text_value.strip():
-            text_value = element.get("label")
-        if not isinstance(text_value, str) or not text_value.strip():
             skipped.append(f"element_{index}: missing text")
             continue
-        bbox = element.get("bbox")
+        bbox = element.get("bbox_norm")
         if not isinstance(bbox, list) or len(bbox) != 4:
-            skipped.append(f"element_{index}: malformed bbox")
+            skipped.append(f"element_{index}: malformed bbox_norm")
             continue
-        try:
-            normalized_bbox = [float(value) for value in bbox]
-        except (TypeError, ValueError):
-            skipped.append(f"element_{index}: non-numeric bbox")
+        normalized_bbox: list[int] = []
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in bbox):
+            skipped.append(f"element_{index}: bbox_norm must contain numeric values")
             continue
-        normalized.append({"text": text_value.strip(), "bbox_norm": normalized_bbox, "focused": bool(element.get("focused", False))})
+        if any(isinstance(value, float) and not value.is_integer() for value in bbox):
+            skipped.append(f"element_{index}: bbox_norm must contain integers")
+            continue
+        normalized_bbox = [int(value) for value in bbox]
+        x1, y1, x2, y2 = normalized_bbox
+        if not (0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000):
+            skipped.append(f"element_{index}: invalid bbox_norm coordinates")
+            continue
+        focused = element.get("focused")
+        if not isinstance(focused, bool):
+            skipped.append(f"element_{index}: focused must be boolean")
+            continue
+        normalized.append({"text": text_value.strip(), "bbox_norm": normalized_bbox, "focused": focused})
     return normalized, skipped
 
 
@@ -150,10 +151,16 @@ def debug_stem(image_path: Path) -> str:
 def main() -> None:
     args = parse_args()
     images = list_images(args.image_dir, args.image_extensions.split(","))
+    prompt = TRAINING_JSON_PROMPT_TEMPLATE.format(
+        query=args.query,
+        question=args.query,
+        task="parsing",
+    )
     output_dir = ensure_dir(args.output_dir)
     raw_dir = ensure_dir(output_dir / "raw")
     json_dir = ensure_dir(output_dir / "json")
     print(f"[load] model_path={args.model}")
+    print(f"[load] query={args.query}")
     print(f"[load] quantization={args.quantization} torch_dtype={args.torch_dtype} device_map={args.device_map}")
 
     processor, model = load_processor_and_model(
@@ -177,25 +184,31 @@ def main() -> None:
                     model=model,
                     processor=processor,
                     image=image,
-                    prompt=JSON_PROMPT if args.output_format == "json" else LINE_PROMPT,
+                    prompt=prompt,
                     max_new_tokens=args.max_new_tokens,
                 )
                 (raw_dir / f"{debug_stem(image_path)}.txt").write_text(raw_output + ("\n" if raw_output else ""), encoding="utf-8")
                 skipped: list[str] = []
-                if args.output_format == "json":
+                schema_warnings: list[str] = []
+                if not raw_output.strip():
+                    normalized_elements = []
+                else:
                     parsed_json = extract_json_from_text(raw_output)
                     normalized_elements, skipped = normalize_elements(parsed_json)
-                else:
-                    normalized_elements = parse_line_bbox_elements(raw_output)
+                    if parsed_json.get("coordinate_system") != "normalized_0_1000":
+                        schema_warnings.append("missing_or_invalid_coordinate_system")
                 debug_payload: dict[str, Any] = {
                     "image": str(image_path.absolute()),
                     "model": str(args.model),
                     "elements": normalized_elements,
-                    "parse_format": args.output_format,
+                    "parse_format": "json",
+                    "coordinate_system": "normalized_0_1000",
                 }
+                if schema_warnings:
+                    debug_payload["schema_warnings"] = schema_warnings
                 if not normalized_elements:
                     if raw_output.strip():
-                        debug_payload["parse_error"] = "no_valid_lines"
+                        debug_payload["parse_error"] = "no_valid_elements"
                         debug_payload["hint"] = (
                             "The model output may be malformed. Inspect raw output."
                         )
@@ -221,7 +234,7 @@ def main() -> None:
                 print(f"[error] image={image_path.name} error={type(exc).__name__}: {exc}")
                 raw_text = raw_output or f"{type(exc).__name__}: {exc}\n{traceback.format_exc().strip()}"
                 (raw_dir / f"{debug_stem(image_path)}.txt").write_text(raw_text + "\n", encoding="utf-8")
-                error_payload = {"image": str(image_path.absolute()), "model": str(args.model), "elements": [], "parse_format": args.output_format, "parse_error": f"{type(exc).__name__}: {exc}", "hint": "The model output may be malformed or truncated. Inspect raw output."}
+                error_payload = {"image": str(image_path.absolute()), "model": str(args.model), "elements": [], "coordinate_system": "normalized_0_1000", "parse_format": "json", "parse_error": f"{type(exc).__name__}: {exc}", "hint": "The model output may be malformed or truncated. Inspect raw output."}
                 (json_dir / f"{debug_stem(image_path)}.json").write_text(json.dumps(error_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 try:
                     draw_bboxes(image_path=image_path, lm_data={"elements": []}, output_path=output_dir / annotated_name(image_path), coord_system=(COORD_SYSTEM_NORMALIZED_1000 if args.coord_system == "normalized_1000" else args.coord_system), font_size=args.font_size, line_width=args.line_width, font=args.font, include_focused_suffix=False)
