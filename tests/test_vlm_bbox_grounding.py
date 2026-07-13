@@ -33,6 +33,11 @@ def test_prompt_matches_training_schema_and_query() -> None:
     prompt = vlm_bbox_grounding.TRAINING_JSON_PROMPT_TEMPLATE.format(
         query="Find the focused Settings tile.", question="ignored", task="parsing"
     )
+    assert """Important:
+Because Python .format() is used on prompt_template:
+- Keep placeholders as single braces: {query}, {question}, {task}
+- Escape literal JSON braces as double braces: {{ and }}
+- Do not use unescaped JSON braces in YAML.""" in prompt
     assert "Return valid JSON only." in prompt
     assert '"bbox_norm"' in prompt
     assert '"coordinate_system": "normalized_0_1000"' in prompt

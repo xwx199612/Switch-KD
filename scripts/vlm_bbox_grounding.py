@@ -70,7 +70,13 @@ Rules:
 - Include "coordinate_system": "normalized_0_1000".
 - Prioritize valid JSON over recall.
 - If unsure about an element bbox, omit that element.
-- Keep text short. If visible text is very long, summarize it into a short label."""
+- Keep text short. If visible text is very long, summarize it into a short label.
+
+Important:
+Because Python .format() is used on prompt_template:
+- Keep placeholders as single braces: {{query}}, {{question}}, {{task}}
+- Escape literal JSON braces as double braces: {{{{ and }}}}
+- Do not use unescaped JSON braces in YAML."""
 
 DEFAULT_QUERY = "List all visible interactive UI elements on this screen."
 
