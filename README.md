@@ -848,6 +848,13 @@ python scripts/vlm_bbox_grounding.py \
 
 `vlm_bbox_grounding.py` uses the same JSON prompt and `bbox_norm` schema as
 `configs/qwen3vl8b_r32_attn_mlp.yaml`. Pipe-form evaluation is no longer
-supported by this utility.
+supported by this utility. Strict JSON parsing is attempted first. If a model
+response is truncated after the `elements` array has started, the utility may
+conservatively recover fully completed element objects; an incomplete trailing
+element is discarded. Recovered results are marked with
+`"parse_recovered": true`, and the final summary reports `recovered=N`.
+
+Increasing `--max-new-tokens` is still preferred to avoid truncation. Recovery
+is a fallback, not a replacement for sufficient generation length.
 
 `compare_vlm_bbox_grounding.py` is intended for side-by-side three-model comparison. `vlm_bbox_grounding.py` is intended for testing one selected model without unnecessarily loading the teacher and base student.

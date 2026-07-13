@@ -114,7 +114,84 @@ def test_valid_json_artifacts_prompt_and_model_reuse(monkeypatch, tmp_path: Path
     assert payload["elements"][0] == {"text": "Settings", "bbox_norm": [80, 120, 140, 180], "focused": False}
     assert payload["coordinate_system"] == "normalized_0_1000"
     assert payload["parse_format"] == "json"
+    assert "parse_recovered" not in payload
     assert (output_dir / "raw" / "first.txt").read_text().strip() == _valid_response()
+
+
+def test_complete_json_uses_strict_path_and_is_not_recovered() -> None:
+    raw = _valid_response()
+    parsed = vlm_bbox_grounding.extract_json_from_text(raw)
+    assert parsed["elements"][0]["text"] == "Settings"
+    assert "parse_recovered" not in parsed
+
+
+def test_recover_truncated_elements_and_discard_incomplete_object() -> None:
+    truncated = '''{
+  "elements": [
+    {"text": "Search", "bbox_norm": [175, 180, 240, 220], "focused": false},
+    {"text": "Home", "bbox_norm": [255, 180, 295, 220], "focused": false},
+    {"text": "Incomplete", "bbox_norm": [300, 300,
+'''
+    recovered = vlm_bbox_grounding.recover_truncated_elements_json(truncated)
+    assert recovered["elements"] == [
+        {"text": "Search", "bbox_norm": [175, 180, 240, 220], "focused": False},
+        {"text": "Home", "bbox_norm": [255, 180, 295, 220], "focused": False},
+    ]
+    assert recovered["coordinate_system"] is None
+
+
+def test_recovery_ends_immediately_after_completed_object_and_keeps_coordinate_system() -> None:
+    raw = '{"elements":[{"text":"Home","bbox_norm":[1,2,3,4],"focused":false}], "coordinate_system":"normalized_0_1000"'
+    recovered = vlm_bbox_grounding.recover_truncated_elements_json(raw)
+    assert recovered["elements"] == [{"text": "Home", "bbox_norm": [1, 2, 3, 4], "focused": False}]
+    assert recovered["coordinate_system"] == "normalized_0_1000"
+
+
+def test_recovery_balances_braces_and_escaped_quotes_in_strings() -> None:
+    raw = r'''{"elements":[
+      {"text":"Use {device} and \"name\"","bbox_norm":[10,20,30,40],"focused":false}'''
+    recovered = vlm_bbox_grounding.recover_truncated_elements_json(raw)
+    assert recovered["elements"][0]["text"] == 'Use {device} and "name"'
+
+
+def test_recovered_schema_invalid_element_is_skipped() -> None:
+    raw = '''{"elements":[
+      {"text":"Bad","bbox_norm":[10, 20, 30],"focused":false},
+      {"text":"Good","bbox_norm":[10,20,30,40],"focused":false}'''
+    recovered = vlm_bbox_grounding.recover_truncated_elements_json(raw)
+    normalized, skipped = vlm_bbox_grounding.normalize_elements(recovered)
+    assert normalized == [{"text": "Good", "bbox_norm": [10, 20, 30, 40], "focused": False}]
+    assert "malformed bbox_norm" in skipped[0]
+
+
+def test_recovery_succeeds_and_preserves_raw_artifact(monkeypatch, tmp_path: Path, capsys) -> None:
+    raw = '''{
+  "elements": [
+    {"text": "Search", "bbox_norm": [175, 180, 240, 220], "focused": false},
+    {"text": "Home", "bbox_norm": [255, 180, 295, 220], "focused": false},
+'''
+    output_dir, _ = _run_cli(monkeypatch, tmp_path, [raw, _valid_response()])
+    output = capsys.readouterr().out
+    assert "[recovered] image=first.jpg elements=2 warning=truncated_json_recovered" in output
+    assert "[done] image=first.jpg" not in output
+    assert "success=2 recovered=1 parse_failed=0 runtime_failed=0 failed=0" in output
+    assert (output_dir / "raw" / "first.txt").read_text() == raw
+    payload = json.loads((output_dir / "json" / "first.json").read_text())
+    assert payload["parse_recovered"] is True
+    assert payload["schema_warnings"] == ["truncated_json_recovered", "missing_or_invalid_coordinate_system"]
+
+
+def test_nontruncation_and_no_completed_elements_remain_runtime_failed(monkeypatch, tmp_path: Path, capsys) -> None:
+    output_dir, _ = _run_cli(monkeypatch, tmp_path, ["{\"elements\": [", "prose {not json}"])
+    output = capsys.readouterr().out
+    assert "success=0 recovered=0 parse_failed=0 runtime_failed=2 failed=2" in output
+    assert json.loads((output_dir / "json" / "first.json").read_text())["parse_error"].startswith("ValueError:")
+    assert json.loads((output_dir / "json" / "second.json").read_text())["parse_error"].startswith("ValueError:")
+
+
+def test_random_prose_with_braces_is_not_recovered() -> None:
+    with pytest.raises(ValueError):
+        vlm_bbox_grounding.recover_truncated_elements_json("Here is {not JSON} with braces")
 
 
 def test_invalid_coordinate_system_warns_but_valid_element_succeeds(monkeypatch, tmp_path: Path) -> None:

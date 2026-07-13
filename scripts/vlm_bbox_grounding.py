@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import traceback
 from pathlib import Path
@@ -79,6 +80,116 @@ Because Python .format() is used on prompt_template:
 - Do not use unescaped JSON braces in YAML."""
 
 DEFAULT_QUERY = "List all visible interactive UI elements on this screen."
+
+
+def is_truncation_error(exc: ValueError) -> bool:
+    message = str(exc).casefold()
+    return (
+        "no complete top-level json object found" in message
+        or "truncated" in message
+        or "unterminated" in message
+    )
+
+
+def recover_truncated_elements_json(raw_text: str) -> dict[str, Any]:
+    """Recover independently complete objects from a truncated elements array."""
+    if not raw_text.strip():
+        raise ValueError("No completed elements found in truncated JSON output.")
+
+    # Recovery is deliberately limited to an object-shaped response. This avoids
+    # treating arbitrary prose containing braces as an elements payload.
+    if not raw_text.lstrip().startswith("{"):
+        raise ValueError("No completed elements found in truncated JSON output.")
+
+    elements_match = re.search(r'"elements"\s*:\s*\[', raw_text)
+    if elements_match is None:
+        raise ValueError("No completed elements found in truncated JSON output.")
+    array_start = raw_text.find("[", elements_match.start(), elements_match.end())
+
+    # Confirm that the elements key is at the top-level object (and not inside
+    # a string or a nested/random object).
+    brace_depth = 0
+    square_depth = 0
+    in_string = False
+    escaped = False
+    key_is_top_level = False
+    match_is_in_string = False
+    for index, char in enumerate(raw_text[:array_start]):
+        if index == elements_match.start():
+            match_is_in_string = in_string
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            brace_depth += 1
+        elif char == "}":
+            brace_depth -= 1
+        elif char == "[":
+            square_depth += 1
+        elif char == "]":
+            square_depth -= 1
+        if index >= elements_match.start() and brace_depth == 1 and square_depth == 0:
+            key_is_top_level = True
+    if match_is_in_string or not key_is_top_level:
+        raise ValueError("No completed elements found in truncated JSON output.")
+
+    recovered_elements: list[dict[str, Any]] = []
+    depth = 0
+    in_string = False
+    escaped = False
+    object_start: int | None = None
+    array_depth = 1
+    for index in range(array_start + 1, len(raw_text)):
+        char = raw_text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "[":
+            array_depth += 1
+        elif char == "]":
+            array_depth -= 1
+            if array_depth == 0:
+                break
+        elif char == "{" and depth >= 0:
+            if depth == 0:
+                object_start = index
+            depth += 1
+        elif char == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and object_start is not None:
+                try:
+                    element = json.loads(raw_text[object_start:index + 1])
+                except json.JSONDecodeError:
+                    # A balanced fragment that is not independently JSON is
+                    # not repaired or interpreted as an element.
+                    object_start = None
+                    continue
+                if isinstance(element, dict):
+                    recovered_elements.append(element)
+                object_start = None
+
+    if not recovered_elements:
+        raise ValueError("No completed elements found in truncated JSON output.")
+    coordinate_system = (
+        "normalized_0_1000"
+        if re.search(r'"coordinate_system"\s*:\s*"normalized_0_1000"', raw_text)
+        else None
+    )
+    return {"elements": recovered_elements, "coordinate_system": coordinate_system}
 
 
 def parse_args() -> argparse.Namespace:
@@ -176,6 +287,7 @@ def main() -> None:
         quantization=args.quantization,
     )
     successful_images = 0
+    recovered_images = 0
     parse_failed_images = 0
     runtime_failed_images = 0
     total_elements = 0
@@ -193,16 +305,28 @@ def main() -> None:
                     prompt=prompt,
                     max_new_tokens=args.max_new_tokens,
                 )
-                (raw_dir / f"{debug_stem(image_path)}.txt").write_text(raw_output + ("\n" if raw_output else ""), encoding="utf-8")
+                (raw_dir / f"{debug_stem(image_path)}.txt").write_text(raw_output, encoding="utf-8")
                 skipped: list[str] = []
                 schema_warnings: list[str] = []
+                parse_recovered = False
                 if not raw_output.strip():
                     normalized_elements = []
                 else:
-                    parsed_json = extract_json_from_text(raw_output)
+                    try:
+                        parsed_json = extract_json_from_text(raw_output)
+                    except ValueError as exc:
+                        if not is_truncation_error(exc):
+                            raise
+                        try:
+                            parsed_json = recover_truncated_elements_json(raw_output)
+                        except ValueError:
+                            raise exc
+                        parse_recovered = True
                     normalized_elements, skipped = normalize_elements(parsed_json)
                     if parsed_json.get("coordinate_system") != "normalized_0_1000":
                         schema_warnings.append("missing_or_invalid_coordinate_system")
+                    if parse_recovered:
+                        schema_warnings.insert(0, "truncated_json_recovered")
                 debug_payload: dict[str, Any] = {
                     "image": str(image_path.absolute()),
                     "model": str(args.model),
@@ -211,7 +335,9 @@ def main() -> None:
                     "coordinate_system": "normalized_0_1000",
                 }
                 if schema_warnings:
-                    debug_payload["schema_warnings"] = schema_warnings
+                    debug_payload["schema_warnings"] = list(dict.fromkeys(schema_warnings))
+                if parse_recovered:
+                    debug_payload["parse_recovered"] = True
                 if not normalized_elements:
                     if raw_output.strip():
                         debug_payload["parse_error"] = "no_valid_elements"
@@ -230,7 +356,11 @@ def main() -> None:
                 if normalized_elements:
                     successful_images += 1
                     total_elements += len(normalized_elements)
-                    print(f"[done] image={image_path.name} elements={len(normalized_elements)}")
+                    if parse_recovered:
+                        recovered_images += 1
+                        print(f"[recovered] image={image_path.name} elements={len(normalized_elements)} warning=truncated_json_recovered")
+                    else:
+                        print(f"[done] image={image_path.name} elements={len(normalized_elements)}")
                 else:
                     parse_failed_images += 1
                     parse_error = debug_payload["parse_error"]
@@ -239,7 +369,7 @@ def main() -> None:
                 runtime_failed_images += 1
                 print(f"[error] image={image_path.name} error={type(exc).__name__}: {exc}")
                 raw_text = raw_output or f"{type(exc).__name__}: {exc}\n{traceback.format_exc().strip()}"
-                (raw_dir / f"{debug_stem(image_path)}.txt").write_text(raw_text + "\n", encoding="utf-8")
+                (raw_dir / f"{debug_stem(image_path)}.txt").write_text(raw_output if raw_output else raw_text + "\n", encoding="utf-8")
                 error_payload = {"image": str(image_path.absolute()), "model": str(args.model), "elements": [], "coordinate_system": "normalized_0_1000", "parse_format": "json", "parse_error": f"{type(exc).__name__}: {exc}", "hint": "The model output may be malformed or truncated. Inspect raw output."}
                 (json_dir / f"{debug_stem(image_path)}.json").write_text(json.dumps(error_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 try:
@@ -247,7 +377,7 @@ def main() -> None:
                 except Exception as draw_exc:  # pragma: no cover - only for unreadable input/output failures
                     print(f"[error] image={image_path.name} error={type(draw_exc).__name__}: {draw_exc}")
         failed_images = parse_failed_images + runtime_failed_images
-        print(f"[complete] images={len(images)} success={successful_images} parse_failed={parse_failed_images} runtime_failed={runtime_failed_images} failed={failed_images} total_elements={total_elements} output_dir={output_dir}")
+        print(f"[complete] images={len(images)} success={successful_images} recovered={recovered_images} parse_failed={parse_failed_images} runtime_failed={runtime_failed_images} failed={failed_images} total_elements={total_elements} output_dir={output_dir}")
     finally:
         print("[cleanup] model")
         cleanup_model(model, processor)
