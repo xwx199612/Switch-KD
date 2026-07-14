@@ -4,6 +4,7 @@ from pathlib import Path
 
 from .config_schema import PipelineConfig
 from .model_loading import resolve_model_path
+from .student_trainability import dequantize_trainable_projector
 
 
 def merge_student_adapter(config: PipelineConfig) -> Path:
@@ -49,14 +50,30 @@ def merge_student_adapter(config: PipelineConfig) -> Path:
         use_fast=False,
         local_files_only=True,
     )
-    model = AutoModelForVLM.from_pretrained(
-        base_model_path,
-        device_map="auto",
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=True,
-        local_files_only=True,
-        attn_implementation=config.student.attn_implementation,
-    )
+    model_kwargs = {
+        "device_map": "auto",
+        "torch_dtype": torch.bfloat16,
+        "trust_remote_code": True,
+        "local_files_only": True,
+        "attn_implementation": config.student.attn_implementation,
+    }
+    if config.student.quantization == "4bit":
+        from transformers import BitsAndBytesConfig
+        model_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        )
+    elif config.student.quantization == "8bit":
+        from transformers import BitsAndBytesConfig
+        model_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+    model = AutoModelForVLM.from_pretrained(base_model_path, **model_kwargs)
+    if config.student.train_multimodal_projector:
+        conversion = dequantize_trainable_projector(
+            model, config.student.multimodal_projector_path
+        )
+        print(f"projector_dequantization={conversion}")
     model = PeftModel.from_pretrained(model, str(adapter_path), local_files_only=True)
     model = model.merge_and_unload()
 

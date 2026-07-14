@@ -41,8 +41,8 @@ teacher:
 
 student:
   model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-8B-Instruct
-  output_dir: outputs/lora_r16_woMLP/r32_attn
-  adapter_dir: outputs/lora_r16_woMLP/r32_attn/adapter
+  output_dir: outputs/lora_r16_woMLP/r16_attn
+  adapter_dir: outputs/lora_r16_woMLP/r16_attn/adapter
   merged_model_path: /mnt/nvme0/vlm_distill/models/r16_attn
   #outputs/lora_ablation/{task_name}_switch_kd_{response_profile}/merged_model
 

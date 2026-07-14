@@ -15,6 +15,8 @@ from .student_trainability import (
     QWEN3_VL_PROJECTOR_PATH,
     parameter_matches_module_path,
     summarize_trainable_groups,
+    dequantize_trainable_projector,
+    validate_projector_trainable_parameters,
     validate_projector_path,
 )
 from .parsing_output_parser import serialize_parsing_label
@@ -504,7 +506,7 @@ def freeze_student_vision_keep_merger_lm_trainable(
     print(f"trainable_tensor_count={trainable_tensor_count}")
     print("first_trainable_parameter_names=", first_trainable_names)
     groups = summarize_trainable_groups(model, multimodal_projector_path)
-    print(f"LLM LoRA parameters: {groups['llm_lora']}")
+    print(f"Attention LoRA parameters: {groups['attention_lora']}")
     print(f"Projector / merger parameters: {groups['projector']}")
     print(f"Vision encoder parameters: {groups['vision_encoder']}")
     print(f"Other parameters: {groups['other']}")
@@ -798,6 +800,14 @@ def _maybe_enable_student_lora(config, model):
 
     if config.student.quantization in {"4bit", "8bit"}:
         model = prepare_model_for_kbit_training(model)
+    if config.student.train_multimodal_projector:
+        # prepare_model_for_kbit_training may cast floating parameters; do the
+        # exact projector conversion after it and before PEFT copies it.
+        conversion = dequantize_trainable_projector(
+            model, config.student.multimodal_projector_path
+        )
+        print(f"projector_dequantization={conversion}")
+        validate_projector_trainable_parameters(model, config.student.multimodal_projector_path)
     target_modules = config.student.target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
     lora_config = LoraConfig(
         r=config.student.lora_rank,
@@ -808,7 +818,9 @@ def _maybe_enable_student_lora(config, model):
         if config.student.train_multimodal_projector else None,
         task_type="CAUSAL_LM",
     )
-    return get_peft_model(model, lora_config)
+    wrapped = get_peft_model(model, lora_config)
+    validate_projector_trainable_parameters(wrapped, config.student.multimodal_projector_path)
+    return wrapped
 
 
 def _apply_student_train_setup(config, model):
@@ -817,6 +829,13 @@ def _apply_student_train_setup(config, model):
         if hasattr(model, "config"):
             model.config.use_cache = False
     validate_projector_path(model, config.student.multimodal_projector_path)
+    if config.student.train_multimodal_projector:
+        # Do this before PEFT modules_to_save copies the module.
+        if not config.student.use_lora:
+            conversion = dequantize_trainable_projector(
+                model, config.student.multimodal_projector_path
+            )
+            print(f"projector_dequantization={conversion}")
     model = _maybe_enable_student_lora(config, model)
     summary = freeze_student_vision_keep_merger_lm_trainable(
         model,
@@ -824,6 +843,8 @@ def _apply_student_train_setup(config, model):
         train_multimodal_projector=config.student.train_multimodal_projector,
         multimodal_projector_path=config.student.multimodal_projector_path,
     )
+    if config.student.train_multimodal_projector:
+        validate_projector_trainable_parameters(model, config.student.multimodal_projector_path)
     model.train()
     return model, summary
 
@@ -832,6 +853,25 @@ def _build_optimizer(config, model):
     import torch
 
     trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    invalid = [
+        name for name, parameter in model.named_parameters()
+        if parameter.requires_grad and not parameter.is_floating_point()
+    ]
+    if invalid:
+        raise RuntimeError(
+            "Optimizer received non-floating trainable parameters: "
+            f"{invalid}"
+        )
+    if not trainable_parameters:
+        raise RuntimeError("Optimizer validation failed: no trainable parameters.")
+    groups = summarize_trainable_groups(model, config.student.multimodal_projector_path)
+    print("Trainable parameter groups:")
+    for key in ("attention_lora", "projector", "vision_encoder", "base_llm", "other"):
+        print(f"  {key}={groups.get(key, 0)}")
+    if groups.get("attention_lora", 0) <= 0:
+        raise RuntimeError("Optimizer validation failed: no attention LoRA parameters.")
+    if config.student.train_multimodal_projector and groups.get("projector", 0) <= 0:
+        raise RuntimeError("Optimizer validation failed: no projector parameters.")
     return torch.optim.AdamW(trainable_parameters, lr=config.training.learning_rate)
 
 

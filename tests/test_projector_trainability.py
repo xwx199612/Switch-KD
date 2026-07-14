@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 from vlm_distill.config_schema import load_config
-from vlm_distill.student_trainability import summarize_trainable_groups
+from vlm_distill.student_trainability import (
+    dequantize_trainable_projector,
+    summarize_trainable_groups,
+)
 from vlm_distill.train_online_align_dbild import freeze_student_vision_keep_merger_lm_trainable
 
 
@@ -100,6 +104,55 @@ def test_projector_lora_mode_trains_only_projector_adapter():
     assert not model.model.visual.merger.weight.requires_grad
 
 
+def test_only_configured_quantized_projector_linears_are_rebuilt_as_bf16(monkeypatch):
+    torch = pytest.importorskip("torch")
+    from torch import nn
+    import vlm_distill.student_trainability as trainability
+
+    class FakeQuantizedLinear(nn.Linear):
+        def dequantize(self):
+            return self.weight.detach().float()
+
+    class Merger(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.norm = nn.LayerNorm(4)
+            self.linear_fc1 = FakeQuantizedLinear(4, 8)
+            self.act_fn = nn.GELU()
+            self.linear_fc2 = FakeQuantizedLinear(8, 4, bias=False)
+
+    class Visual(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.merger = Merger()
+            self.blocks = nn.ModuleList([nn.Linear(4, 4)])
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = nn.Module()
+            self.model.visual = Visual()
+            self.model.language_model = nn.Linear(4, 4)
+
+    monkeypatch.setattr(trainability, "_is_bitsandbytes_linear", lambda module: isinstance(module, FakeQuantizedLinear))
+    model = Model()
+    original_block = model.model.visual.blocks[0]
+    result = dequantize_trainable_projector(model, "model.visual.merger")
+    merger = model.model.visual.merger
+
+    assert result["converted_linears"] == 2
+    assert isinstance(merger.norm, nn.LayerNorm)
+    assert isinstance(merger.act_fn, nn.GELU)
+    assert isinstance(merger.linear_fc1, nn.Linear)
+    assert isinstance(merger.linear_fc2, nn.Linear)
+    assert merger.linear_fc1.weight.dtype == torch.bfloat16
+    assert merger.linear_fc2.weight.dtype == torch.bfloat16
+    assert merger.linear_fc2.bias is None
+    assert all(parameter.dtype == torch.bfloat16 for parameter in merger.linear_fc1.parameters())
+    assert model.model.visual.blocks[0] is original_block
+    assert model.model.language_model.weight.dtype == torch.float32
+
+
 def test_projector_survives_peft_save_reload_and_merge(tmp_path):
     torch = pytest.importorskip("torch")
     pytest.importorskip("peft")
@@ -146,6 +199,58 @@ def test_projector_survives_peft_save_reload_and_merge(tmp_path):
     assert torch.equal(actual, expected)
     merged = reloaded.merge_and_unload()
     assert torch.equal(merged.model.visual.merger.weight, expected)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    os.environ.get("QWEN3_VL_4BIT_INTEGRATION") != "1",
+    reason="Set QWEN3_VL_4BIT_INTEGRATION=1 to run the local Qwen3-VL 4-bit test",
+)
+def test_qwen3vl_4bit_projector_gradient_smoke():
+    """Real-model smoke test; opt-in because it needs a CUDA-capable Qwen3-VL install."""
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("Qwen3-VL 4-bit integration requires CUDA")
+    from PIL import Image
+    from vlm_distill.config_schema import load_config
+    from vlm_distill.train_online_align_dbild import (
+        _apply_student_train_setup,
+        _build_optimizer,
+        _load_student,
+    )
+
+    config = load_config("configs/qwen3vl8b_r16_attn_projector_trainable.yaml")
+    model, processor, _, _ = _load_student(config)
+    model, _ = _apply_student_train_setup(config, model)
+    optimizer = _build_optimizer(config, model)
+
+    image = Image.open("examples/images/sample_001.jpg").convert("RGB")
+    messages = [{"role": "user", "content": [
+        {"type": "image"}, {"type": "text", "text": "Describe this image."}
+    ]}]
+    prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = processor(text=[prompt], images=[image], return_tensors="pt")
+    device = next(parameter for parameter in model.parameters() if parameter.device.type == "cuda").device
+    inputs = {key: value.to(device) if hasattr(value, "to") else value for key, value in inputs.items()}
+    labels = inputs["input_ids"].clone()
+
+    before = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
+    optimizer.zero_grad(set_to_none=True)
+    loss = model(**inputs, labels=labels).loss
+    loss.backward()
+    assert any("lora" in name.lower() and parameter.grad is not None and parameter.grad.abs().sum() > 0
+               for name, parameter in model.named_parameters())
+    assert any("model.visual.merger" in name and parameter.grad is not None and parameter.grad.abs().sum() > 0
+               for name, parameter in model.named_parameters())
+    assert all(parameter.grad is None for name, parameter in model.named_parameters()
+               if "visual.blocks" in name or "language_model" in name)
+    optimizer.step()
+    assert any("model.visual.merger" in name and not torch.equal(before[name], parameter)
+               for name, parameter in model.named_parameters())
+    assert any("lora" in name.lower() and not torch.equal(before[name], parameter)
+               for name, parameter in model.named_parameters())
+    assert all(torch.equal(before[name], parameter) for name, parameter in model.named_parameters()
+               if "visual.blocks" in name or "language_model" in name)
 
 
 @pytest.mark.skipif(not Path("configs/qwen3vl8b_r16_attn_mlp.yaml").exists(), reason="A2 config not present")
