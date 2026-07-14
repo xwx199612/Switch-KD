@@ -32,6 +32,7 @@ from .logits_cache_utils import (
     vocab_sizes_compatible,
 )
 from .model_loading import apply_attn_implementation, resolve_model_path
+from .student_trainability import validate_projector_path
 from .parsing_output_parser import COORDINATE_SYSTEM_NORMALIZED_0_1000, serialize_parsing_label
 from .token_alignment import build_token_mismatch_details, coerce_token_ids
 
@@ -287,6 +288,7 @@ def _train_hf_student(config: PipelineConfig, rows: list[dict]) -> Path:
         local_files_only=True,
     )
     model, resolved_device_map = _load_student_model(config, student_model_path)
+    validate_projector_path(model, config.student.multimodal_projector_path)
     selected_input_device = select_model_input_device(
         model,
         preferred_modules=(
@@ -331,6 +333,8 @@ def _train_hf_student(config: PipelineConfig, rows: list[dict]) -> Path:
             lora_alpha=config.student.lora_alpha,
             lora_dropout=config.student.lora_dropout,
             target_modules=target_modules,
+            modules_to_save=[config.student.multimodal_projector_path]
+            if config.student.train_multimodal_projector else None,
             task_type="CAUSAL_LM",
         )
         model = get_peft_model(model, lora_config)

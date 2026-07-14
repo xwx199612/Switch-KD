@@ -20,8 +20,8 @@ data:
   # Canonical teacher label output. Keep this JSONL schema strict:
   # id, image, task, query, serialized parsing target, cached answer token ids, teacher_element_count.
   label_path: outputs/lora_ablation/{task_name}_teacher_labels_{label_profile}.jsonl
-  eval_path: outputs/lora_r32_woMLP/{task_name}_online_dbild_{response_profile}.jsonl
-  prediction_path: outputs/lora_r32_woMLP/{task_name}_online_dbild_{response_profile}/student_predictions.jsonl
+  eval_path: outputs/lora_r16_woMLP/{task_name}_online_dbild_{response_profile}.jsonl
+  prediction_path: outputs/lora_r16_woMLP/{task_name}_online_dbild_{response_profile}/student_predictions.jsonl
   training_image_dir: /mnt/nvme0/vlm_distill/TV_data
   inference_image_dir: /mnt/nvme0/vlm_distill/validation_data
   image_root: .
@@ -41,9 +41,9 @@ teacher:
 
 student:
   model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-8B-Instruct
-  output_dir: outputs/lora_r32_woMLP/r32_attn
-  adapter_dir: outputs/lora_r32_woMLP/r32_attn/adapter
-  merged_model_path: /mnt/nvme0/vlm_distill/models/r32_attn
+  output_dir: outputs/lora_r16_woMLP/r32_attn
+  adapter_dir: outputs/lora_r16_woMLP/r32_attn/adapter
+  merged_model_path: /mnt/nvme0/vlm_distill/models/r16_attn
   #outputs/lora_ablation/{task_name}_switch_kd_{response_profile}/merged_model
 
   # Prediction-time model/adapter controls.
@@ -150,7 +150,7 @@ distillation:
   dbild_kl_mode: reverse
 
 evaluation:
-  output_path: outputs/lora_r32_woMLP/{task_name}_online_dbild_{response_profile}/eval_report.json
+  output_path: outputs/lora_r16_woMLP/{task_name}_online_dbild_{response_profile}/eval_report.json
   metrics:
     - exact_match
     - token_f1

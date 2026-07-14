@@ -5,28 +5,18 @@ options:
   quality: 1080p
   teacher_quantization: 4bit
   student_quantization: 4bit
-  # Derived automatically:
-  # label_profile = {quality}_{teacher_quantization}
-  # response_profile = {quality}_{teacher_quantization}_student_{student_quantization}
-
-# This config is intended for Qwen3-VL-32B-Instruct -> Qwen3-VL-8B-Instruct.
-# The current loaders resolve local model paths and load with local_files_only=True internally.
-# Do not add local_files_only / trust_remote_code here unless config_schema.py is updated.
 
 data:
   training_manifest_path: outputs/lora_ablation/{task_name}_training_manifest.jsonl
   inference_manifest_path: outputs/lora_ablation/{task_name}_inference_manifest.jsonl
   distill_path: outputs/lora_ablation/{task_name}_online_dbild_{response_profile}.jsonl
-  # Canonical teacher label output. Keep this JSONL schema strict:
-  # id, image, task, query, serialized parsing target, cached answer token ids, teacher_element_count.
   label_path: outputs/lora_ablation/{task_name}_teacher_labels_{label_profile}.jsonl
-  eval_path: outputs/lora_r32_woMLP/{task_name}_online_dbild_{response_profile}.jsonl
-  prediction_path: outputs/lora_r32_woMLP/{task_name}_online_dbild_{response_profile}/student_predictions.jsonl
+  eval_path: outputs/lora_ablation/r16_attn_projector_trainable/{task_name}_online_dbild_{response_profile}.jsonl
+  prediction_path: outputs/lora_ablation/r16_attn_projector_trainable/{task_name}_online_dbild_{response_profile}/student_predictions.jsonl
   training_image_dir: /mnt/nvme0/vlm_distill/TV_data
   inference_image_dir: /mnt/nvme0/vlm_distill/validation_data
   image_root: .
-  # Keep this small for the first smoke test. Set to empty/null for full training.
-  max_samples: 
+  max_samples:
 
 teacher:
   backend: hf
@@ -41,29 +31,25 @@ teacher:
 
 student:
   model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-8B-Instruct
-  output_dir: outputs/lora_r32_woMLP/r32_attn
-  adapter_dir: outputs/lora_r32_woMLP/r32_attn/adapter
-  merged_model_path: /mnt/nvme0/vlm_distill/models/r32_attn
-  #outputs/lora_ablation/{task_name}_switch_kd_{response_profile}/merged_model
-
-  # Prediction-time model/adapter controls.
-  # Leave inference_model_path empty to let predict prefer merged_model_path when it exists,
-  # otherwise fall back to model_name.
-  inference_model_path: 
-  inference_adapter_path: 
+  output_dir: outputs/lora_ablation/r16_attn_projector_trainable
+  adapter_dir: outputs/lora_ablation/r16_attn_projector_trainable/adapter
+  merged_model_path: /mnt/nvme0/vlm_distill/models/r16_attn_projector_trainable
+  inference_model_path:
+  inference_adapter_path:
   load_adapter: false
   merge_adapter: false
-
   device_map: auto
   use_lora: true
-  lora_rank: 32
-  lora_alpha: 64
+  lora_rank: 16
+  lora_alpha: 32
   lora_dropout: 0.05
   target_modules:
     - q_proj
     - k_proj
     - v_proj
     - o_proj
+  train_multimodal_projector: true
+  multimodal_projector_path: model.visual.merger
   quantization: "{student_quantization}"
   attn_implementation: sdpa
 
@@ -77,13 +63,11 @@ training:
   log_every: 50
   save_every: 1000
   mixed_precision: bf16
-  # Safer default for Qwen3-VL-8B + 1080p + max_length=4096.
   gradient_checkpointing: true
   image_resize: "{quality}"
   max_length: 4096
   freeze_vision_tower: true
   mask_prompt_labels: true
-
 
 distillation:
   method: online_align_dbild
@@ -134,12 +118,8 @@ distillation:
     - Prioritize valid JSON over recall.
     - If unsure about an element bbox, omit that element.
     - Keep text short. If visible text is very long, summarize it into a short label.
-
-    Important:
-    Because Python .format() is used on prompt_template:
     - Keep placeholders as single braces: {query}, {question}, {task}
     - Escape literal JSON braces as double braces: {{ and }}
-    - Do not use unescaped JSON braces in YAML.
 
   kd_temperature: 2.0
   dbild_top_k: 64
@@ -150,7 +130,7 @@ distillation:
   dbild_kl_mode: reverse
 
 evaluation:
-  output_path: outputs/lora_r32_woMLP/{task_name}_online_dbild_{response_profile}/eval_report.json
+  output_path: outputs/lora_ablation/r16_attn_projector_trainable/{task_name}_online_dbild_{response_profile}/eval_report.json
   metrics:
     - exact_match
     - token_f1

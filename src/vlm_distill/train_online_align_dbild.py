@@ -11,6 +11,12 @@ from .data_manifest import read_jsonl
 from .device_utils import batch_to_device, resolve_requested_device_map, resolve_training_device_map, select_model_input_device
 from .loss_switch_kd import _causal_lm_loss, full_dynamic_bidirectional_logits_difference
 from .model_loading import apply_attn_implementation, resolve_model_path
+from .student_trainability import (
+    QWEN3_VL_PROJECTOR_PATH,
+    parameter_matches_module_path,
+    summarize_trainable_groups,
+    validate_projector_path,
+)
 from .parsing_output_parser import serialize_parsing_label
 from .stage_student_training import VlmTrainingDataset
 from .vlm_batching import build_vlm_data_collator, encode_vlm_training_sample, load_training_image
@@ -446,7 +452,13 @@ def _can_require_grad(parameter) -> bool:
     return parameter.is_floating_point() or parameter.is_complex()
 
 
-def freeze_student_vision_keep_merger_lm_trainable(model, *, use_lora: bool) -> TrainableSummary:
+def freeze_student_vision_keep_merger_lm_trainable(
+    model,
+    *,
+    use_lora: bool,
+    train_multimodal_projector: bool = False,
+    multimodal_projector_path: str = QWEN3_VL_PROJECTOR_PATH,
+) -> TrainableSummary:
     trainable_names: list[str] = []
     trainable_tensor_count = 0
 
@@ -456,23 +468,17 @@ def freeze_student_vision_keep_merger_lm_trainable(model, *, use_lora: bool) -> 
             parameter.requires_grad_(False)
             continue
 
-        if use_lora:
-            should_train = any(
-                keyword in lowered
-                for keyword in ("lora", "merger", "projector", "connector")
-            )
-        else:
-            should_train = any(
-                keyword in lowered
-                for keyword in (
-                    "merger",
-                    "projector",
-                    "connector",
-                    "language_model",
-                    "model.layers",
-                    "lm_head",
-                )
-            )
+        is_attention_lora = "lora" in lowered and any(
+            target in lowered for target in ("q_proj", "k_proj", "v_proj", "o_proj")
+        )
+        is_projector_lora = "lora" in lowered and parameter_matches_module_path(
+            name, multimodal_projector_path
+        )
+        is_peft_original_copy = ".original_module." in name
+        should_train = (use_lora and (is_attention_lora or is_projector_lora)) or (
+            train_multimodal_projector and not is_peft_original_copy
+            and parameter_matches_module_path(name, multimodal_projector_path)
+        )
 
         if should_train and _can_require_grad(parameter):
             parameter.requires_grad_(True)
@@ -497,6 +503,18 @@ def freeze_student_vision_keep_merger_lm_trainable(model, *, use_lora: bool) -> 
     print(f"trainable_param_ratio={ratio:.6f}")
     print(f"trainable_tensor_count={trainable_tensor_count}")
     print("first_trainable_parameter_names=", first_trainable_names)
+    groups = summarize_trainable_groups(model, multimodal_projector_path)
+    print(f"LLM LoRA parameters: {groups['llm_lora']}")
+    print(f"Projector / merger parameters: {groups['projector']}")
+    print(f"Vision encoder parameters: {groups['vision_encoder']}")
+    print(f"Other parameters: {groups['other']}")
+    if groups["vision_encoder"] != 0:
+        raise RuntimeError("Trainability validation failed: vision encoder parameters are trainable.")
+    if any("lora" in name.lower() and any(x in name.lower() for x in ("gate_proj", "up_proj", "down_proj"))
+           for name, p in model.named_parameters() if p.requires_grad):
+        raise RuntimeError("Trainability validation failed: MLP LoRA parameters are trainable.")
+    if train_multimodal_projector and groups["projector"] == 0:
+        raise RuntimeError("Trainability validation failed: configured projector has no trainable parameters.")
     return TrainableSummary(
         count=int(trainable_count),
         total=int(total_count),
@@ -786,6 +804,8 @@ def _maybe_enable_student_lora(config, model):
         lora_alpha=config.student.lora_alpha,
         lora_dropout=config.student.lora_dropout,
         target_modules=target_modules,
+        modules_to_save=[config.student.multimodal_projector_path]
+        if config.student.train_multimodal_projector else None,
         task_type="CAUSAL_LM",
     )
     return get_peft_model(model, lora_config)
@@ -796,10 +816,13 @@ def _apply_student_train_setup(config, model):
         model.gradient_checkpointing_enable()
         if hasattr(model, "config"):
             model.config.use_cache = False
+    validate_projector_path(model, config.student.multimodal_projector_path)
     model = _maybe_enable_student_lora(config, model)
     summary = freeze_student_vision_keep_merger_lm_trainable(
         model,
         use_lora=config.student.use_lora,
+        train_multimodal_projector=config.student.train_multimodal_projector,
+        multimodal_projector_path=config.student.multimodal_projector_path,
     )
     model.train()
     return model, summary

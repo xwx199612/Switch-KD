@@ -63,6 +63,8 @@ class StudentConfig:
     lora_dropout: float = 0.05
     target_modules: list[str] = field(default_factory=list)
     quantization: str = "none"
+    train_multimodal_projector: bool = False
+    multimodal_projector_path: str = "model.visual.merger"
 
 
 @dataclass
@@ -263,6 +265,12 @@ def _build_data_config(raw: dict[str, Any]) -> DataConfig:
 
 def _build_student_config(raw: dict[str, Any]) -> StudentConfig:
     values = dict(raw)
+    if not isinstance(values.get("train_multimodal_projector", False), bool):
+        raise ValueError("student.train_multimodal_projector must be a boolean.")
+    projector_path = values.get("multimodal_projector_path", "model.visual.merger")
+    if not isinstance(projector_path, str) or not projector_path.strip():
+        raise ValueError("student.multimodal_projector_path must be a non-empty dotted module path.")
+    values["multimodal_projector_path"] = projector_path.strip()
     for key in ("output_dir", "adapter_dir"):
         values[key] = remap_output_path(Path(values[key]))
     merged_model_path = values.get("merged_model_path")
