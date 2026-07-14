@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,132 @@ from vlm_distill.student_trainability import (
     summarize_trainable_groups,
 )
 from vlm_distill.train_online_align_dbild import freeze_student_vision_keep_merger_lm_trainable
+
+
+def _config_diff(left, right):
+    differences = {}
+    left_values = asdict(left)
+    right_values = asdict(right)
+
+    def walk(path, a, b):
+        if isinstance(a, dict) and isinstance(b, dict):
+            for key in sorted(set(a) | set(b)):
+                walk(f"{path}.{key}" if path else key, a.get(key), b.get(key))
+        elif a != b:
+            differences[path] = (a, b)
+
+    walk("", left_values, right_values)
+    return differences
+
+
+def test_a1_smoke_resolved_config_diff_is_only_explicitly_allowed_fields():
+    formal = load_config("configs/qwen3vl8b_r16_attn_projector_trainable.yaml")
+    smoke = load_config("configs/qwen3vl8b_r16_attn_projector_trainable_smoke.yaml")
+    assert set(_config_diff(formal, smoke)) == {
+        "data.max_samples",
+        "student.output_dir",
+        "student.adapter_dir",
+        "student.merged_model_path",
+        "training.epochs",
+        "training.gradient_accumulation_steps",
+        "training.max_steps",
+        "training.log_every",
+        "training.save_every",
+    }
+
+
+def test_a1_smoke_keeps_formal_prompt_and_kneedle_configuration():
+    formal = load_config("configs/qwen3vl8b_r16_attn_projector_trainable.yaml")
+    smoke = load_config("configs/qwen3vl8b_r16_attn_projector_trainable_smoke.yaml")
+    assert smoke.distillation.prompt_template == formal.distillation.prompt_template
+    for text in ("normalized 0-1000", "bbox_norm", "focused", "ASCII double quotes", "valid JSON only"):
+        assert text in smoke.distillation.prompt_template
+    assert smoke.distillation.dbild_top_k_mode == "kneedle"
+    assert smoke.distillation.dbild_kneedle_candidate_k == formal.distillation.dbild_kneedle_candidate_k
+    assert smoke.distillation.dbild_min_top_k == formal.distillation.dbild_min_top_k
+    assert smoke.distillation.dbild_max_top_k == formal.distillation.dbild_max_top_k
+
+
+def _a1_validation_model(*, extra_linear=False, dtype=None):
+    torch = pytest.importorskip("torch")
+    from torch import nn
+
+    class Merger(nn.Module):
+        def __init__(self):
+            super().__init__()
+            target_dtype = dtype or torch.bfloat16
+            self.linear_fc1 = nn.Linear(2, 2).to(dtype=target_dtype)
+            self.linear_fc2 = nn.Linear(2, 2).to(dtype=target_dtype)
+            if extra_linear:
+                self.extra = nn.Linear(2, 2).to(dtype=target_dtype)
+
+    model = nn.Module()
+    model.model = nn.Module()
+    model.model.visual = nn.Module()
+    model.model.visual.merger = Merger()
+    return model
+
+
+def test_precision_summary_returns_counts():
+    from vlm_distill.stage_merge_adapter import _print_merged_precision_summary
+
+    counts = _print_merged_precision_summary(_a1_validation_model())
+    assert isinstance(counts, dict)
+    assert counts["main merger BF16 linears"] == 2
+
+
+def test_a1_merge_validation_rejects_zero_quantized_language_model_linears():
+    from vlm_distill.stage_merge_adapter import _validate_a1_merged_precision
+
+    counts = {"language_model quantized linears": 0, "main merger BF16 linears": 2,
+              "remaining LoRA modules": 0, "remaining modules_to_save wrappers": 0}
+    with pytest.raises(RuntimeError, match="quantized language-model linears > 0"):
+        _validate_a1_merged_precision(_a1_validation_model(), counts, projector_path="model.visual.merger")
+
+
+def test_a1_merge_validation_rejects_non_bf16_main_merger():
+    from vlm_distill.stage_merge_adapter import _validate_a1_merged_precision
+
+    model = _a1_validation_model(dtype=__import__("torch").float32)
+    counts = {"language_model quantized linears": 1, "main merger BF16 linears": 0,
+              "remaining LoRA modules": 0, "remaining modules_to_save wrappers": 0}
+    with pytest.raises(RuntimeError, match="linear_fc1.*dtype"):
+        _validate_a1_merged_precision(model, counts, projector_path="model.visual.merger")
+
+
+@pytest.mark.parametrize("extra_linear, expected", [(False, 1), (True, 3)])
+def test_a1_merge_validation_rejects_fewer_or_more_main_merger_linears(extra_linear, expected):
+    from vlm_distill.stage_merge_adapter import _validate_a1_merged_precision
+
+    model = _a1_validation_model(extra_linear=extra_linear)
+    counts = {"language_model quantized linears": 1, "main merger BF16 linears": expected,
+              "remaining LoRA modules": 0, "remaining modules_to_save wrappers": 0}
+    if not extra_linear:
+        del model.model.visual.merger.linear_fc2
+    with pytest.raises(RuntimeError, match="main-merger|linear_fc2"):
+        _validate_a1_merged_precision(model, counts, projector_path="model.visual.merger")
+
+
+@pytest.mark.parametrize("field, message", [
+    ("remaining LoRA modules", "LoRA"),
+    ("remaining modules_to_save wrappers", "modules_to_save"),
+])
+def test_a1_merge_validation_rejects_remaining_peft_wrappers(field, message):
+    from vlm_distill.stage_merge_adapter import _validate_a1_merged_precision
+
+    counts = {"language_model quantized linears": 1, "main merger BF16 linears": 2,
+              "remaining LoRA modules": 0, "remaining modules_to_save wrappers": 0}
+    counts[field] = 1
+    with pytest.raises(RuntimeError, match=message):
+        _validate_a1_merged_precision(_a1_validation_model(), counts, projector_path="model.visual.merger")
+
+
+def test_exact_main_merger_linear_children_pass_bf16_validation():
+    from vlm_distill.stage_merge_adapter import _validate_a1_merged_precision
+
+    counts = {"language_model quantized linears": 1, "main merger BF16 linears": 2,
+              "remaining LoRA modules": 0, "remaining modules_to_save wrappers": 0}
+    _validate_a1_merged_precision(_a1_validation_model(), counts, projector_path="model.visual.merger")
 
 
 def test_a1_yaml_loads_and_has_controlled_lora_settings():
