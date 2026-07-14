@@ -517,6 +517,8 @@ def freeze_student_vision_keep_merger_lm_trainable(
         raise RuntimeError("Trainability validation failed: MLP LoRA parameters are trainable.")
     if train_multimodal_projector and groups["projector"] == 0:
         raise RuntimeError("Trainability validation failed: configured projector has no trainable parameters.")
+    if train_multimodal_projector:
+        _validate_a1_trainable_contract(model, multimodal_projector_path)
     return TrainableSummary(
         count=int(trainable_count),
         total=int(total_count),
@@ -524,6 +526,32 @@ def freeze_student_vision_keep_merger_lm_trainable(
         tensor_count=int(trainable_tensor_count),
         names=first_trainable_names,
     )
+
+
+def _validate_a1_trainable_contract(model, projector_path: str) -> dict[str, int]:
+    """Validate the names and ownership of A1's trainable tensors."""
+    trainable = [(name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad]
+    projector = [name for name, _ in trainable if parameter_matches_module_path(name, projector_path)]
+    projector_original = [name for name in projector if ".original_module." in name]
+    projector_saved = [name for name in projector if ".modules_to_save.default." in name]
+    if projector_original:
+        raise RuntimeError(f"Trainability validation failed: frozen original projector is trainable: {projector_original}")
+    if projector_saved and len({name.split('.modules_to_save.default.', 1)[0] for name in projector_saved}) != 1:
+        raise RuntimeError("Trainability validation failed: duplicate projector trainable copies detected.")
+    groups = summarize_trainable_groups(model, projector_path)
+    if groups["vision_encoder"] or groups["base_llm"] or groups["other"]:
+        raise RuntimeError(
+            "A1 trainability validation failed: "
+            f"vision_encoder={groups['vision_encoder']} base_llm={groups['base_llm']} other={groups['other']}"
+        )
+    print("Trainable parameter representatives:")
+    for label, predicate in (
+        ("attention LoRA", lambda name: "lora" in name.lower() and any(x in name.lower() for x in ("q_proj", "k_proj", "v_proj", "o_proj"))),
+        ("projector modules_to_save", lambda name: ".modules_to_save.default." in name and parameter_matches_module_path(name, projector_path)),
+    ):
+        examples = [name for name, _ in trainable if predicate(name)][:5]
+        print(f"  {label}: {examples}")
+    return groups
 
 
 def summarize_trainable_lora_targets(model, configured_targets: list[str]) -> LoraTargetSummary:
@@ -853,6 +881,7 @@ def _build_optimizer(config, model):
     import torch
 
     trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    trainable_items = [(name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad]
     invalid = [
         name for name, parameter in model.named_parameters()
         if parameter.requires_grad and not parameter.is_floating_point()
@@ -864,14 +893,33 @@ def _build_optimizer(config, model):
         )
     if not trainable_parameters:
         raise RuntimeError("Optimizer validation failed: no trainable parameters.")
+    if len({id(parameter) for parameter in trainable_parameters}) != len(trainable_parameters):
+        raise RuntimeError("Optimizer validation failed: duplicate trainable parameter object identities.")
     groups = summarize_trainable_groups(model, config.student.multimodal_projector_path)
     print("Trainable parameter groups:")
+    print(f"optimizer_unique_parameter_tensors={len(trainable_parameters)}")
+    print(f"optimizer_total_numel={sum(parameter.numel() for parameter in trainable_parameters)}")
     for key in ("attention_lora", "projector", "vision_encoder", "base_llm", "other"):
         print(f"  {key}={groups.get(key, 0)}")
     if groups.get("attention_lora", 0) <= 0:
         raise RuntimeError("Optimizer validation failed: no attention LoRA parameters.")
     if config.student.train_multimodal_projector and groups.get("projector", 0) <= 0:
         raise RuntimeError("Optimizer validation failed: no projector parameters.")
+    if config.student.train_multimodal_projector:
+        _validate_a1_trainable_contract(model, config.student.multimodal_projector_path)
+    if config.student.train_multimodal_projector and (
+        groups.get("vision_encoder", 0) or groups.get("base_llm", 0) or groups.get("other", 0)
+    ):
+        raise RuntimeError(
+            "Optimizer validation failed: unexpected trainable groups: "
+            f"vision_encoder={groups['vision_encoder']} base_llm={groups['base_llm']} other={groups['other']}"
+        )
+    print(f"attention_lora_numel={groups['attention_lora']}")
+    print(f"projector_numel={groups['projector']}")
+    print(f"vision_encoder_numel={groups['vision_encoder']}")
+    print(f"base_llm_numel={groups['base_llm']}")
+    print(f"other_numel={groups['other']}")
+    print(f"optimizer_trainable_names={len(trainable_items)}")
     return torch.optim.AdamW(trainable_parameters, lr=config.training.learning_rate)
 
 

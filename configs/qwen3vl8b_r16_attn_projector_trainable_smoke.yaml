@@ -1,0 +1,76 @@
+# Dedicated A1 one-step smoke configuration. Keep the model/trainability
+# settings aligned with qwen3vl8b_r16_attn_projector_trainable.yaml.
+seed: 42
+
+options:
+  task_name: parsing
+  quality: 1080p
+  teacher_quantization: 4bit
+  student_quantization: 4bit
+
+data:
+  training_manifest_path: outputs/lora_ablation/{task_name}_training_manifest.jsonl
+  inference_manifest_path: outputs/lora_ablation/{task_name}_inference_manifest.jsonl
+  distill_path: outputs/lora_ablation/{task_name}_online_dbild_{response_profile}.jsonl
+  label_path: outputs/lora_ablation/{task_name}_teacher_labels_{label_profile}.jsonl
+  training_image_dir: /mnt/nvme0/vlm_distill/TV_data
+  inference_image_dir: /mnt/nvme0/vlm_distill/validation_data
+  image_root: .
+  max_samples: 2
+
+teacher:
+  backend: hf
+  model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-32B-Instruct
+  device_map: auto
+  torch_dtype: bfloat16
+  quantization: "{teacher_quantization}"
+  attn_implementation: sdpa
+
+student:
+  model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-8B-Instruct
+  output_dir: outputs/lora_ablation/r16_attn_projector_trainable_smoke
+  adapter_dir: outputs/lora_ablation/r16_attn_projector_trainable_smoke/adapter
+  merged_model_path: /mnt/nvme0/vlm_distill/models/r16_attn_projector_trainable_smoke
+  device_map: auto
+  use_lora: true
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+  train_multimodal_projector: true
+  multimodal_projector_path: model.visual.merger
+  quantization: "{student_quantization}"
+  attn_implementation: sdpa
+
+training:
+  epochs: 1
+  batch_size: 1
+  gradient_accumulation_steps: 1
+  learning_rate: 1.0e-4
+  warmup_ratio: 0.0
+  max_steps: 1
+  log_every: 1
+  save_every: 1
+  mixed_precision: bf16
+  gradient_checkpointing: true
+  image_resize: "{quality}"
+  max_length: 4096
+  freeze_vision_tower: true
+  mask_prompt_labels: true
+
+distillation:
+  method: online_align_dbild
+  lm_loss_weight: 1.0
+  dbild_loss_weight: 1.0
+  vsd_loss_weight: 0.0
+  confidence_weighting: true
+  min_teacher_confidence: 0.35
+  prompt_template: "Task:\n{query}\nReturn valid JSON only."
+  kd_temperature: 2.0
+  dbild_top_k: 64
+  dbild_top_k_mode: fixed
+  dbild_kl_mode: reverse
+
+evaluation:
+  output_path: outputs/lora_ablation/r16_attn_projector_trainable_smoke/eval_report.json
+  metrics: [exact_match, token_f1]
