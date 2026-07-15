@@ -1,4 +1,5 @@
 from dataclasses import asdict, is_dataclass
+import copy
 from pathlib import Path
 import types
 
@@ -24,17 +25,19 @@ SMOKE = {
 }
 STAGE1_A_R16_ATTN = "configs/qwen3vl8b_r16_attn.yaml"
 
-_ALLOWED_PATHS = {
+FORMAL_ALLOWED_PATHS = {
     "student.output_dir", "student.adapter_dir", "student.merged_model_path",
     "data.eval_path", "data.prediction_path", "evaluation.output_path",
     "student.lora_layers_to_transform", "student.lora_layers_pattern",
+}
+SMOKE_ALLOWED_PATHS = FORMAL_ALLOWED_PATHS | {
     "data.max_samples", "training.epochs", "training.gradient_accumulation_steps",
     "training.max_steps", "training.log_every", "training.save_every",
 }
 
 
-def normalize_experiment_config(config):
-    """Return resolved config values with only experiment-output/scope fields removed."""
+def normalize_experiment_config(config, allowed_paths: set[str]) -> dict:
+    """Return config values after removing only explicitly allowed paths."""
     values = asdict(config) if is_dataclass(config) else config
 
     def walk(value, path=""):
@@ -42,7 +45,7 @@ def normalize_experiment_config(config):
             result = {}
             for key, item in value.items():
                 child = f"{path}.{key}" if path else key
-                if child in _ALLOWED_PATHS:
+                if child in allowed_paths:
                     continue
                 result[key] = walk(item, child)
             return result
@@ -55,7 +58,7 @@ def normalize_experiment_config(config):
     return walk(values)
 
 
-def _config_differences(left, right):
+def _config_differences(left, right, *, allowed_paths: set[str]) -> dict:
     differences = {}
 
     def walk(path, a, b):
@@ -65,7 +68,11 @@ def _config_differences(left, right):
         elif a != b:
             differences[path] = (a, b)
 
-    walk("", normalize_experiment_config(left), normalize_experiment_config(right))
+    walk(
+        "",
+        normalize_experiment_config(left, allowed_paths),
+        normalize_experiment_config(right, allowed_paths),
+    )
     return differences
 
 
@@ -140,7 +147,7 @@ def test_layer_schema_rejects_invalid_indices(tmp_path: Path, bad):
 def test_b0_matches_completed_stage1_a_r16_attention():
     b0 = load_config(FORMAL["b0"])
     stage1_a = load_config(STAGE1_A_R16_ATTN)
-    differences = _config_differences(b0, stage1_a)
+    differences = _config_differences(b0, stage1_a, allowed_paths=FORMAL_ALLOWED_PATHS)
     assert not differences, f"B0 differs from {STAGE1_A_R16_ATTN}: {differences}"
     assert b0.student.lora_layers_to_transform is None
     assert b0.student.lora_layers_pattern is None
@@ -149,7 +156,7 @@ def test_b0_matches_completed_stage1_a_r16_attention():
 def test_stage1_b_configs_differ_only_by_scope_and_paths():
     configs = [load_config(FORMAL[key]) for key in ("b0", "b1", "b2")]
     for left, right in zip(configs, configs[1:]):
-        differences = _config_differences(left, right)
+        differences = _config_differences(left, right, allowed_paths=FORMAL_ALLOWED_PATHS)
         assert not differences, f"unexpected controlled-experiment differences: {differences}"
 
 
@@ -178,21 +185,69 @@ def test_stage1_b_scope_prompt_and_dbild_settings_are_explicit_and_equal():
 
 
 def test_stage1_b_smoke_configs_differ_from_formal_only_by_smoke_controls_and_paths():
-    allowed = _ALLOWED_PATHS | {"data.max_samples"}
     for key in ("b1", "b2"):
-        formal = asdict(load_config(FORMAL[key]))
-        smoke = asdict(load_config(SMOKE[key]))
-        differences = {}
-
-        def walk(path, a, b):
-            if isinstance(a, dict) and isinstance(b, dict):
-                for field in sorted(set(a) | set(b)):
-                    walk(f"{path}.{field}" if path else field, a.get(field), b.get(field))
-            elif a != b and path not in allowed:
-                differences[path] = (a, b)
-
-        walk("", formal, smoke)
+        differences = _config_differences(
+            load_config(FORMAL[key]),
+            load_config(SMOKE[key]),
+            allowed_paths=SMOKE_ALLOWED_PATHS,
+        )
         assert not differences, f"{key} smoke has uncontrolled differences: {differences}"
+
+
+def test_formal_equality_detects_epoch_difference():
+    left = copy.deepcopy(asdict(load_config(FORMAL["b1"])))
+    right = copy.deepcopy(left)
+    right["training"]["epochs"] += 1
+    differences = _config_differences(left, right, allowed_paths=FORMAL_ALLOWED_PATHS)
+    assert set(differences) == {"training.epochs"}
+
+
+def test_formal_equality_detects_gradient_accumulation_difference():
+    left = copy.deepcopy(asdict(load_config(FORMAL["b1"])))
+    right = copy.deepcopy(left)
+    right["training"]["gradient_accumulation_steps"] += 1
+    differences = _config_differences(left, right, allowed_paths=FORMAL_ALLOWED_PATHS)
+    assert set(differences) == {"training.gradient_accumulation_steps"}
+
+
+def test_formal_equality_detects_dbild_difference():
+    left = copy.deepcopy(asdict(load_config(FORMAL["b1"])))
+    right = copy.deepcopy(left)
+    right["distillation"]["dbild_top_k_mode"] = "fixed"
+    differences = _config_differences(left, right, allowed_paths=FORMAL_ALLOWED_PATHS)
+    assert set(differences) == {"distillation.dbild_top_k_mode"}
+
+
+def test_formal_equality_detects_prompt_difference():
+    left = copy.deepcopy(asdict(load_config(FORMAL["b1"])))
+    right = copy.deepcopy(left)
+    right["distillation"]["prompt_template"] += "\nChanged."
+    differences = _config_differences(left, right, allowed_paths=FORMAL_ALLOWED_PATHS)
+    assert set(differences) == {"distillation.prompt_template"}
+
+
+def test_smoke_equality_allows_only_smoke_controls():
+    formal = copy.deepcopy(asdict(load_config(FORMAL["b1"])))
+    smoke = copy.deepcopy(formal)
+    for path, value in {
+        "data.max_samples": 2,
+        "training.epochs": 1,
+        "training.gradient_accumulation_steps": 1,
+        "training.max_steps": 1,
+        "training.log_every": 1,
+        "training.save_every": 1,
+        "student.output_dir": "smoke/output",
+    }.items():
+        target = smoke
+        parts = path.split(".")
+        for part in parts[:-1]:
+            target = target[part]
+        target[parts[-1]] = value
+    assert not _config_differences(formal, smoke, allowed_paths=SMOKE_ALLOWED_PATHS)
+
+    smoke["training"]["learning_rate"] *= 2
+    differences = _config_differences(formal, smoke, allowed_paths=SMOKE_ALLOWED_PATHS)
+    assert set(differences) == {"training.learning_rate"}
 
 
 class _PeftToy(nn.Module):
