@@ -23,6 +23,21 @@ def test_cli_uses_single_model_and_query_arguments(monkeypatch) -> None:
     assert not hasattr(args, "output_format")
 
 
+def test_cli_accepts_mixed_4bit_bf16(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vlm_bbox_grounding.py",
+            "--image-dir", "images",
+            "--output-dir", "out",
+            "--model", "model",
+            "--quantization", "mixed_4bit_bf16",
+        ],
+    )
+    assert vlm_bbox_grounding.parse_args().quantization == "mixed_4bit_bf16"
+
+
 def test_cli_does_not_support_output_format(monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", ["vlm_bbox_grounding.py", "--image-dir", "images", "--output-dir", "out", "--model", "model", "--output-format", "line"])
     with pytest.raises(SystemExit):

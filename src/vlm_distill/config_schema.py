@@ -62,6 +62,8 @@ class StudentConfig:
     lora_alpha: int = 32
     lora_dropout: float = 0.05
     target_modules: list[str] = field(default_factory=list)
+    lora_layers_to_transform: list[int] | None = None
+    lora_layers_pattern: str | None = None
     quantization: str = "none"
     train_multimodal_projector: bool = False
     multimodal_projector_path: str = "model.visual.merger"
@@ -266,6 +268,27 @@ def _build_data_config(raw: dict[str, Any]) -> DataConfig:
 
 def _build_student_config(raw: dict[str, Any]) -> StudentConfig:
     values = dict(raw)
+    layers_to_transform = values.get("lora_layers_to_transform")
+    if layers_to_transform is not None:
+        if not isinstance(layers_to_transform, list) or not layers_to_transform:
+            raise ValueError("student.lora_layers_to_transform must be null or a non-empty list.")
+        if any(isinstance(index, bool) or not isinstance(index, int) or index < 0
+               for index in layers_to_transform):
+            raise ValueError(
+                "student.lora_layers_to_transform must contain only non-negative integers."
+            )
+        if len(set(layers_to_transform)) != len(layers_to_transform):
+            raise ValueError("student.lora_layers_to_transform must not contain duplicates.")
+        layers_pattern = values.get("lora_layers_pattern")
+        if not isinstance(layers_pattern, str) or not layers_pattern.strip():
+            raise ValueError(
+                "student.lora_layers_pattern must be a non-empty string when layers are configured."
+            )
+        values["lora_layers_pattern"] = layers_pattern.strip()
+    elif values.get("lora_layers_pattern") is not None:
+        if not isinstance(values["lora_layers_pattern"], str) or not values["lora_layers_pattern"].strip():
+            raise ValueError("student.lora_layers_pattern must be null or a non-empty string.")
+        values["lora_layers_pattern"] = values["lora_layers_pattern"].strip()
     if not isinstance(values.get("train_multimodal_projector", False), bool):
         raise ValueError("student.train_multimodal_projector must be a boolean.")
     projector_path = values.get("multimodal_projector_path", "model.visual.merger")

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from .config_schema import PipelineConfig
+from .config_schema import resolve_inference_manifest_path
 from .mixed_precision import build_mixed_precision_quantization_config, mixed_precision_capabilities
 from .model_loading import resolve_model_path
 from .student_trainability import dequantize_trainable_projector, get_module_by_exact_path
@@ -152,15 +154,65 @@ def _validate_artifact_mode(config: PipelineConfig) -> None:
         )
 
 
-def _validate_standalone_merged_model(model, processor, output_path: Path) -> None:
-    """Smoke-test the saved standalone model when the repository sample exists."""
+_GIT_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
+_REPOSITORY_SAMPLE_IMAGE = Path("examples/images/sample_001.jpg")
+
+
+def _usable_validation_image(path: Path) -> Path | None:
+    """Return a validated image path, or None when the candidate is unusable."""
+    from PIL import Image, UnidentifiedImageError
+
+    try:
+        if not path.is_file() or path.stat().st_size == 0:
+            return None
+        with path.open("rb") as handle:
+            if handle.read(len(_GIT_LFS_POINTER_PREFIX)) == _GIT_LFS_POINTER_PREFIX:
+                return None
+        with Image.open(path) as image:
+            rgb_image = image.convert("RGB")
+            rgb_image.load()
+            rgb_image.close()
+        return path.resolve()
+    except (FileNotFoundError, UnidentifiedImageError, OSError):
+        return None
+
+
+def _resolve_standalone_validation_image(config: PipelineConfig) -> Path | None:
+    """Find the first usable configured inference image, with a repository fallback."""
+    manifest_path = resolve_inference_manifest_path(config.data)
+    image_root = config.data.image_root
+    try:
+        with manifest_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                image_value = row.get("image") if isinstance(row, dict) else None
+                if not isinstance(image_value, str) or not image_value:
+                    continue
+                image_path = _usable_validation_image(image_root / image_value)
+                if image_path is not None:
+                    return image_path
+    except (FileNotFoundError, OSError):
+        pass
+
+    return _usable_validation_image(_REPOSITORY_SAMPLE_IMAGE)
+
+
+def _validate_standalone_merged_model(
+    model, processor, output_path: Path, *, config: PipelineConfig
+) -> None:
+    """Smoke-test the saved standalone model when a usable image exists."""
     import torch
     from PIL import Image
 
-    if not Path("examples/images/sample_001.jpg").exists():
-        print("Standalone merged inference validation skipped: sample image is unavailable.")
+    image_path = _resolve_standalone_validation_image(config)
+    if image_path is None:
+        print("Standalone merged image smoke test skipped: no valid validation image was found.")
         return
-    image_path = Path("examples/images/sample_001.jpg")
+
+    print("Standalone merged image smoke test:")
+    print(f"  image={image_path}")
     image = Image.open(image_path).convert("RGB")
     messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Describe this image."}]}]
     prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -169,6 +221,8 @@ def _validate_standalone_merged_model(model, processor, output_path: Path) -> No
     inputs = {key: value.to(device) if hasattr(value, "to") else value for key, value in inputs.items()}
     with torch.no_grad():
         outputs = model(**inputs)
+    if outputs.logits.numel() == 0:
+        raise RuntimeError("Standalone merged image inference produced empty logits.")
     if not torch.isfinite(outputs.logits).all():
         raise RuntimeError("Standalone merged image inference produced non-finite logits.")
     print("Standalone merged image inference: ok (finite logits)")
@@ -346,6 +400,8 @@ def merge_student_adapter(config: PipelineConfig) -> Path:
                 f"maximum absolute difference={max_abs_diff}."
             ) from exc
     print(f"Saved/reloaded merged projector weights: exact/near-exact (max_abs_diff={max_abs_diff})")
-    _validate_standalone_merged_model(reloaded, reloaded_processor, output_path)
+    _validate_standalone_merged_model(
+        reloaded, reloaded_processor, output_path, config=config
+    )
     print(f"OK merged model written: {output_path}")
     return output_path

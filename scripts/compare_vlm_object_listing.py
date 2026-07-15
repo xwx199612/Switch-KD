@@ -19,6 +19,7 @@ from scripts.vlm_compare_utils import (
     ensure_dir,
     list_images,
     load_processor_and_model,
+    QUANTIZATION_CHOICES,
     parse_line_object_names,
     extract_json_from_text,
     normalize_object_list,
@@ -75,7 +76,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--quantization",
-        choices=("none", "4bit", "8bit"),
+        choices=QUANTIZATION_CHOICES,
         default="none",
         help="Quantized model loading mode.",
     )

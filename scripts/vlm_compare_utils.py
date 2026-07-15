@@ -14,6 +14,11 @@ MODEL_SPECS = (
     ("qwen3vl_8b", "model_8b"),
     ("distilled_32to8b", "model_distilled"),
 )
+QUANTIZATION_CHOICES = ("none", "4bit", "8bit", "mixed_4bit_bf16")
+A1_MIXED_MERGER_PATHS = [
+    "model.visual.merger.linear_fc1",
+    "model.visual.merger.linear_fc2",
+]
 
 _BULLET_PREFIX_RE = re.compile(r"^\s*(?:[-*•]+|\d+[.)]|[A-Za-z][.)])\s*")
 _OBJECT_EXPLANATION_PREFIXES = (
@@ -100,6 +105,16 @@ def load_processor_and_model(
             bnb_4bit_use_double_quant=True,
         )
         effective_device_map = "auto"
+    elif quantization == "mixed_4bit_bf16":
+        from vlm_distill.mixed_precision import (
+            build_mixed_precision_quantization_config,
+        )
+
+        quantization_config = build_mixed_precision_quantization_config(
+            quantization="4bit",
+            excluded_module_paths=A1_MIXED_MERGER_PATHS,
+        )
+        effective_device_map = "auto"
     elif quantization == "8bit":
         quantization_config = BitsAndBytesConfig(load_in_8bit=True)
         effective_device_map = "auto"
@@ -119,7 +134,68 @@ def load_processor_and_model(
         quantization_config=quantization_config,
     )
     model.eval()
+    if quantization == "mixed_4bit_bf16":
+        _validate_and_print_mixed_model(model)
     return processor, model
+
+
+def _validate_and_print_mixed_model(model) -> None:
+    """Validate and summarize the A1 4-bit language/BF16 merger contract."""
+    import torch
+
+    try:
+        import bitsandbytes as bnb
+        linear4bit_type = bnb.nn.Linear4bit
+        quantized_types = (bnb.nn.Linear4bit, bnb.nn.Linear8bitLt)
+    except (ImportError, AttributeError) as exc:
+        raise RuntimeError(
+            "mixed_4bit_bf16 requires bitsandbytes so the loaded module classes can be validated."
+        ) from exc
+
+    language_model_linear4bit_count = sum(
+        isinstance(module, linear4bit_type)
+        for name, module in model.named_modules()
+        if "language_model" in name
+    )
+    try:
+        merger = model.get_submodule("model.visual.merger")
+        fc1 = model.get_submodule("model.visual.merger.linear_fc1")
+        fc2 = model.get_submodule("model.visual.merger.linear_fc2")
+    except (AttributeError, KeyError) as exc:
+        raise RuntimeError(
+            "mixed_4bit_bf16 validation failed: expected model.visual.merger.linear_fc1 "
+            "and model.visual.merger.linear_fc2."
+        ) from exc
+
+    merger_quantized = [
+        name or "model.visual.merger"
+        for name, module in merger.named_modules()
+        if isinstance(module, quantized_types)
+    ]
+    errors = []
+    if language_model_linear4bit_count <= 0:
+        errors.append("language-model Linear4bit count must be > 0")
+    for name, layer in (("linear_fc1", fc1), ("linear_fc2", fc2)):
+        if not isinstance(layer, torch.nn.Linear) or layer.weight.dtype != torch.bfloat16:
+            errors.append(
+                f"model.visual.merger.{name} must be torch.nn.Linear with torch.bfloat16 "
+                f"weights (got {type(layer).__module__}.{type(layer).__name__}/{layer.weight.dtype})"
+            )
+    if merger_quantized:
+        errors.append(
+            "no bitsandbytes quantized layer may exist under model.visual.merger "
+            f"(found {', '.join(merger_quantized)})"
+        )
+    if errors:
+        raise RuntimeError("mixed_4bit_bf16 validation failed: " + "; ".join(errors))
+
+    def module_label(layer) -> str:
+        return f"{type(layer).__module__}.{type(layer).__name__}/{layer.weight.dtype}"
+
+    print("quantization_mode=mixed_4bit_bf16")
+    print(f"language_model_linear4bit_count={language_model_linear4bit_count}")
+    print(f"merger_linear_fc1={module_label(fc1)}")
+    print(f"merger_linear_fc2={module_label(fc2)}")
 
 
 def select_input_device(model):

@@ -16,6 +16,7 @@ from .student_trainability import (
     parameter_matches_module_path,
     summarize_trainable_groups,
     dequantize_trainable_projector,
+    validate_language_model_lora_scope,
     validate_projector_trainable_parameters,
     validate_projector_path,
 )
@@ -837,7 +838,7 @@ def _maybe_enable_student_lora(config, model):
         print(f"projector_dequantization={conversion}")
         validate_projector_trainable_parameters(model, config.student.multimodal_projector_path)
     target_modules = config.student.target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
-    lora_config = LoraConfig(
+    lora_kwargs = dict(
         r=config.student.lora_rank,
         lora_alpha=config.student.lora_alpha,
         lora_dropout=config.student.lora_dropout,
@@ -846,8 +847,19 @@ def _maybe_enable_student_lora(config, model):
         if config.student.train_multimodal_projector else None,
         task_type="CAUSAL_LM",
     )
+    layers_to_transform = getattr(config.student, "lora_layers_to_transform", None)
+    layers_pattern = getattr(config.student, "lora_layers_pattern", None)
+    if layers_to_transform is not None:
+        lora_kwargs["layers_to_transform"] = layers_to_transform
+        lora_kwargs["layers_pattern"] = layers_pattern
+    lora_config = LoraConfig(**lora_kwargs)
     wrapped = get_peft_model(model, lora_config)
     validate_projector_trainable_parameters(wrapped, config.student.multimodal_projector_path)
+    if hasattr(config.student, "lora_layers_to_transform"):
+        validate_language_model_lora_scope(
+            wrapped, layers_to_transform, target_modules,
+            projector_path=config.student.multimodal_projector_path,
+        )
     return wrapped
 
 

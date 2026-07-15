@@ -32,7 +32,7 @@ from .logits_cache_utils import (
     vocab_sizes_compatible,
 )
 from .model_loading import apply_attn_implementation, resolve_model_path
-from .student_trainability import validate_projector_path
+from .student_trainability import validate_language_model_lora_scope, validate_projector_path
 from .parsing_output_parser import COORDINATE_SYSTEM_NORMALIZED_0_1000, serialize_parsing_label
 from .token_alignment import build_token_mismatch_details, coerce_token_ids
 
@@ -328,7 +328,7 @@ def _train_hf_student(config: PipelineConfig, rows: list[dict]) -> Path:
 
     if config.student.use_lora:
         target_modules = config.student.target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
-        lora_config = LoraConfig(
+        lora_kwargs = dict(
             r=config.student.lora_rank,
             lora_alpha=config.student.lora_alpha,
             lora_dropout=config.student.lora_dropout,
@@ -337,7 +337,15 @@ def _train_hf_student(config: PipelineConfig, rows: list[dict]) -> Path:
             if config.student.train_multimodal_projector else None,
             task_type="CAUSAL_LM",
         )
+        if config.student.lora_layers_to_transform is not None:
+            lora_kwargs["layers_to_transform"] = config.student.lora_layers_to_transform
+            lora_kwargs["layers_pattern"] = config.student.lora_layers_pattern
+        lora_config = LoraConfig(**lora_kwargs)
         model = get_peft_model(model, lora_config)
+        validate_language_model_lora_scope(
+            model, config.student.lora_layers_to_transform, target_modules,
+            projector_path=config.student.multimodal_projector_path,
+        )
 
     train_dataset = VlmTrainingDataset(rows, config, processor)
     data_collator = build_vlm_data_collator(

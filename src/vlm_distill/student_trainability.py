@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
+import re
+
 QWEN3_VL_PROJECTOR_PATH = "model.visual.merger"
+QWEN3_VL_LANGUAGE_LAYER_COUNT = 36
+QWEN3_VL_ATTENTION_TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj")
+_LM_LORA_RE = re.compile(
+    r"(?:^|.*\.)model\.language_model\.layers\.(\d+)\."
+    r"(?:[^.]+\.)*([A-Za-z][A-Za-z0-9_]*)\.lora_[ab](?:\.|$)",
+    re.IGNORECASE,
+)
+_LM_LAYER_RE = re.compile(r"(?:^|.*\.)model\.language_model\.layers\.(\d+)(?:\.|$)")
 
 
 def get_module_by_exact_path(model, path: str):
@@ -24,6 +34,96 @@ def get_module_by_exact_path(model, path: str):
                 raise TypeError(f"Resolved exact path {path!r} is not a module.")
             return current
     raise AttributeError(f"Model has no module at exact path {path!r}.")
+
+
+def validate_language_model_lora_scope(
+    model,
+    configured_layers: list[int] | None,
+    configured_targets: list[str],
+    *,
+    expected_layer_count: int = QWEN3_VL_LANGUAGE_LAYER_COUNT,
+    projector_path: str = QWEN3_VL_PROJECTOR_PATH,
+) -> dict[str, object]:
+    """Validate PEFT trainability using only exact Qwen3-VL LM paths."""
+    targets = list(dict.fromkeys(configured_targets))
+    expected = set(range(expected_layer_count)) if configured_layers is None else set(configured_layers)
+    architecture_layers = {
+        int(match.group(1))
+        for name, _ in model.named_modules()
+        if (match := _LM_LAYER_RE.fullmatch(name))
+    }
+    if not architecture_layers:
+        architecture_layers = {
+            int(match.group(1))
+            for name, _ in model.named_parameters()
+            if (match := _LM_LAYER_RE.match(name))
+        }
+    if architecture_layers != set(range(expected_layer_count)):
+        raise RuntimeError(
+            "Language-model layer validation failed: detected layers "
+            f"{sorted(architecture_layers)}; expected exactly 0-{expected_layer_count - 1}."
+        )
+
+    detected: dict[str, set[int]] = {target: set() for target in targets}
+    unexpected_lora_targets: list[str] = []
+    allowed_targets = {item.lower() for item in targets}
+    trainable_lora: list[tuple[str, object]] = []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        lowered = name.lower()
+        if "lora_" not in lowered:
+            continue
+        trainable_lora.append((name, parameter))
+        match = _LM_LORA_RE.search(name)
+        if match is not None:
+            target = match.group(2).lower()
+            if target in allowed_targets:
+                detected[next(item for item in targets if item.lower() == target)].add(int(match.group(1)))
+            elif target not in unexpected_lora_targets:
+                unexpected_lora_targets.append(target)
+
+    missing = {target: sorted(expected - detected[target]) for target in targets}
+    unexpected = {target: sorted(detected[target] - expected) for target in targets}
+    visual_lora = [name for name, _ in trainable_lora if _LM_LORA_RE.search(name) is None]
+    mlp_lora = [name for name, _ in trainable_lora
+                if any(f".{target}.lora_" in name.lower() for target in ("gate_proj", "up_proj", "down_proj"))]
+    projector = [name for name, parameter in model.named_parameters()
+                 if parameter.requires_grad and parameter_matches_module_path(name, projector_path)]
+    base_model = [name for name, parameter in model.named_parameters()
+                  if parameter.requires_grad and "lora_" not in name.lower()
+                  and ("model.language_model." in name or ".language_model." in name)]
+    vision = [name for name, parameter in model.named_parameters()
+              if parameter.requires_grad and any(term in name.lower() for term in
+                                                 ("visual", "vision_tower", "vision_model", "patch_embed"))]
+    other = [name for name, parameter in model.named_parameters()
+             if parameter.requires_grad and "lora_" not in name.lower()
+             and name not in projector and name not in base_model and name not in vision]
+    if (set(targets) - set(QWEN3_VL_ATTENTION_TARGETS) or any(missing.values())
+            or any(unexpected.values()) or unexpected_lora_targets or visual_lora or mlp_lora
+            or projector or base_model or vision or other):
+        raise RuntimeError(
+            "Language-model LoRA trainability validation failed: "
+            f"missing={missing}, unexpected={unexpected}, visual_lora={visual_lora[:5]}, "
+            f"unexpected_lora_targets={unexpected_lora_targets}, mlp_lora={mlp_lora[:5]}, "
+            f"projector={projector[:5]}, base_model={base_model[:5]}, vision={vision[:5]}, other={other[:5]}"
+        )
+
+    report = {
+        "configured_layers": sorted(expected),
+        "detected_layers": {target: sorted(values) for target, values in detected.items()},
+        "missing_layers": missing,
+        "unexpected_layers": unexpected,
+        "trainable_tensor_count": len(trainable_lora),
+        "trainable_parameter_count": sum(parameter.numel() for _, parameter in trainable_lora),
+    }
+    print(f"Configured LoRA layers: {report['configured_layers']}")
+    print(f"Detected trainable LoRA layers: {report['detected_layers']}")
+    print(f"Missing selected layers: {report['missing_layers']}")
+    print(f"Unexpected trainable layers: {report['unexpected_layers']}")
+    print(f"Trainable tensor count: {report['trainable_tensor_count']}")
+    print(f"Trainable parameter count: {report['trainable_parameter_count']}")
+    return report
 
 
 def _is_bnb_4bit_linear(module) -> bool:

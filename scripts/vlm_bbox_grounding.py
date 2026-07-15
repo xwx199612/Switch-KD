@@ -21,6 +21,7 @@ from scripts.vlm_compare_utils import (
     extract_json_from_text,
     list_images,
     load_processor_and_model,
+    QUANTIZATION_CHOICES,
     run_vlm_inference,
 )
 from tools.draw_lm_bboxes import (
@@ -203,7 +204,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--torch-dtype", choices=("float16", "bfloat16", "float32"), default="bfloat16"
     )
-    parser.add_argument("--quantization", choices=("none", "4bit", "8bit"), default="none")
+    parser.add_argument("--quantization", choices=QUANTIZATION_CHOICES, default="none")
     parser.add_argument("--max-new-tokens", type=int, default=1024)
     parser.add_argument("--query", default=DEFAULT_QUERY)
     parser.add_argument(
