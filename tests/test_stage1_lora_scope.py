@@ -1,3 +1,4 @@
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 import types
 
@@ -12,6 +13,60 @@ from vlm_distill.student_trainability import validate_language_model_lora_scope
 TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj"]
 B1 = list(range(12, 36))
 B2 = list(range(24, 36))
+FORMAL = {
+    "b0": "configs/stage1_b0_r16_attn_all_layers.yaml",
+    "b1": "configs/stage1_b1_r16_attn_layers_12_35.yaml",
+    "b2": "configs/stage1_b2_r16_attn_layers_24_35.yaml",
+}
+SMOKE = {
+    "b1": "configs/stage1_b1_r16_attn_layers_12_35_smoke.yaml",
+    "b2": "configs/stage1_b2_r16_attn_layers_24_35_smoke.yaml",
+}
+STAGE1_A_R16_ATTN = "configs/qwen3vl8b_r16_attn.yaml"
+
+_ALLOWED_PATHS = {
+    "student.output_dir", "student.adapter_dir", "student.merged_model_path",
+    "data.eval_path", "data.prediction_path", "evaluation.output_path",
+    "student.lora_layers_to_transform", "student.lora_layers_pattern",
+    "data.max_samples", "training.epochs", "training.gradient_accumulation_steps",
+    "training.max_steps", "training.log_every", "training.save_every",
+}
+
+
+def normalize_experiment_config(config):
+    """Return resolved config values with only experiment-output/scope fields removed."""
+    values = asdict(config) if is_dataclass(config) else config
+
+    def walk(value, path=""):
+        if isinstance(value, dict):
+            result = {}
+            for key, item in value.items():
+                child = f"{path}.{key}" if path else key
+                if child in _ALLOWED_PATHS:
+                    continue
+                result[key] = walk(item, child)
+            return result
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, list):
+            return [walk(item, path) for item in value]
+        return value
+
+    return walk(values)
+
+
+def _config_differences(left, right):
+    differences = {}
+
+    def walk(path, a, b):
+        if isinstance(a, dict) and isinstance(b, dict):
+            for key in sorted(set(a) | set(b)):
+                walk(f"{path}.{key}" if path else key, a.get(key), b.get(key))
+        elif a != b:
+            differences[path] = (a, b)
+
+    walk("", normalize_experiment_config(left), normalize_experiment_config(right))
+    return differences
 
 
 class _Toy(nn.Module):
@@ -82,8 +137,116 @@ def test_layer_schema_rejects_invalid_indices(tmp_path: Path, bad):
         load_config(path)
 
 
-def test_stage1_configs_and_parameter_ratio():
-    configs = [load_config(f"configs/stage1_b{i}_r16_attn_" + suffix) for i, suffix in (
-        (0, "all_layers.yaml"), (1, "layers_12_35.yaml"), (2, "layers_24_35.yaml"))]
+def test_b0_matches_completed_stage1_a_r16_attention():
+    b0 = load_config(FORMAL["b0"])
+    stage1_a = load_config(STAGE1_A_R16_ATTN)
+    differences = _config_differences(b0, stage1_a)
+    assert not differences, f"B0 differs from {STAGE1_A_R16_ATTN}: {differences}"
+    assert b0.student.lora_layers_to_transform is None
+    assert b0.student.lora_layers_pattern is None
+
+
+def test_stage1_b_configs_differ_only_by_scope_and_paths():
+    configs = [load_config(FORMAL[key]) for key in ("b0", "b1", "b2")]
+    for left, right in zip(configs, configs[1:]):
+        differences = _config_differences(left, right)
+        assert not differences, f"unexpected controlled-experiment differences: {differences}"
+
+
+def test_stage1_b_scope_prompt_and_dbild_settings_are_explicit_and_equal():
+    configs = [load_config(FORMAL[key]) for key in ("b0", "b1", "b2")]
     assert [c.student.lora_layers_to_transform for c in configs] == [None, B1, B2]
-    assert [36, 24, 12] == [36, len(B1), len(B2)]
+    assert [c.student.lora_layers_pattern for c in configs] == [None, "layers", "layers"]
+    prompts = [c.distillation.prompt_template for c in configs]
+    assert prompts[0] == prompts[1] == prompts[2]
+    assert prompts[0] != "Query: {query}\nAnswer:"
+    for text in ("bbox_norm", "normalized 0-1000", "valid JSON only"):
+        assert text in prompts[0]
+    for config in configs:
+        distill = config.distillation
+        assert distill.method == "online_align_dbild"
+        assert distill.kd_temperature == 2.0
+        assert distill.dbild_top_k == 64
+        assert distill.dbild_top_k_mode == "kneedle"
+        assert distill.dbild_kneedle_candidate_k == 256
+        assert distill.dbild_min_top_k == 4
+        assert distill.dbild_max_top_k == 128
+        assert distill.dbild_kl_mode == "reverse"
+        assert config.student.train_multimodal_projector is False
+        assert config.student.lora_rank == 16
+        assert config.student.target_modules == TARGETS
+
+
+def test_stage1_b_smoke_configs_differ_from_formal_only_by_smoke_controls_and_paths():
+    allowed = _ALLOWED_PATHS | {"data.max_samples"}
+    for key in ("b1", "b2"):
+        formal = asdict(load_config(FORMAL[key]))
+        smoke = asdict(load_config(SMOKE[key]))
+        differences = {}
+
+        def walk(path, a, b):
+            if isinstance(a, dict) and isinstance(b, dict):
+                for field in sorted(set(a) | set(b)):
+                    walk(f"{path}.{field}" if path else field, a.get(field), b.get(field))
+            elif a != b and path not in allowed:
+                differences[path] = (a, b)
+
+        walk("", formal, smoke)
+        assert not differences, f"{key} smoke has uncontrolled differences: {differences}"
+
+
+class _PeftToy(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = types.SimpleNamespace(model_type="toy")
+        self.model = nn.Module()
+        self.model.language_model = nn.Module()
+        self.model.language_model.layers = nn.ModuleList()
+        for _ in range(36):
+            layer = nn.Module()
+            layer.self_attn = nn.Module()
+            layer.self_attn.q_proj = nn.Linear(4096, 4096, bias=False, device="meta")
+            layer.self_attn.k_proj = nn.Linear(4096, 1024, bias=False, device="meta")
+            layer.self_attn.v_proj = nn.Linear(4096, 1024, bias=False, device="meta")
+            layer.self_attn.o_proj = nn.Linear(4096, 4096, bias=False, device="meta")
+            layer.mlp = nn.Linear(2, 2, bias=False, device="meta")
+            self.model.language_model.layers.append(layer)
+        self.model.visual = nn.Module()
+        self.model.visual.merger = nn.Linear(2, 2, bias=False, device="meta")
+
+
+def _actual_lora_counts(layers):
+    from peft import LoraConfig, get_peft_model
+
+    model = _PeftToy()
+    kwargs = dict(
+        r=16, lora_alpha=32, lora_dropout=0.05,
+        target_modules=TARGETS, task_type=None,
+    )
+    if layers is not None:
+        kwargs.update(layers_to_transform=layers, layers_pattern="layers")
+    wrapped = get_peft_model(model, LoraConfig(**kwargs))
+    lora = [(name, parameter) for name, parameter in wrapped.named_parameters()
+            if parameter.requires_grad and "lora_" in name]
+    counts = {
+        "tensors": len(lora),
+        "params": sum(parameter.numel() for _, parameter in lora),
+        "non_lora_trainable": sum(parameter.numel() for name, parameter in wrapped.named_parameters()
+                                    if parameter.requires_grad and "lora_" not in name),
+    }
+    counts["visual_lora"] = sum(parameter.numel() for name, parameter in lora if ".visual." in name)
+    counts["mlp_lora"] = sum(parameter.numel() for name, parameter in lora if ".mlp." in name)
+    counts["base_lm_trainable"] = sum(parameter.numel() for name, parameter in wrapped.named_parameters()
+                                      if parameter.requires_grad and "language_model.layers" not in name and "lora_" not in name)
+    return counts
+
+
+def test_stage1_b_actual_peft_lora_tensor_and_parameter_counts():
+    counts = [_actual_lora_counts(layers) for layers in (None, B1, B2)]
+    assert [item["tensors"] for item in counts] == [288, 192, 96]
+    assert [item["params"] for item in counts] == [15335424, 10223616, 5111808]
+    for item in counts:
+        assert item["non_lora_trainable"] == 0
+        assert item["visual_lora"] == 0
+        assert item["mlp_lora"] == 0
+        assert item["base_lm_trainable"] == 0

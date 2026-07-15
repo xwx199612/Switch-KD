@@ -1,20 +1,33 @@
 seed: 42
+
 options:
   task_name: parsing
   quality: 1080p
   teacher_quantization: 4bit
   student_quantization: 4bit
+  # Derived automatically:
+  # label_profile = {quality}_{teacher_quantization}
+  # response_profile = {quality}_{teacher_quantization}_student_{student_quantization}
+
+# This config is intended for Qwen3-VL-32B-Instruct -> Qwen3-VL-8B-Instruct.
+# The current loaders resolve local model paths and load with local_files_only=True internally.
+# Do not add local_files_only / trust_remote_code here unless config_schema.py is updated.
+
 data:
   training_manifest_path: outputs/lora_ablation/{task_name}_training_manifest.jsonl
   inference_manifest_path: outputs/lora_ablation/{task_name}_inference_manifest.jsonl
   distill_path: outputs/lora_ablation/{task_name}_online_dbild_{response_profile}.jsonl
+  # Canonical teacher label output. Keep this JSONL schema strict:
+  # id, image, task, query, serialized parsing target, cached answer token ids, teacher_element_count.
   label_path: outputs/lora_ablation/{task_name}_teacher_labels_{label_profile}.jsonl
   eval_path: outputs/lora_ablation/stage1_b1_r16_attn_layers_12_35/{task_name}_online_dbild_{response_profile}.jsonl
   prediction_path: outputs/lora_ablation/stage1_b1_r16_attn_layers_12_35/{task_name}_online_dbild_{response_profile}/student_predictions.jsonl
   training_image_dir: /mnt/nvme0/vlm_distill/TV_data
   inference_image_dir: /mnt/nvme0/vlm_distill/validation_data
   image_root: .
+  # Keep this small for the first smoke test. Set to empty/null for full training.
   max_samples:
+
 teacher:
   backend: hf
   model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-32B-Instruct
@@ -25,28 +38,40 @@ teacher:
   temperature: 0.0
   max_new_tokens: 1280
   image_resize: "{quality}"
+
 student:
   model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-8B-Instruct
-  output_dir: outputs/lora_ablation/stage1_b1_r16_attn_layers_12_35
-  adapter_dir: outputs/lora_ablation/stage1_b1_r16_attn_layers_12_35/adapter
+  output_dir: outputs/lora_ablation/stage1_b1_r16_attn_layers_12_35/r16_attn
+  adapter_dir: outputs/lora_ablation/stage1_b1_r16_attn_layers_12_35/r16_attn/adapter
   merged_model_path: /mnt/nvme0/vlm_distill/models/stage1_b1_r16_attn_layers_12_35
+  #outputs/lora_ablation/{task_name}_switch_kd_{response_profile}/merged_model
+
+  # Prediction-time model/adapter controls.
+  # Leave inference_model_path empty to let predict prefer merged_model_path when it exists,
+  # otherwise fall back to model_name.
   inference_model_path:
   inference_adapter_path:
   load_adapter: false
   merge_adapter: false
+
   device_map: auto
   use_lora: true
   lora_rank: 16
   lora_alpha: 32
-  lora_dropout: 0.05
-  target_modules: [q_proj, k_proj, v_proj, o_proj]
   lora_layers_to_transform: [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35]
   lora_layers_pattern: layers
+  lora_dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
   quantization: "{student_quantization}"
   train_multimodal_projector: false
   multimodal_projector_path: model.visual.merger
   merged_artifact_mode: bf16_standalone
   attn_implementation: sdpa
+
 training:
   epochs: 3
   batch_size: 1
@@ -57,11 +82,14 @@ training:
   log_every: 50
   save_every: 1000
   mixed_precision: bf16
+  # Safer default for Qwen3-VL-8B + 1080p + max_length=4096.
   gradient_checkpointing: true
   image_resize: "{quality}"
   max_length: 4096
   freeze_vision_tower: true
   mask_prompt_labels: true
+
+
 distillation:
   method: online_align_dbild
   lm_loss_weight: 1.0
@@ -69,5 +97,65 @@ distillation:
   vsd_loss_weight: 0.0
   confidence_weighting: true
   min_teacher_confidence: 0.35
-  teacher_logits: false
-  use_cached_logits: false
+  prompt_template: |
+    You are labeling Android TV screenshots for UI grounding.
+
+    Task:
+    {query}
+
+    Find all visible interactive UI elements.
+
+    Return valid JSON only.
+    Use ASCII double quotes only: "
+    Do not use smart quotes: “ ”
+    Do not use markdown.
+    Do not explain.
+
+    Use this exact schema:
+    {{
+      "elements": [
+        {{
+          "text": "visible UI element name",
+          "bbox_norm": [80, 120, 140, 180],
+          "focused": false
+        }}
+      ],
+      "coordinate_system": "normalized_0_1000"
+    }}
+
+    Rules:
+    - Every element must use exactly these keys: "text", "bbox_norm", "focused".
+    - Do not include type.
+    - Do not use alternative bbox key names: bbox, box_norm, bx_norm, bbox norm, bboxNorm, boxed_norm.
+    - bbox_norm must be an array of exactly four integers, e.g. [80, 120, 140, 180].
+    - Do not write bbox_norm as comma-separated text.
+    - Use normalized 0-1000 coordinates, not pixel coordinates.
+    - Coordinates must satisfy 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000.
+    - text must be the visible UI label or a short visual name of the element.
+    - Do not use schema words such as text, button, tab, app_icon, menu_item, icon, bbox_norm, coordinate_system, or elements as text unless that exact word is visibly displayed on screen.
+    - focused must be exactly true or false.
+    - If focused is not visually clear, use false.
+    - Include "coordinate_system": "normalized_0_1000".
+    - Prioritize valid JSON over recall.
+    - If unsure about an element bbox, omit that element.
+    - Keep text short. If visible text is very long, summarize it into a short label.
+
+    Important:
+    Because Python .format() is used on prompt_template:
+    - Keep placeholders as single braces: {query}, {question}, {task}
+    - Escape literal JSON braces as double braces: {{ and }}
+    - Do not use unescaped JSON braces in YAML.
+
+  kd_temperature: 2.0
+  dbild_top_k: 64
+  dbild_top_k_mode: kneedle
+  dbild_kneedle_candidate_k: 256
+  dbild_min_top_k: 4
+  dbild_max_top_k: 128
+  dbild_kl_mode: reverse
+
+evaluation:
+  output_path: outputs/lora_ablation/stage1_b1_r16_attn_layers_12_35/{task_name}_online_dbild_{response_profile}/eval_report.json
+  metrics:
+    - exact_match
+    - token_f1
