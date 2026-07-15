@@ -51,6 +51,7 @@ student:
   train_multimodal_projector: true
   multimodal_projector_path: model.visual.merger
   quantization: "{student_quantization}"
+  merged_artifact_mode: mixed_4bit_bf16
   attn_implementation: sdpa
 
 training:

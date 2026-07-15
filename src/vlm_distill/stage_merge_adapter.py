@@ -3,14 +3,22 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config_schema import PipelineConfig
+from .mixed_precision import build_mixed_precision_quantization_config, mixed_precision_capabilities
 from .model_loading import resolve_model_path
 from .student_trainability import dequantize_trainable_projector, get_module_by_exact_path
+
+A1_MAIN_MERGER_LINEAR_PATHS = [
+    "model.visual.merger.linear_fc1",
+    "model.visual.merger.linear_fc2",
+]
 
 
 def _print_merged_precision_summary(model, *, projector_path: str = "model.visual.merger") -> dict[str, int]:
     import torch
     counts = {
         "language_model quantized linears": 0,
+        "language_model Linear4bit linears": 0,
+        "language_model floating-point linears": 0,
         "visual encoder quantized linears": 0,
         "main merger BF16 linears": 0,
         "remaining LoRA modules": 0,
@@ -28,8 +36,12 @@ def _print_merged_precision_summary(model, *, projector_path: str = "model.visua
         if bnb is not None and isinstance(module, (bnb.nn.Linear4bit, bnb.nn.Linear8bitLt)):
             if "language_model" in name:
                 counts["language_model quantized linears"] += 1
+                if isinstance(module, bnb.nn.Linear4bit):
+                    counts["language_model Linear4bit linears"] += 1
             elif "visual.merger" not in name:
                 counts["visual encoder quantized linears"] += 1
+        if "language_model" in name and type(module) is torch.nn.Linear:
+            counts["language_model floating-point linears"] += 1
     try:
         merger = get_module_by_exact_path(model, projector_path)
     except (AttributeError, KeyError):
@@ -59,10 +71,16 @@ def _validate_a1_merged_precision(model, counts: dict[str, int], *, projector_pa
             "expected no remaining modules_to_save wrappers, "
             f"observed {counts['remaining modules_to_save wrappers']}."
         )
-    if counts["language_model quantized linears"] <= 0:
+    if counts.get("language_model Linear4bit linears", counts["language_model quantized linears"]) <= 0:
         raise RuntimeError(
             "Merged A1 precision validation failed: expected quantized language-model "
             "linears > 0, observed 0."
+        )
+    if counts.get("language_model floating-point linears", 0):
+        raise RuntimeError(
+            "Merged A1 precision validation failed: unexpected floating-point "
+            "language-model linears, observed "
+            f"{counts['language_model floating-point linears']}."
         )
 
     merger = get_module_by_exact_path(model, projector_path)
@@ -126,6 +144,14 @@ def _is_a1_projector_4bit(config: PipelineConfig) -> bool:
     )
 
 
+def _validate_artifact_mode(config: PipelineConfig) -> None:
+    if _is_a1_projector_4bit(config) and config.student.merged_artifact_mode != "mixed_4bit_bf16":
+        raise RuntimeError(
+            "A1 requires student.merged_artifact_mode=mixed_4bit_bf16; refusing to silently "
+            f"change the configured mode {config.student.merged_artifact_mode!r}."
+        )
+
+
 def _validate_standalone_merged_model(model, processor, output_path: Path) -> None:
     """Smoke-test the saved standalone model when the repository sample exists."""
     import torch
@@ -161,6 +187,20 @@ def merge_student_adapter(config: PipelineConfig) -> Path:
         raise RuntimeError(
             "Install torch, transformers, and peft to merge a student adapter."
         ) from exc
+
+    _validate_artifact_mode(config)
+    capabilities = mixed_precision_capabilities()
+    print("Mixed-precision environment:")
+    for key, value in capabilities.items():
+        print(f"  {key}={value}")
+    if _is_a1_projector_4bit(config) and not capabilities["artifact_mode_supported"]:
+        raise RuntimeError(
+            "A1 mixed standalone artifact is unsupported by the installed "
+            "Transformers/bitsandbytes versions because exact module exclusion "
+            "during 4-bit reload is unavailable.\n\n"
+            "Use merged_artifact_mode=bf16_standalone or "
+            "merged_artifact_mode=adapter_plus_projector."
+        )
 
     base_model_path = resolve_model_path(config.student.model_name)
     adapter_path = config.student.inference_adapter_path or config.student.adapter_dir
@@ -199,12 +239,9 @@ def merge_student_adapter(config: PipelineConfig) -> Path:
         "attn_implementation": config.student.attn_implementation,
     }
     if config.student.quantization == "4bit":
-        from transformers import BitsAndBytesConfig
-        model_kwargs["quantization_config"] = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
+        model_kwargs["quantization_config"] = build_mixed_precision_quantization_config(
+            quantization="4bit",
+            excluded_module_paths=A1_MAIN_MERGER_LINEAR_PATHS if _is_a1_projector_4bit(config) else [],
         )
     elif config.student.quantization == "8bit":
         from transformers import BitsAndBytesConfig
@@ -217,7 +254,7 @@ def merge_student_adapter(config: PipelineConfig) -> Path:
         print(f"projector_dequantization={conversion}")
     model = PeftModel.from_pretrained(model, str(adapter_path), local_files_only=True)
     model = model.merge_and_unload()
-    merged_projector_state = {
+    expected_projector_state = {
         key: value.detach().cpu().clone()
         for key, value in get_module_by_exact_path(model, config.student.multimodal_projector_path).state_dict().items()
     }
@@ -242,13 +279,16 @@ def merge_student_adapter(config: PipelineConfig) -> Path:
         "attn_implementation": config.student.attn_implementation,
     }
     if config.student.quantization == "4bit":
-        from transformers import BitsAndBytesConfig
-        reload_kwargs["quantization_config"] = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
+        reload_kwargs["quantization_config"] = build_mixed_precision_quantization_config(
+            quantization="4bit",
+            excluded_module_paths=A1_MAIN_MERGER_LINEAR_PATHS if _is_a1_projector_4bit(config) else [],
         )
+        if _is_a1_projector_4bit(config):
+            print("Standalone mixed reload:")
+            print("  quantization=4bit")
+            print("  excluded_from_quantization:")
+            for path in A1_MAIN_MERGER_LINEAR_PATHS:
+                print(f"    - {path}")
     elif config.student.quantization == "8bit":
         from transformers import BitsAndBytesConfig
         reload_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
@@ -276,16 +316,36 @@ def merge_student_adapter(config: PipelineConfig) -> Path:
         metadata = getattr(getattr(reloaded, "config", None), "quantization_config", None)
         print(f"configured_student_quantization={config.student.quantization}")
         print(f"reloaded_language_model_quantized_linears={reloaded_counts['language_model quantized linears']}")
-        print("reloaded_main_merger_dtype=torch.bfloat16")
+        reloaded_merger = get_module_by_exact_path(reloaded, config.student.multimodal_projector_path)
+        print(
+            "  merger_linear_fc1="
+            f"{type(reloaded_merger.linear_fc1).__module__}.{type(reloaded_merger.linear_fc1).__name__}/"
+            f"{reloaded_merger.linear_fc1.weight.dtype}"
+        )
+        print(
+            "  merger_linear_fc2="
+            f"{type(reloaded_merger.linear_fc2).__module__}.{type(reloaded_merger.linear_fc2).__name__}/"
+            f"{reloaded_merger.linear_fc2.weight.dtype}"
+        )
         if metadata is None:
             raise RuntimeError(
                 "Standalone merged artifact format unsupported: reloaded model has no "
                 "quantization metadata for its quantized language model."
             )
     reloaded_projector = get_module_by_exact_path(reloaded, config.student.multimodal_projector_path)
-    for key, expected in merged_projector_state.items():
-        torch.testing.assert_close(reloaded_projector.state_dict()[key].float().cpu(), expected.float())
-    print("Saved/reloaded merged projector weights: exact/near-exact")
+    max_abs_diff = 0.0
+    for key, expected in expected_projector_state.items():
+        reloaded_value = reloaded_projector.state_dict()[key]
+        difference = (reloaded_value.float().cpu() - expected.float().cpu()).abs()
+        max_abs_diff = max(max_abs_diff, float(difference.max().item()))
+        try:
+            torch.testing.assert_close(reloaded_value.float().cpu(), expected.float().cpu())
+        except AssertionError as exc:
+            raise RuntimeError(
+                f"Saved/reloaded projector state mismatch at {key}; "
+                f"maximum absolute difference={max_abs_diff}."
+            ) from exc
+    print(f"Saved/reloaded merged projector weights: exact/near-exact (max_abs_diff={max_abs_diff})")
     _validate_standalone_merged_model(reloaded, reloaded_processor, output_path)
     print(f"OK merged model written: {output_path}")
     return output_path

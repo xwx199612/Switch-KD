@@ -65,6 +65,7 @@ class StudentConfig:
     quantization: str = "none"
     train_multimodal_projector: bool = False
     multimodal_projector_path: str = "model.visual.merger"
+    merged_artifact_mode: str = "bf16_standalone"
 
 
 @dataclass
@@ -271,6 +272,13 @@ def _build_student_config(raw: dict[str, Any]) -> StudentConfig:
     if not isinstance(projector_path, str) or not projector_path.strip():
         raise ValueError("student.multimodal_projector_path must be a non-empty dotted module path.")
     values["multimodal_projector_path"] = projector_path.strip()
+    artifact_mode = str(values.get("merged_artifact_mode", "bf16_standalone"))
+    if artifact_mode not in {"mixed_4bit_bf16", "bf16_standalone", "adapter_plus_projector"}:
+        raise ValueError(
+            "student.merged_artifact_mode must be one of: mixed_4bit_bf16, "
+            "bf16_standalone, adapter_plus_projector."
+        )
+    values["merged_artifact_mode"] = artifact_mode
     for key in ("output_dir", "adapter_dir"):
         values[key] = remap_output_path(Path(values[key]))
     merged_model_path = values.get("merged_model_path")
