@@ -67,6 +67,7 @@ def _validate_a1_merged_precision(model, counts: dict[str, int], *, projector_pa
             "Merged A1 precision validation failed: "
             f"expected no remaining LoRA modules, observed {counts['remaining LoRA modules']}."
         )
+
     if counts["remaining modules_to_save wrappers"]:
         raise RuntimeError(
             "Merged A1 precision validation failed: "
@@ -138,6 +139,35 @@ def _validate_a1_merged_precision(model, counts: dict[str, int], *, projector_pa
         )
 
 
+def _validate_bf16_standalone_precision(model, counts: dict[str, int], *, projector_path: str) -> None:
+    """Enforce the fully floating-point contract of a BF16 standalone artifact."""
+    import torch
+
+    if counts["remaining LoRA modules"] or counts["remaining modules_to_save wrappers"]:
+        raise RuntimeError("BF16 standalone validation failed: PEFT wrappers remain after merge.")
+    if counts["language_model quantized linears"]:
+        raise RuntimeError(
+            "BF16 standalone validation failed: language-model quantized linears remain."
+        )
+    if counts["language_model floating-point linears"] <= 0:
+        raise RuntimeError(
+            "BF16 standalone validation failed: expected floating-point language-model linears."
+        )
+
+    language_model = get_module_by_exact_path(model, "model.language_model")
+    non_bf16 = [
+        name for name, parameter in language_model.named_parameters()
+        if parameter.is_floating_point() and parameter.dtype != torch.bfloat16
+    ]
+    if non_bf16:
+        raise RuntimeError(
+            "BF16 standalone validation failed: language-model floating weights are not BF16; "
+            f"first={non_bf16[0]}."
+        )
+    get_module_by_exact_path(model, "model.visual")
+    get_module_by_exact_path(model, projector_path)
+
+
 def _is_a1_projector_4bit(config: PipelineConfig) -> bool:
     return (
         config.student.quantization == "4bit"
@@ -152,6 +182,42 @@ def _validate_artifact_mode(config: PipelineConfig) -> None:
             "A1 requires student.merged_artifact_mode=mixed_4bit_bf16; refusing to silently "
             f"change the configured mode {config.student.merged_artifact_mode!r}."
         )
+
+
+def _build_merge_model_kwargs(config: PipelineConfig, *, reload: bool = False) -> dict:
+    """Build the model kwargs for both merge loading and artifact reloading.
+
+    ``student.quantization`` describes the training/inference model.  A
+    standalone BF16 artifact is deliberately reloaded without quantization,
+    regardless of that setting.
+    """
+    import torch
+
+    kwargs = {
+        "device_map": "auto",
+        "torch_dtype": torch.bfloat16,
+        "trust_remote_code": True,
+        "local_files_only": True,
+        "attn_implementation": config.student.attn_implementation,
+    }
+    artifact_mode = config.student.merged_artifact_mode
+    if artifact_mode == "bf16_standalone":
+        return kwargs
+
+    if artifact_mode == "mixed_4bit_bf16" and config.student.quantization == "4bit":
+        kwargs["quantization_config"] = build_mixed_precision_quantization_config(
+            quantization="4bit",
+            excluded_module_paths=(
+                A1_MAIN_MERGER_LINEAR_PATHS
+                if _is_a1_projector_4bit(config)
+                else []
+            ),
+        )
+    elif config.student.quantization == "8bit":
+        from transformers import BitsAndBytesConfig
+
+        kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+    return kwargs
 
 
 _GIT_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
@@ -285,21 +351,7 @@ def merge_student_adapter(config: PipelineConfig) -> Path:
         use_fast=False,
         local_files_only=True,
     )
-    model_kwargs = {
-        "device_map": "auto",
-        "torch_dtype": torch.bfloat16,
-        "trust_remote_code": True,
-        "local_files_only": True,
-        "attn_implementation": config.student.attn_implementation,
-    }
-    if config.student.quantization == "4bit":
-        model_kwargs["quantization_config"] = build_mixed_precision_quantization_config(
-            quantization="4bit",
-            excluded_module_paths=A1_MAIN_MERGER_LINEAR_PATHS if _is_a1_projector_4bit(config) else [],
-        )
-    elif config.student.quantization == "8bit":
-        from transformers import BitsAndBytesConfig
-        model_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+    model_kwargs = _build_merge_model_kwargs(config)
     model = AutoModelForVLM.from_pretrained(base_model_path, **model_kwargs)
     if config.student.train_multimodal_projector:
         conversion = dequantize_trainable_projector(
@@ -318,6 +370,10 @@ def merge_student_adapter(config: PipelineConfig) -> Path:
         raise RuntimeError("Merged model still contains PEFT wrappers.")
     if _is_a1_projector_4bit(config):
         _validate_a1_merged_precision(model, counts, projector_path=config.student.multimodal_projector_path)
+    elif config.student.merged_artifact_mode == "bf16_standalone":
+        _validate_bf16_standalone_precision(
+            model, counts, projector_path=config.student.multimodal_projector_path
+        )
 
     output_path.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(output_path, safe_serialization=True, max_shard_size="5GB")
@@ -325,27 +381,14 @@ def merge_student_adapter(config: PipelineConfig) -> Path:
     # Reload the artifact to ensure the saved directory is standalone and the
     # trained merger survives serialization, rather than only validating the
     # in-memory PEFT merge.
-    reload_kwargs = {
-        "device_map": "auto",
-        "torch_dtype": torch.bfloat16,
-        "trust_remote_code": True,
-        "local_files_only": True,
-        "attn_implementation": config.student.attn_implementation,
-    }
-    if config.student.quantization == "4bit":
-        reload_kwargs["quantization_config"] = build_mixed_precision_quantization_config(
-            quantization="4bit",
-            excluded_module_paths=A1_MAIN_MERGER_LINEAR_PATHS if _is_a1_projector_4bit(config) else [],
-        )
+    reload_kwargs = _build_merge_model_kwargs(config, reload=True)
+    if config.student.merged_artifact_mode == "mixed_4bit_bf16":
         if _is_a1_projector_4bit(config):
             print("Standalone mixed reload:")
             print("  quantization=4bit")
             print("  excluded_from_quantization:")
             for path in A1_MAIN_MERGER_LINEAR_PATHS:
                 print(f"    - {path}")
-    elif config.student.quantization == "8bit":
-        from transformers import BitsAndBytesConfig
-        reload_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
     try:
         reloaded = AutoModelForVLM.from_pretrained(str(output_path), **reload_kwargs)
     except Exception as exc:
@@ -386,6 +429,10 @@ def merge_student_adapter(config: PipelineConfig) -> Path:
                 "Standalone merged artifact format unsupported: reloaded model has no "
                 "quantization metadata for its quantized language model."
             )
+    elif config.student.merged_artifact_mode == "bf16_standalone":
+        _validate_bf16_standalone_precision(
+            reloaded, reloaded_counts, projector_path=config.student.multimodal_projector_path
+        )
     reloaded_projector = get_module_by_exact_path(reloaded, config.student.multimodal_projector_path)
     max_abs_diff = 0.0
     for key, expected in expected_projector_state.items():

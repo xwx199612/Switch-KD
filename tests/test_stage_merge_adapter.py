@@ -15,12 +15,20 @@ from vlm_distill.config_schema import (
     TeacherConfig,
 )
 from vlm_distill.stage_merge_adapter import (
+    _build_merge_model_kwargs,
     _resolve_standalone_validation_image,
     _validate_standalone_merged_model,
 )
 
 
-def _config(tmp_path: Path, *, manifest: Path | None = None, image_root: Path | None = None):
+def _config(
+    tmp_path: Path,
+    *,
+    manifest: Path | None = None,
+    image_root: Path | None = None,
+    quantization: str = "none",
+    merged_artifact_mode: str = "bf16_standalone",
+):
     return PipelineConfig(
         data=DataConfig(
             training_manifest_path=manifest or tmp_path / "missing.jsonl",
@@ -33,8 +41,67 @@ def _config(tmp_path: Path, *, manifest: Path | None = None, image_root: Path | 
             model_name="student",
             output_dir=tmp_path / "output",
             adapter_dir=tmp_path / "adapter",
+            quantization=quantization,
+            merged_artifact_mode=merged_artifact_mode,
         ),
     )
+
+
+@pytest.mark.parametrize("quantization", ["4bit", "8bit"])
+def test_bf16_standalone_ignores_student_quantization(tmp_path, quantization):
+    kwargs = _build_merge_model_kwargs(_config(tmp_path, quantization=quantization))
+    reload_kwargs = _build_merge_model_kwargs(
+        _config(tmp_path, quantization=quantization), reload=True
+    )
+
+    assert "quantization_config" not in kwargs
+    assert "quantization_config" not in reload_kwargs
+    assert kwargs["torch_dtype"] is torch.bfloat16
+    assert reload_kwargs["torch_dtype"] is torch.bfloat16
+    assert kwargs["device_map"] == reload_kwargs["device_map"] == "auto"
+
+
+def test_mixed_4bit_bf16_builds_4bit_config_only_in_mixed_mode(tmp_path, monkeypatch):
+    import vlm_distill.stage_merge_adapter as merge
+
+    calls = []
+
+    def fake_builder(**kwargs):
+        calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(merge, "build_mixed_precision_quantization_config", fake_builder)
+    config = _config(tmp_path, quantization="4bit", merged_artifact_mode="mixed_4bit_bf16")
+    kwargs = _build_merge_model_kwargs(config)
+    reload_kwargs = _build_merge_model_kwargs(config, reload=True)
+
+    assert "quantization_config" in kwargs
+    assert "quantization_config" in reload_kwargs
+    assert calls == [
+        {"quantization": "4bit", "excluded_module_paths": []},
+        {"quantization": "4bit", "excluded_module_paths": []},
+    ]
+
+    adapter_config = _config(tmp_path, quantization="4bit", merged_artifact_mode="adapter_plus_projector")
+    assert "quantization_config" not in _build_merge_model_kwargs(adapter_config)
+
+
+def test_partial_layer_adapter_config_is_accepted_by_peft(tmp_path):
+    from peft import LoraConfig, PeftModel, get_peft_model
+
+    base = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 2))
+    trained = get_peft_model(
+        base,
+        LoraConfig(r=2, lora_alpha=4, target_modules=["0"], modules_to_save=None),
+    )
+    adapter_path = tmp_path / "adapter"
+    trained.save_pretrained(adapter_path)
+
+    reloaded_base = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 2))
+    peft_model = PeftModel.from_pretrained(reloaded_base, str(adapter_path))
+    merged = peft_model.merge_and_unload()
+
+    assert not any("lora" in name.lower() for name, _ in merged.named_modules())
 
 
 def _jpeg(path: Path) -> Path:
