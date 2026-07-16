@@ -7,7 +7,7 @@ from .config_schema import PipelineConfig
 from .config_schema import resolve_inference_manifest_path
 from .mixed_precision import build_mixed_precision_quantization_config, mixed_precision_capabilities
 from .model_loading import resolve_model_path
-from .student_trainability import dequantize_trainable_projector, get_module_by_exact_path
+from .student_trainability import dequantize_trainable_projector, prepare_projector_for_lora, get_module_by_exact_path
 
 A1_MAIN_MERGER_LINEAR_PATHS = [
     "model.visual.merger.linear_fc1",
@@ -176,6 +176,14 @@ def _is_a1_projector_4bit(config: PipelineConfig) -> bool:
     )
 
 
+def _is_a2_projector_lora_4bit(config: PipelineConfig) -> bool:
+    return (
+        config.student.quantization == "4bit"
+        and getattr(config.student, "use_projector_lora", False)
+        and config.student.multimodal_projector_path == "model.visual.merger"
+    )
+
+
 def _validate_artifact_mode(config: PipelineConfig) -> None:
     if _is_a1_projector_4bit(config) and config.student.merged_artifact_mode != "mixed_4bit_bf16":
         raise RuntimeError(
@@ -209,7 +217,7 @@ def _build_merge_model_kwargs(config: PipelineConfig, *, reload: bool = False) -
             quantization="4bit",
             excluded_module_paths=(
                 A1_MAIN_MERGER_LINEAR_PATHS
-                if _is_a1_projector_4bit(config)
+                if _is_a1_projector_4bit(config) or _is_a2_projector_lora_4bit(config)
                 else []
             ),
         )
@@ -358,6 +366,9 @@ def merge_student_adapter(config: PipelineConfig) -> Path:
             model, config.student.multimodal_projector_path
         )
         print(f"projector_dequantization={conversion}")
+    elif getattr(config.student, "use_projector_lora", False):
+        preparation = prepare_projector_for_lora(model, config.student.multimodal_projector_path)
+        print(f"projector_lora_preparation={preparation}")
     model = PeftModel.from_pretrained(model, str(adapter_path), local_files_only=True)
     model = model.merge_and_unload()
     expected_projector_state = {
@@ -383,7 +394,7 @@ def merge_student_adapter(config: PipelineConfig) -> Path:
     # in-memory PEFT merge.
     reload_kwargs = _build_merge_model_kwargs(config, reload=True)
     if config.student.merged_artifact_mode == "mixed_4bit_bf16":
-        if _is_a1_projector_4bit(config):
+        if _is_a1_projector_4bit(config) or _is_a2_projector_lora_4bit(config):
             print("Standalone mixed reload:")
             print("  quantization=4bit")
             print("  excluded_from_quantization:")
@@ -392,7 +403,7 @@ def merge_student_adapter(config: PipelineConfig) -> Path:
     try:
         reloaded = AutoModelForVLM.from_pretrained(str(output_path), **reload_kwargs)
     except Exception as exc:
-        if _is_a1_projector_4bit(config):
+        if _is_a1_projector_4bit(config) or _is_a2_projector_lora_4bit(config):
             raise RuntimeError(
                 "Standalone merged artifact format unsupported: Transformers could not reload "
                 "the intended 4-bit base language model plus BF16 main merger."
@@ -429,6 +440,18 @@ def merge_student_adapter(config: PipelineConfig) -> Path:
                 "Standalone merged artifact format unsupported: reloaded model has no "
                 "quantization metadata for its quantized language model."
             )
+    elif _is_a2_projector_lora_4bit(config):
+        if reloaded_counts["language_model Linear4bit linears"] <= 0:
+            raise RuntimeError("A2 mixed artifact validation failed: language model is not 4-bit.")
+        merger = get_module_by_exact_path(reloaded, config.student.multimodal_projector_path)
+        import torch
+        for child in ("linear_fc1", "linear_fc2"):
+            layer = getattr(merger, child, None)
+            if not isinstance(layer, torch.nn.Linear) or layer.weight.dtype != torch.bfloat16:
+                raise RuntimeError(
+                    f"A2 mixed artifact validation failed: {config.student.multimodal_projector_path}.{child} "
+                    "must be a BF16 torch.nn.Linear."
+                )
     elif config.student.merged_artifact_mode == "bf16_standalone":
         _validate_bf16_standalone_precision(
             reloaded, reloaded_counts, projector_path=config.student.multimodal_projector_path

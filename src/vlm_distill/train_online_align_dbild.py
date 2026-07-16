@@ -18,6 +18,9 @@ from .student_trainability import (
     parameter_matches_module_path,
     summarize_trainable_groups,
     dequantize_trainable_projector,
+    prepare_projector_for_lora,
+    resolve_a2_lora_targets,
+    validate_a2_projector_lora_contract,
     validate_language_model_lora_scope,
     validate_projector_trainable_parameters,
     validate_projector_path,
@@ -462,6 +465,7 @@ def freeze_student_vision_keep_merger_lm_trainable(
     *,
     use_lora: bool,
     train_multimodal_projector: bool = False,
+    use_projector_lora: bool = False,
     multimodal_projector_path: str = QWEN3_VL_PROJECTOR_PATH,
 ) -> TrainableSummary:
     trainable_names: list[str] = []
@@ -476,8 +480,10 @@ def freeze_student_vision_keep_merger_lm_trainable(
         is_attention_lora = "lora" in lowered and any(
             target in lowered for target in ("q_proj", "k_proj", "v_proj", "o_proj")
         )
-        is_projector_lora = "lora" in lowered and parameter_matches_module_path(
-            name, multimodal_projector_path
+        is_projector_lora = ("lora_a" in lowered or "lora_b" in lowered) and (
+            any(parameter_matches_module_path(name, f"{multimodal_projector_path}.{child}")
+                for child in ("linear_fc1", "linear_fc2"))
+            if use_projector_lora else parameter_matches_module_path(name, multimodal_projector_path)
         )
         is_peft_original_copy = ".original_module." in name
         should_train = (use_lora and (is_attention_lora or is_projector_lora)) or (
@@ -510,8 +516,11 @@ def freeze_student_vision_keep_merger_lm_trainable(
     print("first_trainable_parameter_names=", first_trainable_names)
     groups = summarize_trainable_groups(model, multimodal_projector_path)
     print(f"Attention LoRA parameters: {groups['attention_lora']}")
-    print(f"Projector / merger parameters: {groups['projector']}")
+    print(f"Projector LoRA parameters: {groups['projector_lora']}")
+    print(f"Projector full-train parameters: {groups['projector_full_train']}")
+    print(f"LLM MLP LoRA parameters: {groups['llm_mlp_lora']}")
     print(f"Vision encoder parameters: {groups['vision_encoder']}")
+    print(f"Base LLM parameters: {groups['base_llm']}")
     print(f"Other parameters: {groups['other']}")
     if groups["vision_encoder"] != 0:
         raise RuntimeError("Trainability validation failed: vision encoder parameters are trainable.")
@@ -831,6 +840,15 @@ def _maybe_enable_student_lora(config, model):
 
     if config.student.quantization in {"4bit", "8bit"}:
         model = prepare_model_for_kbit_training(model)
+    projector_targets = []
+    if getattr(config.student, "use_projector_lora", False):
+        if config.student.train_multimodal_projector:
+            raise ValueError("A1 and A2 projector modes cannot both be enabled.")
+        if not config.student.use_lora:
+            raise ValueError("use_projector_lora=true requires use_lora=true.")
+        preparation = prepare_projector_for_lora(model, config.student.multimodal_projector_path)
+        projector_targets = list(preparation["projector_targets"])
+        print(f"projector_lora_preparation={preparation}")
     if config.student.train_multimodal_projector:
         # prepare_model_for_kbit_training may cast floating parameters; do the
         # exact projector conversion after it and before PEFT copies it.
@@ -839,7 +857,24 @@ def _maybe_enable_student_lora(config, model):
         )
         print(f"projector_dequantization={conversion}")
         validate_projector_trainable_parameters(model, config.student.multimodal_projector_path)
-    target_modules = config.student.target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
+    attention_targets = config.student.target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
+    target_modules = attention_targets
+    if projector_targets:
+        resolved = resolve_a2_lora_targets(model, config.student.multimodal_projector_path)
+        target_modules = list(resolved["all_targets"])
+        print("A2 resolved LoRA target module names:")
+        for target in target_modules:
+            print(f"  - {target}")
+    rank_pattern = {}
+    alpha_pattern = {}
+    if projector_targets:
+        rank = config.student.projector_lora_rank or config.student.lora_rank
+        alpha = config.student.projector_lora_alpha or config.student.lora_alpha
+        dropout = config.student.projector_lora_dropout
+        if dropout is not None and dropout != config.student.lora_dropout:
+            raise ValueError("PEFT uses one lora_dropout per adapter; projector_lora_dropout must equal lora_dropout for A2.")
+        rank_pattern = {path: rank for path in projector_targets}
+        alpha_pattern = {path: alpha for path in projector_targets}
     lora_kwargs = dict(
         r=config.student.lora_rank,
         lora_alpha=config.student.lora_alpha,
@@ -848,6 +883,8 @@ def _maybe_enable_student_lora(config, model):
         modules_to_save=[config.student.multimodal_projector_path]
         if config.student.train_multimodal_projector else None,
         task_type="CAUSAL_LM",
+        rank_pattern=rank_pattern,
+        alpha_pattern=alpha_pattern,
     )
     layers_to_transform = getattr(config.student, "lora_layers_to_transform", None)
     layers_pattern = getattr(config.student, "lora_layers_pattern", None)
@@ -859,9 +896,12 @@ def _maybe_enable_student_lora(config, model):
     validate_projector_trainable_parameters(wrapped, config.student.multimodal_projector_path)
     if hasattr(config.student, "lora_layers_to_transform"):
         validate_language_model_lora_scope(
-            wrapped, layers_to_transform, target_modules,
+            wrapped, layers_to_transform, attention_targets,
             projector_path=config.student.multimodal_projector_path,
+            allowed_projector_lora_paths=projector_targets,
         )
+    if projector_targets:
+        validate_a2_projector_lora_contract(wrapped, projector_path=config.student.multimodal_projector_path)
     return wrapped
 
 
@@ -897,10 +937,13 @@ def _apply_student_train_setup(config, model):
         model,
         use_lora=config.student.use_lora,
         train_multimodal_projector=config.student.train_multimodal_projector,
+        use_projector_lora=getattr(config.student, "use_projector_lora", False),
         multimodal_projector_path=config.student.multimodal_projector_path,
     )
     if config.student.train_multimodal_projector:
         validate_projector_trainable_parameters(model, config.student.multimodal_projector_path)
+    if getattr(config.student, "use_projector_lora", False):
+        validate_a2_projector_lora_contract(model, projector_path=config.student.multimodal_projector_path)
     model.train()
     return model, summary
 

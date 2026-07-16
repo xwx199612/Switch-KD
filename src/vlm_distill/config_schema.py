@@ -66,6 +66,10 @@ class StudentConfig:
     lora_layers_pattern: str | None = None
     quantization: str = "none"
     train_multimodal_projector: bool = False
+    use_projector_lora: bool = False
+    projector_lora_rank: int | None = None
+    projector_lora_alpha: int | None = None
+    projector_lora_dropout: float | None = None
     multimodal_projector_path: str = "model.visual.merger"
     merged_artifact_mode: str = "bf16_standalone"
 
@@ -291,10 +295,32 @@ def _build_student_config(raw: dict[str, Any]) -> StudentConfig:
         values["lora_layers_pattern"] = values["lora_layers_pattern"].strip()
     if not isinstance(values.get("train_multimodal_projector", False), bool):
         raise ValueError("student.train_multimodal_projector must be a boolean.")
+    if not isinstance(values.get("use_projector_lora", False), bool):
+        raise ValueError("student.use_projector_lora must be a boolean.")
+    if values.get("train_multimodal_projector", False) and values.get("use_projector_lora", False):
+        raise ValueError("student.train_multimodal_projector and student.use_projector_lora are mutually exclusive (A1/A2).")
+    if values.get("use_projector_lora", False) and not values.get("use_lora", True):
+        raise ValueError("student.use_projector_lora=true requires student.use_lora=true.")
     projector_path = values.get("multimodal_projector_path", "model.visual.merger")
     if not isinstance(projector_path, str) or not projector_path.strip():
         raise ValueError("student.multimodal_projector_path must be a non-empty dotted module path.")
     values["multimodal_projector_path"] = projector_path.strip()
+    if values.get("use_projector_lora", False) and values["multimodal_projector_path"] != "model.visual.merger":
+        raise ValueError("A2 projector LoRA is only supported for student.multimodal_projector_path=model.visual.merger.")
+    for key in ("projector_lora_rank", "projector_lora_alpha"):
+        if values.get(key) is not None and (isinstance(values[key], bool) or int(values[key]) <= 0):
+            raise ValueError(f"student.{key} must be null or a positive integer.")
+        if values.get(key) is not None:
+            values[key] = int(values[key])
+    if values.get("projector_lora_dropout") is not None:
+        dropout = float(values["projector_lora_dropout"])
+        if not 0 <= dropout < 1:
+            raise ValueError("student.projector_lora_dropout must be null or in [0, 1).")
+        values["projector_lora_dropout"] = dropout
+    if values.get("use_projector_lora"):
+        configured = {str(item) for item in values.get("target_modules", [])}
+        if "model.visual.merger" in configured or any("deepstack_merger" in item for item in configured):
+            raise ValueError("A2 must not place the projector or deepstack merger in target_modules/modules_to_save.")
     artifact_mode = str(values.get("merged_artifact_mode", "bf16_standalone"))
     if artifact_mode not in {"mixed_4bit_bf16", "bf16_standalone", "adapter_plus_projector"}:
         raise ValueError(
