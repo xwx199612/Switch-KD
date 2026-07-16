@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 from contextlib import nullcontext
 from dataclasses import dataclass
+import inspect
 from pathlib import Path
+import time
 from typing import Any
 
 from .config_schema import load_config, format_prompt, resolve_label_path
@@ -864,10 +866,14 @@ def _maybe_enable_student_lora(config, model):
 
 
 def _apply_student_train_setup(config, model):
-    if config.training.gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
-        model.gradient_checkpointing_enable()
+    checkpointing_enabled = bool(config.training.gradient_checkpointing)
+    use_reentrant = None
+    if checkpointing_enabled:
+        use_reentrant = _enable_student_gradient_checkpointing(model)
         if hasattr(model, "config"):
             model.config.use_cache = False
+    print(f"student_gradient_checkpointing_enabled={str(checkpointing_enabled).lower()}")
+    print(f"student_gradient_checkpointing_use_reentrant={use_reentrant}")
     validate_projector_path(model, config.student.multimodal_projector_path)
     if config.student.train_multimodal_projector:
         # Do this before PEFT modules_to_save copies the module.
@@ -887,6 +893,50 @@ def _apply_student_train_setup(config, model):
         validate_projector_trainable_parameters(model, config.student.multimodal_projector_path)
     model.train()
     return model, summary
+
+
+def _enable_student_gradient_checkpointing(model) -> bool:
+    """Enable HF checkpointing explicitly with PyTorch's non-reentrant engine."""
+    method = getattr(model, "gradient_checkpointing_enable", None)
+    if method is None:
+        raise RuntimeError(
+            "Student gradient checkpointing is enabled, but the model does not expose "
+            "gradient_checkpointing_enable()."
+        )
+    try:
+        signature = inspect.signature(method)
+    except (TypeError, ValueError):  # pragma: no cover - unusual remote-code model
+        signature = None
+    if signature is not None and (
+        "gradient_checkpointing_kwargs" not in signature.parameters
+        and not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values())
+    ):
+        raise RuntimeError(
+            "Student model cannot receive gradient_checkpointing_kwargs; refusing to use "
+            "the PyTorch reentrant default."
+        )
+
+    method(gradient_checkpointing_kwargs={"use_reentrant": False})
+    actual = _student_gradient_checkpointing_use_reentrant(model)
+    if actual is not False:
+        raise RuntimeError(
+            "Student gradient checkpointing did not activate use_reentrant=False; "
+            f"observed {actual!r}."
+        )
+    return actual
+
+
+def _student_gradient_checkpointing_use_reentrant(model) -> bool | None:
+    """Read the effective kwarg from Transformers' checkpoint function."""
+    checkpoint_func = getattr(model, "_gradient_checkpointing_func", None)
+    keywords = getattr(checkpoint_func, "keywords", None)
+    if isinstance(keywords, dict) and "use_reentrant" in keywords:
+        return bool(keywords["use_reentrant"])
+    config = getattr(model, "config", None)
+    configured = getattr(config, "gradient_checkpointing_kwargs", None)
+    if isinstance(configured, dict) and "use_reentrant" in configured:
+        return bool(configured["use_reentrant"])
+    return None
 
 
 def _build_optimizer(config, model):
@@ -966,6 +1016,24 @@ def _gpu_mem_stats() -> tuple[int, int]:
     if not torch.cuda.is_available():
         return 0, 0
     return int(torch.cuda.memory_allocated()), int(torch.cuda.memory_reserved())
+
+
+def _synchronize_for_timing(device: Any) -> None:
+    import torch
+
+    if torch.cuda.is_available() and str(device).startswith("cuda"):
+        torch.cuda.synchronize(device)
+
+
+def _gpu_peak_memory_allocated() -> int:
+    import torch
+
+    if not torch.cuda.is_available():
+        return 0
+    return sum(
+        int(torch.cuda.max_memory_allocated(index))
+        for index in range(torch.cuda.device_count())
+    )
 
 
 def _check_no_quantized_cpu_offload(
@@ -1073,6 +1141,8 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
     dataset = OnlineAlignDataset(rows, config, student_processor)
     dataloader = _dataloader(dataset, student_processor, config.training.batch_size)
     optimizer = _build_optimizer(config, student_model)
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
 
     max_steps = max_steps_override if max_steps_override is not None else config.training.max_steps
     total_target_steps = int(max_steps) if max_steps is not None else None
@@ -1151,16 +1221,28 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
                 if key != "labels"
             }
 
+            teacher_forward_started = time.perf_counter()
+            _synchronize_for_timing(teacher_input_device)
             with torch.no_grad():
                 with _autocast_context(config.training.mixed_precision):
                     teacher_outputs = teacher_model(**teacher_forward_inputs)
                     teacher_logits = teacher_outputs.logits
+            _synchronize_for_timing(teacher_input_device)
+            teacher_forward_seconds = time.perf_counter() - teacher_forward_started
             teacher_labels = teacher_labels.to(device=teacher_logits.device)
 
+            student_forward_started = time.perf_counter()
+            _synchronize_for_timing(student_input_device)
             with _autocast_context(config.training.mixed_precision):
                 student_outputs = student_model(**student_forward_inputs)
                 student_logits = student_outputs.logits
                 lm_loss = _causal_lm_loss(student_logits, labels)
+            _synchronize_for_timing(student_input_device)
+            student_forward_seconds = time.perf_counter() - student_forward_started
+
+            dbild_loss_started = time.perf_counter()
+            _synchronize_for_timing(student_input_device)
+            with _autocast_context(config.training.mixed_precision):
                 (
                     aligned_teacher_logits,
                     aligned_student_logits,
@@ -1201,15 +1283,21 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
                     lm_loss_weight=config.distillation.lm_loss_weight,
                     dbild_loss_weight=config.distillation.dbild_loss_weight,
                 )
-                last_step_log_values = {
-                    "lm_loss": float(lm_loss.detach().float().item()),
-                    "align_loss": float(align_loss.detach().float().item()),
-                    "total_loss": float(total_loss.detach().float().item()),
-                    "teacher_supervised_count": teacher_supervised_count,
-                    "student_supervised_count": student_supervised_count,
-                    "shared_vocab_size": shared_vocab_size,
-                    "vocab_prefix_alignment_used": int(vocab_prefix_alignment_used),
-                }
+            _synchronize_for_timing(student_input_device)
+            dbild_loss_seconds = time.perf_counter() - dbild_loss_started
+            if not torch.isfinite(total_loss.detach()).all():
+                raise FloatingPointError(
+                    f"Online DBiLD produced non-finite loss for sample_id={batch.get('sample_id')}"
+                )
+            last_step_log_values = {
+                "lm_loss": float(lm_loss.detach().float().item()),
+                "align_loss": float(align_loss.detach().float().item()),
+                "total_loss": float(total_loss.detach().float().item()),
+                "teacher_supervised_count": teacher_supervised_count,
+                "student_supervised_count": student_supervised_count,
+                "shared_vocab_size": shared_vocab_size,
+                "vocab_prefix_alignment_used": int(vocab_prefix_alignment_used),
+            }
 
             if not first_batch_debug_printed:
                 print(f"teacher_logits.shape={tuple(teacher_logits.shape)}")
@@ -1234,7 +1322,22 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
                 first_batch_debug_printed = True
 
             loss_for_backward = total_loss / grad_accum_steps
+            _synchronize_for_timing(student_input_device)
+            backward_started = time.perf_counter()
             loss_for_backward.backward()
+            _synchronize_for_timing(student_input_device)
+            backward_seconds = time.perf_counter() - backward_started
+            print(
+                "Online DBiLD micro_batch "
+                f"sample_id={batch.get('sample_id')} "
+                f"sequence_length={int(labels.shape[1])} "
+                f"supervised_token_count={int(student_supervised_count)} "
+                f"teacher_forward_seconds={teacher_forward_seconds:.6f} "
+                f"student_forward_seconds={student_forward_seconds:.6f} "
+                f"DBiLD_loss_seconds={dbild_loss_seconds:.6f} "
+                f"backward_seconds={backward_seconds:.6f} "
+                f"micro_step={micro_step} accumulation_steps={grad_accum_steps}"
+            )
 
             if micro_step % grad_accum_steps == 0:
                 optimizer.step()
@@ -1287,6 +1390,7 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
     config.student.adapter_dir.mkdir(parents=True, exist_ok=True)
     student_model.save_pretrained(config.student.adapter_dir)
     student_processor.save_pretrained(config.student.adapter_dir)
+    print(f"peak_vram_allocated_bytes={_gpu_peak_memory_allocated()}")
     print(f"OK online DBiLD training completed: optimizer_steps={global_step}")
     return config.student.adapter_dir
 

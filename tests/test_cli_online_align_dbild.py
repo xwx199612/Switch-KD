@@ -5,6 +5,7 @@ import pytest
 
 from vlm_distill import cli
 from vlm_distill.train_online_align_dbild import (
+    _enable_student_gradient_checkpointing,
     _scale_partial_accumulation_gradients,
     _weighted_online_align_loss,
     run_training,
@@ -92,3 +93,30 @@ def test_partial_accumulation_scaling_uses_current_window_step():
     _scale_partial_accumulation_gradients(model, grad_accum_steps=8, micro_step=10)
 
     assert model.weight.grad.item() == pytest.approx(4.0)
+
+
+def test_online_align_student_checkpointing_is_explicitly_non_reentrant():
+    import functools
+
+    class CheckpointToy:
+        def __init__(self):
+            self._gradient_checkpointing_func = None
+
+        def gradient_checkpointing_enable(self, *, gradient_checkpointing_kwargs=None):
+            self._gradient_checkpointing_func = functools.partial(
+                object, **(gradient_checkpointing_kwargs or {})
+            )
+
+    model = CheckpointToy()
+
+    assert _enable_student_gradient_checkpointing(model) is False
+    assert model._gradient_checkpointing_func.keywords == {"use_reentrant": False}
+
+
+def test_online_align_checkpointing_refuses_models_without_explicit_kwarg_support():
+    class LegacyCheckpointToy:
+        def gradient_checkpointing_enable(self):
+            pass
+
+    with pytest.raises(RuntimeError, match="refusing to use"):
+        _enable_student_gradient_checkpointing(LegacyCheckpointToy())
