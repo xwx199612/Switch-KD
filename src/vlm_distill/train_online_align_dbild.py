@@ -868,12 +868,22 @@ def _maybe_enable_student_lora(config, model):
 def _apply_student_train_setup(config, model):
     checkpointing_enabled = bool(config.training.gradient_checkpointing)
     use_reentrant = None
+    student_is_gradient_checkpointing = None
+    checkpointing_modules = []
     if checkpointing_enabled:
         use_reentrant = _enable_student_gradient_checkpointing(model)
+        student_is_gradient_checkpointing = getattr(model, "is_gradient_checkpointing", None)
+        checkpointing_modules = _student_gradient_checkpointing_modules(model)
         if hasattr(model, "config"):
             model.config.use_cache = False
     print(f"student_gradient_checkpointing_enabled={str(checkpointing_enabled).lower()}")
+    print(
+        "student_is_gradient_checkpointing="
+        f"{str(bool(student_is_gradient_checkpointing)).lower()}"
+    )
     print(f"student_gradient_checkpointing_use_reentrant={use_reentrant}")
+    print(f"student_gradient_checkpointing_module_count={len(checkpointing_modules)}")
+    print(f"student_gradient_checkpointing_module_examples={checkpointing_modules[:20]}")
     validate_projector_path(model, config.student.multimodal_projector_path)
     if config.student.train_multimodal_projector:
         # Do this before PEFT modules_to_save copies the module.
@@ -917,6 +927,17 @@ def _enable_student_gradient_checkpointing(model) -> bool:
         )
 
     method(gradient_checkpointing_kwargs={"use_reentrant": False})
+    enabled = getattr(model, "is_gradient_checkpointing", None)
+    if enabled is False:
+        raise RuntimeError("Student gradient checkpointing did not activate.")
+
+    checkpointing_modules = _student_gradient_checkpointing_modules(model)
+    if not checkpointing_modules:
+        raise RuntimeError(
+            "Student gradient checkpointing did not activate use_reentrant=False; "
+            "no checkpoint module was found."
+        )
+
     actual = _student_gradient_checkpointing_use_reentrant(model)
     if actual is not False:
         raise RuntimeError(
@@ -927,16 +948,50 @@ def _enable_student_gradient_checkpointing(model) -> bool:
 
 
 def _student_gradient_checkpointing_use_reentrant(model) -> bool | None:
-    """Read the effective kwarg from Transformers' checkpoint function."""
-    checkpoint_func = getattr(model, "_gradient_checkpointing_func", None)
-    keywords = getattr(checkpoint_func, "keywords", None)
-    if isinstance(keywords, dict) and "use_reentrant" in keywords:
-        return bool(keywords["use_reentrant"])
-    config = getattr(model, "config", None)
-    configured = getattr(config, "gradient_checkpointing_kwargs", None)
-    if isinstance(configured, dict) and "use_reentrant" in configured:
-        return bool(configured["use_reentrant"])
-    return None
+    observed = []
+
+    for module_name, module in model.named_modules():
+        checkpoint_func = getattr(module, "_gradient_checkpointing_func", None)
+        keywords = getattr(checkpoint_func, "keywords", None)
+
+        if isinstance(keywords, dict) and "use_reentrant" in keywords:
+            observed.append(
+                (module_name or "<root>", bool(keywords["use_reentrant"]))
+            )
+
+    if not observed:
+        config = getattr(model, "config", None)
+        configured = getattr(config, "gradient_checkpointing_kwargs", None)
+        if isinstance(configured, dict) and "use_reentrant" in configured:
+            return bool(configured["use_reentrant"])
+        return None
+
+    values = {value for _, value in observed}
+    if len(values) > 1:
+        raise RuntimeError(
+            "Student gradient checkpoint modules disagree about use_reentrant: "
+            f"{observed[:20]}"
+        )
+
+    return observed[0][1]
+
+
+def _student_gradient_checkpointing_modules(model):
+    observed = []
+
+    for module_name, module in model.named_modules():
+        checkpoint_func = getattr(module, "_gradient_checkpointing_func", None)
+        keywords = getattr(checkpoint_func, "keywords", None)
+
+        if isinstance(keywords, dict) and "use_reentrant" in keywords:
+            observed.append(
+                {
+                    "module": module_name or "<root>",
+                    "use_reentrant": bool(keywords["use_reentrant"]),
+                }
+            )
+
+    return observed
 
 
 def _build_optimizer(config, model):
