@@ -20,6 +20,7 @@ from .manifest_builder import create_manifest_from_config, infer_manifest_task_f
 from .model_output_artifacts import refresh_parsing_sidecar_reports
 from .stage_evaluation import evaluate
 from .stage_merge_adapter import merge_student_adapter
+from .stage_package_adapter_deployment import package_high_fidelity_adapter_deployment
 from .stage_prediction_evaluation import evaluate_predictions
 from .stage_student_prediction import create_student_predictions
 from .stage_teacher_precompute import create_teacher_precompute_dataset
@@ -61,6 +62,7 @@ def main() -> None:
         "validate-switch-logits",
         "train",
         "merge-adapter",
+        "package-adapter",
         "evaluate",
         "evaluate-predictions",
     ):
@@ -211,7 +213,15 @@ def main() -> None:
         return
 
     if args.command == "merge-adapter":
+        if config.student.merged_artifact_mode == "4bit_base_bf16_adapter":
+            package_high_fidelity_adapter_deployment(config)
+            return
         merge_student_adapter(config)
+        return
+
+    if args.command == "package-adapter":
+        output = package_high_fidelity_adapter_deployment(config)
+        print(f"OK deployment bundle written: {output}")
         return
 
     if args.command == "evaluate":

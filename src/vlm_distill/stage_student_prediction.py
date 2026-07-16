@@ -10,6 +10,7 @@ from typing import Protocol
 from .config_schema import PipelineConfig, resolve_prediction_path
 from .data_manifest import VlmSample, read_jsonl
 from .model_loading import apply_attn_implementation, resolve_model_path
+from .deployment_loader import load_high_fidelity_adapter_deployment
 from .model_output_artifacts import refresh_parsing_sidecar_reports, write_parsing_sidecar
 from .stage_teacher_precompute import (
     _format_prompt as _format_teacher_prompt,
@@ -68,6 +69,15 @@ class HuggingFaceStudent:
             ) from exc
 
         model_selection = _resolve_prediction_model_selection(config)
+        if model_selection.deployment_path is not None:
+            self.model, self.processor = load_high_fidelity_adapter_deployment(model_selection.deployment_path)
+            print(
+                "prediction_model_source=4bit_base_bf16_adapter\n"
+                f"base_model_path={getattr(getattr(self.model, 'config', None), '_name_or_path', 'deployment metadata')}\n"
+                f"adapter_path={model_selection.deployment_path / 'adapter'}\n"
+                "adapter_merged=false\nlanguage_model_quantization=4bit_nf4\nmain_merger_dtype=bfloat16"
+            )
+            return
         model_path = model_selection.model_path
         adapter_path = _resolve_prediction_adapter_path(config)
         should_load_adapter = model_selection.should_load_adapter
@@ -187,13 +197,26 @@ class PredictionModelSelection:
     source: str
     model_path: str
     should_load_adapter: bool
+    deployment_path: Path | None = None
 
 
 def _resolve_prediction_model_selection(config: PipelineConfig) -> PredictionModelSelection:
     inference_model_path = (config.student.inference_model_path or "").strip()
     merged_model_path = config.student.merged_model_path
 
+    if merged_model_path is not None and (merged_model_path / "deployment_config.json").exists():
+        return PredictionModelSelection(
+            source="4bit_base_bf16_adapter", model_path=str(merged_model_path),
+            should_load_adapter=False, deployment_path=merged_model_path,
+        )
+
     if inference_model_path:
+        candidate = Path(inference_model_path)
+        if (candidate / "deployment_config.json").exists():
+            return PredictionModelSelection(
+                source="4bit_base_bf16_adapter", model_path=str(candidate),
+                should_load_adapter=False, deployment_path=candidate,
+            )
         return PredictionModelSelection(
             source="inference_model_path",
             model_path=resolve_model_path(inference_model_path),

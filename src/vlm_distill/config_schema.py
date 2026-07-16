@@ -51,6 +51,8 @@ class StudentConfig:
     output_dir: Path
     adapter_dir: Path
     merged_model_path: Path | None = None
+    deployment_artifact_path: Path | None = None
+    copy_base_model_into_deployment: bool = False
     inference_adapter_path: Path | None = None
     inference_model_path: str | None = None
     device_map: str | None = "auto"
@@ -322,12 +324,29 @@ def _build_student_config(raw: dict[str, Any]) -> StudentConfig:
         if "model.visual.merger" in configured or any("deepstack_merger" in item for item in configured):
             raise ValueError("A2 must not place the projector or deepstack merger in target_modules/modules_to_save.")
     artifact_mode = str(values.get("merged_artifact_mode", "bf16_standalone"))
-    if artifact_mode not in {"mixed_4bit_bf16", "bf16_standalone", "adapter_plus_projector"}:
+    if artifact_mode not in {
+        "mixed_4bit_bf16", "bf16_standalone", "adapter_plus_projector",
+        "4bit_base_bf16_adapter",
+    }:
         raise ValueError(
             "student.merged_artifact_mode must be one of: mixed_4bit_bf16, "
-            "bf16_standalone, adapter_plus_projector."
+            "bf16_standalone, adapter_plus_projector, 4bit_base_bf16_adapter."
         )
     values["merged_artifact_mode"] = artifact_mode
+    if artifact_mode == "4bit_base_bf16_adapter":
+        if values.get("quantization") != "4bit":
+            raise ValueError("4bit_base_bf16_adapter requires student.quantization=4bit.")
+        if not values.get("use_lora", True):
+            raise ValueError("4bit_base_bf16_adapter requires student.use_lora=true.")
+        if values.get("multimodal_projector_path", "model.visual.merger") != "model.visual.merger":
+            raise ValueError(
+                "4bit_base_bf16_adapter requires student.multimodal_projector_path=model.visual.merger."
+            )
+        if values.get("copy_base_model_into_deployment", False):
+            raise ValueError(
+                "copy_base_model_into_deployment=true is unsupported: a standalone bnb 4-bit base "
+                "artifact cannot be reliably saved by this Transformers/bitsandbytes stack."
+            )
     for key in ("output_dir", "adapter_dir"):
         values[key] = remap_output_path(Path(values[key]))
     merged_model_path = values.get("merged_model_path")
@@ -335,6 +354,10 @@ def _build_student_config(raw: dict[str, Any]) -> StudentConfig:
         values["merged_model_path"] = remap_output_path(Path(merged_model_path))
     else:
         values["merged_model_path"] = None
+    deployment_path = values.get("deployment_artifact_path")
+    values["deployment_artifact_path"] = (
+        remap_output_path(Path(deployment_path)) if deployment_path else None
+    )
     inference_adapter_path = values.get("inference_adapter_path")
     if inference_adapter_path:
         values["inference_adapter_path"] = remap_output_path(Path(inference_adapter_path))

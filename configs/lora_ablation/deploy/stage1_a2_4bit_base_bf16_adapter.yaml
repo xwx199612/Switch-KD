@@ -1,0 +1,31 @@
+seed: 42
+data:
+  training_manifest_path: outputs/lora_ablation/parsing_training_manifest.jsonl
+  inference_manifest_path: outputs/lora_ablation/parsing_inference_manifest.jsonl
+  distill_path: outputs/lora_ablation/stage1_a2_r16_attn_projector_lora/parsing_predictions.jsonl
+  prediction_path: outputs/lora_ablation/stage1_a2_r16_attn_projector_lora/predictions.jsonl
+  eval_path: outputs/lora_ablation/stage1_a2_r16_attn_projector_lora/eval.jsonl
+  image_root: .
+teacher:
+  model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-32B-Instruct
+  backend: hf
+  quantization: 4bit
+student:
+  model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-8B-Instruct
+  output_dir: outputs/lora_ablation/stage1_a2_r16_attn_projector_lora/r16_attn_projector_lora
+  adapter_dir: outputs/lora_ablation/stage1_a2_r16_attn_projector_lora/r16_attn_projector_lora/adapter
+  inference_adapter_path: outputs/lora_ablation/stage1_a2_r16_attn_projector_lora/r16_attn_projector_lora/adapter
+  inference_model_path: outputs/lora_ablation/stage1_a2_r16_attn_projector_lora/deploy_4bit_bf16_adapter
+  deployment_artifact_path: outputs/lora_ablation/stage1_a2_r16_attn_projector_lora/deploy_4bit_bf16_adapter
+  use_lora: true
+  load_adapter: false
+  merge_adapter: false
+  quantization: 4bit
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+  train_multimodal_projector: false
+  use_projector_lora: true
+  projector_lora_rank: 16
+  projector_lora_alpha: 32
+  projector_lora_dropout: 0.05
+  multimodal_projector_path: model.visual.merger
+  merged_artifact_mode: 4bit_base_bf16_adapter
