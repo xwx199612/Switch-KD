@@ -5,6 +5,7 @@ import yaml
 
 from vlm_distill.config_schema import DataConfig, PipelineConfig, StudentConfig, TeacherConfig, _build_student_config, load_config
 from vlm_distill.stage_package_adapter_deployment import package_high_fidelity_adapter_deployment
+from vlm_distill.deployment_loader import _processor_is_loadable
 
 
 def _config(tmp_path: Path, **student_overrides):
@@ -51,14 +52,53 @@ def test_high_fidelity_mode_rejects_invalid_quantization_or_lora(tmp_path, updat
                                "merged_artifact_mode": "4bit_base_bf16_adapter", **updates})
 
 
-def test_package_bundle_contains_adapter_processor_and_metadata_but_no_base(tmp_path):
+def test_package_bundle_omits_incomplete_processor_and_records_base_fallback(tmp_path):
     bundle = package_high_fidelity_adapter_deployment(_config(tmp_path))
     assert (bundle / "deployment_config.json").exists()
     assert (bundle / "adapter" / "adapter_model.safetensors").read_bytes() == b"adapter"
-    assert (bundle / "processor" / "tokenizer_config.json").exists()
-    assert not any(p.suffix in {".bin", ".safetensors", ".safetensors.index.json"}
-                   for p in (bundle / "processor").iterdir())
+    assert not (bundle / "processor").exists()
+    assert __import__("json").loads((bundle / "deployment_config.json").read_text())["processor_path"] is None
     assert not (bundle / "base").exists()
+
+
+def test_package_keeps_processor_only_when_autoprocessor_loads(tmp_path, monkeypatch):
+    import transformers
+
+    monkeypatch.setattr(transformers.AutoProcessor, "from_pretrained", classmethod(lambda cls, *args, **kwargs: object()))
+    bundle = package_high_fidelity_adapter_deployment(_config(tmp_path))
+    assert (bundle / "processor" / "tokenizer_config.json").exists()
+    assert __import__("json").loads((bundle / "deployment_config.json").read_text())["processor_path"] == "processor"
+
+
+def test_empty_or_incomplete_processor_bundles_are_not_loadable(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    incomplete = tmp_path / "incomplete"
+    incomplete.mkdir()
+    (incomplete / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    assert not _processor_is_loadable(empty)
+    assert not _processor_is_loadable(incomplete)
+
+
+@pytest.mark.parametrize("name", ["a0", "a1", "a2"])
+def test_deployment_config_preserves_formal_evaluation_settings(name):
+    formal_names = {
+        "a0": "stage1_a0_r16_attn.yaml",
+        "a1": "stage1_a1_r16_attn_projector.yaml",
+        "a2": "stage1_a2_r16_attn_projector_lora.yaml",
+    }
+    deployment = load_config(Path("configs/lora_ablation/deploy") / f"stage1_{name}_4bit_base_bf16_adapter.yaml")
+    formal = load_config(Path("configs/lora_ablation") / formal_names[name])
+    assert deployment.distillation.prompt_template == formal.distillation.prompt_template
+    assert deployment.training.image_resize == formal.training.image_resize == "1080p"
+    assert deployment.teacher.image_resize == formal.teacher.image_resize == "1080p"
+    assert deployment.teacher.max_new_tokens == formal.teacher.max_new_tokens == 1280
+    assert deployment.student.attn_implementation == formal.student.attn_implementation
+    assert deployment.teacher.attn_implementation == formal.teacher.attn_implementation
+    assert deployment.data.inference_manifest_path == formal.data.inference_manifest_path
+    assert deployment.data.label_path == formal.data.label_path
+    assert deployment.evaluation == formal.evaluation
+    assert deployment.student.merged_artifact_mode == "4bit_base_bf16_adapter"
 
 
 @pytest.mark.parametrize("projector_mode,expected", [

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import shutil
 from pathlib import Path
 from typing import Any
 from types import SimpleNamespace
@@ -16,6 +18,59 @@ MAIN_MERGER_PATHS = [
     "model.visual.merger.linear_fc1",
     "model.visual.merger.linear_fc2",
 ]
+
+
+def _processor_is_loadable(path: Path) -> bool:
+    if not path.is_dir() or not any(path.iterdir()):
+        return False
+    try:
+        from transformers import AutoProcessor
+        AutoProcessor.from_pretrained(
+            str(path), trust_remote_code=True, use_fast=False, local_files_only=True,
+        )
+    except Exception:
+        return False
+    return True
+
+
+def _tensor_digest(tensors: dict[str, torch.Tensor]) -> str:
+    digest = hashlib.sha256()
+    for name in sorted(tensors):
+        tensor = tensors[name].detach().cpu().contiguous()
+        digest.update(name.encode())
+        digest.update(str(tensor.dtype).encode())
+        digest.update(repr(tuple(tensor.shape)).encode())
+        digest.update(tensor.numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _projector_tensors(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    result = {}
+    marker = "model.visual.merger."
+    for name, tensor in state.items():
+        if marker in name and "modules_to_save.default." in name:
+            suffix = name.split("modules_to_save.default.", 1)[1]
+            result[suffix] = tensor
+    return result
+
+
+def projector_checksum_from_adapter_checkpoint(path: str | Path) -> str | None:
+    path = Path(path)
+    checkpoint = path / "adapter_model.safetensors"
+    if not checkpoint.exists():
+        checkpoint = path / "adapter_model.bin"
+    if not checkpoint.exists():
+        return None
+    try:
+        if checkpoint.suffix == ".safetensors":
+            from safetensors.torch import load_file
+            state = load_file(str(checkpoint), device="cpu")
+        else:
+            state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+        tensors = _projector_tensors(state)
+        return _tensor_digest(tensors) if tensors else None
+    except Exception:
+        return None
 
 
 def _module(model: Any, path: str) -> Any:
@@ -106,6 +161,16 @@ def validate_high_fidelity_deployment(model: Any, config: Any = None, *, smoke_i
             active_adapter = active_adapter[0] if active_adapter else "default"
         if str(active_adapter) != "default":
             raise RuntimeError("A1 validation failed: trained projector copy is not the active adapter copy")
+        expected_checksum = getattr(getattr(config, "student", config), "projector_checksum", None) if config else None
+        if expected_checksum:
+            actual_checksum = _tensor_digest({
+                name.rsplit(".", 1)[-2] + "." + name.rsplit(".", 1)[-1]: parameter
+                for name, parameter in active_copy.named_parameters()
+            })
+            if actual_checksum != expected_checksum:
+                raise RuntimeError(
+                    "A1 validation failed: active modules_to_save projector checksum does not match adapter checkpoint"
+                )
     if use_projector_lora:
         if summary["projector_lora"] <= 0:
             raise RuntimeError("A2 validation failed: projector LoRA is missing")
@@ -153,8 +218,11 @@ def load_high_fidelity_adapter_deployment(
         from transformers import AutoModelForImageTextToText as AutoModelForVLM
     except ImportError:  # pragma: no cover
         from transformers import AutoModelForVision2Seq as AutoModelForVLM
-    processor_path = deployment_path / "processor"
-    processor = AutoProcessor.from_pretrained(str(processor_path if processor_path.exists() else base), trust_remote_code=True, use_fast=False, local_files_only=True)
+    processor_path = deployment_path / metadata.get("processor_path", "processor") if metadata.get("processor_path") else None
+    processor_source = processor_path if processor_path and _processor_is_loadable(processor_path) else Path(base)
+    if processor_path is not None and processor_path.exists() and processor_source != processor_path:
+        shutil.rmtree(processor_path)
+    processor = AutoProcessor.from_pretrained(str(processor_source), trust_remote_code=True, use_fast=False, local_files_only=True)
     kwargs: dict[str, Any] = {"device_map": "auto", "torch_dtype": torch.bfloat16, "trust_remote_code": True, "local_files_only": True}
     apply_attn_implementation(kwargs, metadata.get("attn_implementation", "sdpa"))
     kwargs["quantization_config"] = build_mixed_precision_quantization_config(
@@ -169,6 +237,7 @@ def load_high_fidelity_adapter_deployment(
     validation_config = SimpleNamespace(student=SimpleNamespace(
         train_multimodal_projector=projector_mode == "modules_to_save",
         use_projector_lora=projector_mode == "projector_lora",
+        projector_checksum=(metadata.get("projector_checksum") or projector_checksum_from_adapter_checkpoint(adapter_path)),
     ))
     validate_high_fidelity_deployment(model, validation_config)
     print("High-fidelity quantized adapter deployment loaded; adapter_merged=false")

@@ -179,8 +179,7 @@ _OFFLINE_LOGITS_WARNING_EMITTED = False
 
 def load_config(path: str | Path) -> PipelineConfig:
     config_path = Path(path)
-    with config_path.open("r", encoding="utf-8") as handle:
-        raw: dict[str, Any] = yaml.safe_load(handle)
+    raw = _load_raw_config(config_path)
     raw = _apply_config_options(raw)
     return PipelineConfig(
         seed=raw.get("seed", 42),
@@ -191,6 +190,28 @@ def load_config(path: str | Path) -> PipelineConfig:
         distillation=_build_distillation_config(raw.get("distillation", {})),
         evaluation=_build_evaluation_config(raw.get("evaluation", {})),
     )
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_raw_config(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as handle:
+        raw: dict[str, Any] = yaml.safe_load(handle) or {}
+    parent = raw.pop("extends", None)
+    if parent is None:
+        return raw
+    parent_path = (path.parent / parent).resolve()
+    if not parent_path.exists():
+        raise FileNotFoundError(f"Config extends missing file: {parent_path}")
+    return _deep_merge(_load_raw_config(parent_path), raw)
 
 
 def resolve_output_root() -> Path | None:

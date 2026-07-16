@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 
 from .config_schema import PipelineConfig
-from .deployment_loader import MAIN_MERGER_PATHS
+from .deployment_loader import MAIN_MERGER_PATHS, projector_checksum_from_adapter_checkpoint
 from .model_loading import resolve_model_path
 
 
@@ -33,22 +33,39 @@ def package_high_fidelity_adapter_deployment(config: PipelineConfig) -> Path:
     shutil.copytree(adapter, destination_adapter)
 
     processor_dir = output / "processor"
-    processor_dir.mkdir(exist_ok=True)
+    if processor_dir.exists():
+        shutil.rmtree(processor_dir)
+    processor_dir.mkdir()
     # Processor/tokenizer files are small and are copied without touching model weights.
     processor_names = {"preprocessor_config.json", "processor_config.json", "tokenizer_config.json", "tokenizer.json", "tokenizer.model", "special_tokens_map.json", "chat_template.json", "chat_template.jinja", "added_tokens.json", "vocab.json", "merges.txt"}
     for source in base_model.iterdir():
         if source.is_file() and source.name in processor_names:
             shutil.copy2(source, processor_dir / source.name)
+    # A directory containing a single tokenizer file is not a processor bundle.
+    # Validate the copied files in isolation before advertising the path.
+    from transformers import AutoProcessor
+    try:
+        AutoProcessor.from_pretrained(
+            str(processor_dir), trust_remote_code=True, use_fast=False,
+            local_files_only=True,
+        )
+    except Exception as exc:
+        shutil.rmtree(processor_dir)
+        print(f"Processor bundle omitted; base-model fallback will be used ({exc})")
     projector_mode = "projector_lora" if student.use_projector_lora else ("modules_to_save" if student.train_multimodal_projector else "base_bf16")
     metadata = {
         "artifact_mode": "4bit_base_bf16_adapter",
         "description": "High-fidelity quantized adapter deployment",
         "base_model_path": str(base_model),
         "adapter_path": "adapter",
-        "processor_path": "processor",
+        "processor_path": "processor" if processor_dir.exists() else None,
         "projector_mode": projector_mode,
         "projector_path": "model.visual.merger",
         "projector_source": "adapter" if projector_mode == "modules_to_save" else None,
+        "projector_checksum": (
+            projector_checksum_from_adapter_checkpoint(destination_adapter)
+            if projector_mode == "modules_to_save" else None
+        ),
         "projector_lora_targets": MAIN_MERGER_PATHS if projector_mode == "projector_lora" else [],
         "excluded_from_quantization": MAIN_MERGER_PATHS,
         "quantization": "4bit_nf4",
@@ -76,4 +93,3 @@ def package_high_fidelity_adapter_deployment(config: PipelineConfig) -> Path:
     print(f"deployment bundle size: {size} bytes")
     print(f"adapter size: {adapter_size} bytes")
     return output
-
