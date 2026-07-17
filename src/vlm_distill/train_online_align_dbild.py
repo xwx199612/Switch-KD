@@ -4,6 +4,7 @@ import argparse
 from contextlib import nullcontext
 from dataclasses import dataclass
 import inspect
+import json
 from pathlib import Path
 import time
 from typing import Any
@@ -1340,23 +1341,124 @@ def validate_smoke_losses(lm_loss, dbild_loss, vsd_loss, total_loss) -> None:
         raise RuntimeError("Smoke loss contract failed: vsd_loss must be 0.")
 
 
-def _validate_smoke_adapter_checkpoint(adapter_dir: Path) -> None:
+_FULL_PROJECTOR_TENSOR_SUFFIXES = (
+    "norm.weight",
+    "norm.bias",
+    "linear_fc1.weight",
+    "linear_fc1.bias",
+    "linear_fc2.weight",
+    "linear_fc2.bias",
+)
+_REQUIRED_FULL_PROJECTOR_TENSOR_SUFFIXES = {
+    *_FULL_PROJECTOR_TENSOR_SUFFIXES,
+}
+
+
+def _normalize_peft_module_path(path: str) -> str:
+    """Normalize PEFT's model prefixes while preserving exact module boundaries."""
+    normalized = ".".join(part for part in str(path).strip(".").split(".") if part)
+    while normalized.startswith("base_model.model."):
+        normalized = normalized[len("base_model.model."):]
+    if normalized.startswith("model."):
+        normalized = normalized[len("model."):]
+    return normalized
+
+
+def is_saved_full_projector_key(key: str, projector_path: str) -> bool:
+    """Return whether *key* is an exact, wrapper-free saved projector tensor key."""
+    normalized_key = _normalize_peft_module_path(key)
+    normalized_projector = _normalize_peft_module_path(projector_path)
+    prefix = f"{normalized_projector}."
+    if not normalized_key.startswith(prefix):
+        return False
+    suffix = normalized_key[len(prefix):]
+    return suffix in _FULL_PROJECTOR_TENSOR_SUFFIXES
+
+
+def _is_key_under_module(key: str, module_path: str) -> bool:
+    return _normalize_peft_module_path(key).startswith(f"{_normalize_peft_module_path(module_path)}.")
+
+
+def _validate_smoke_adapter_checkpoint(
+    adapter_dir: Path,
+    projector_path: str = QWEN3_VL_PROJECTOR_PATH,
+    required_projector_tensors: set[str] | None = None,
+) -> None:
     config_path = adapter_dir / "adapter_config.json"
     weights_path = adapter_dir / "adapter_model.safetensors"
     if not config_path.is_file() or not weights_path.is_file():
         raise RuntimeError(f"Smoke adapter is incomplete: expected {config_path} and {weights_path}.")
+    with config_path.open(encoding="utf-8") as handle:
+        adapter_config = json.load(handle)
+    modules_to_save = adapter_config.get("modules_to_save")
+    if isinstance(modules_to_save, str):
+        modules_to_save = [modules_to_save]
+    if not isinstance(modules_to_save, list):
+        modules_to_save = []
+    normalized_projector = _normalize_peft_module_path(projector_path)
+    normalized_modules_to_save = [_normalize_peft_module_path(value) for value in modules_to_save]
+    if normalized_projector not in normalized_modules_to_save:
+        raise RuntimeError(
+            "Smoke adapter checkpoint does not declare the full projector in adapter_config modules_to_save. "
+            f"adapter_config modules_to_save={modules_to_save!r}, expected path={projector_path!r}."
+        )
     from safetensors.torch import load_file
 
     keys = list(load_file(str(weights_path), device="cpu"))
     for target in ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"):
-        if not any(target in key and "lora_" in key.lower() for key in keys):
+        if not any(
+            target in key.split(".")
+            and any(part.lower() in {"lora_a", "lora_b"} for part in key.split("."))
+            for key in keys
+        ):
             raise RuntimeError(f"Smoke adapter checkpoint is missing {target} LoRA keys.")
-    if not any("modules_to_save.default" in key and "visual.merger" in key for key in keys):
-        raise RuntimeError("Smoke adapter checkpoint is missing modules_to_save.default projector keys.")
-    if any("projector" in key.lower() and "lora_" in key.lower() for key in keys):
+    projector_related_keys = [key for key in keys if _is_key_under_module(key, projector_path)]
+    saved_projector_keys = [key for key in keys if is_saved_full_projector_key(key, projector_path)]
+    saved_projector_suffixes = {
+        _normalize_peft_module_path(key).split(f"{normalized_projector}.", 1)[1]
+        for key in saved_projector_keys
+    }
+    required_projector_tensors = (
+        _REQUIRED_FULL_PROJECTOR_TENSOR_SUFFIXES
+        if required_projector_tensors is None
+        else set(required_projector_tensors)
+    )
+    invalid_required_projector_tensors = sorted(
+        set(required_projector_tensors) - set(_FULL_PROJECTOR_TENSOR_SUFFIXES)
+    )
+    if invalid_required_projector_tensors:
+        raise ValueError(f"Unknown required projector tensors: {invalid_required_projector_tensors!r}")
+    missing_projector_tensors = sorted(required_projector_tensors - saved_projector_suffixes)
+    print(f"adapter_config modules_to_save={modules_to_save!r}")
+    print(f"projector-related keys={sorted(projector_related_keys)!r}")
+    if missing_projector_tensors:
+        raise RuntimeError(
+            "Smoke adapter checkpoint is missing full projector tensors. "
+            f"adapter_config modules_to_save={modules_to_save!r}; "
+            f"found projector-related keys={sorted(projector_related_keys)!r}; "
+            f"missing projector tensors={missing_projector_tensors!r}."
+        )
+    if any(
+        is_saved_full_projector_key(key, projector_path)
+        and ("lora_a" in key.lower() or "lora_b" in key.lower())
+        for key in keys
+    ) or any(
+        _is_key_under_module(key, projector_path)
+        and ("lora_a" in key.lower() or "lora_b" in key.lower())
+        for key in keys
+    ):
         raise RuntimeError("Smoke adapter checkpoint unexpectedly contains projector LoRA keys.")
-    if any("deepstack" in key.lower() for key in keys):
-        raise RuntimeError("Smoke adapter checkpoint unexpectedly contains deepstack keys.")
+    unexpected_visual_keys = [
+        key
+        for key in keys
+        if _normalize_peft_module_path(key).startswith("visual.")
+        and not _is_key_under_module(key, projector_path)
+    ]
+    if unexpected_visual_keys:
+        raise RuntimeError(
+            "Smoke adapter checkpoint unexpectedly contains non-projector visual keys: "
+            f"{sorted(unexpected_visual_keys)!r}."
+        )
     print(f"Smoke adapter checkpoint validation passed: path={adapter_dir}")
 
 

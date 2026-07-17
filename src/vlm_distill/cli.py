@@ -24,7 +24,7 @@ from .stage_package_adapter_deployment import package_high_fidelity_adapter_depl
 from .stage_prediction_evaluation import evaluate_predictions
 from .stage_student_prediction import create_student_predictions
 from .stage_teacher_precompute import create_teacher_precompute_dataset
-from .train_online_align_dbild import run_training
+from .train_online_align_dbild import _validate_smoke_adapter_checkpoint, run_training
 from .stage_visual_switch_logits import create_visual_switch_dataset
 from .switch_logits_validation import validate_switch_logits_file
 from .teacher_label_stats import format_teacher_label_summary, summarize_teacher_label_file
@@ -101,6 +101,12 @@ def main() -> None:
         help=argparse.SUPPRESS,
     )
     validate_labels_parser.add_argument("--config", type=Path, required=True)
+    validate_adapter_parser = subparsers.add_parser(
+        "validate-adapter",
+        help="Validate a saved PEFT adapter checkpoint without running training.",
+    )
+    validate_adapter_parser.add_argument("--adapter-path", type=Path, required=True)
+    validate_adapter_parser.add_argument("--projector-path", default="model.visual.merger")
     args = parser.parse_args()
 
     if args.command == "create-manifest":
@@ -130,6 +136,10 @@ def main() -> None:
             f"parse_failed={report['parse_failed']} total_elements={report['total_elements']} "
             f"json_dir={args.output_root / 'json' / args.role}"
         )
+        return
+
+    if args.command == "validate-adapter":
+        _validate_smoke_adapter_checkpoint(args.adapter_path, args.projector_path)
         return
 
     config = load_config(args.config)
