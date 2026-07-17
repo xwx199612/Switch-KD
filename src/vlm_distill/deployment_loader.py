@@ -95,6 +95,17 @@ def _active_merger(model: Any) -> Any:
     return merger
 
 
+def _active_modules_to_save_projector(model: Any) -> Any | None:
+    """Return the active full projector copy, but only for the default adapter copy."""
+    wrapper = _module(model, "model.visual.merger")
+    modules_to_save = getattr(wrapper, "modules_to_save", None)
+    active_copy = getattr(modules_to_save, "default", None) if modules_to_save is not None else None
+    active_adapter = getattr(wrapper, "active_adapter", "default")
+    if isinstance(active_adapter, (list, tuple)):
+        active_adapter = active_adapter[0] if active_adapter else "default"
+    return active_copy if active_copy is not None and str(active_adapter) == "default" else None
+
+
 def _summary(model: Any) -> dict[str, Any]:
     try:
         import bitsandbytes as bnb
@@ -106,7 +117,7 @@ def _summary(model: Any) -> dict[str, Any]:
               "attention_lora_names": [], "mlp_lora_names": []}
     attention_dtypes: set[str] = set()
     mlp_dtypes: set[str] = set()
-    projector_dtypes: set[str] = set()
+    projector_lora_dtypes: set[str] = set()
     for name, module in model.named_modules():
         if linear4bit and isinstance(module, linear4bit) and "language_model" in name:
             counts["linear4bit"] += 1
@@ -121,15 +132,27 @@ def _summary(model: Any) -> dict[str, Any]:
             else:
                 counts["attention_lora_names"].append(name)
             for parameter in module.parameters(recurse=False):
-                (projector_dtypes if is_projector else (mlp_dtypes if is_mlp else attention_dtypes)).add(str(parameter.dtype))
+                (projector_lora_dtypes if is_projector else (mlp_dtypes if is_mlp else attention_dtypes)).add(str(parameter.dtype))
         if "modules_to_save" in name and "default" in name:
-            counts["modules_to_save"] += sum(1 for _ in module.parameters(recurse=False))
+            counts["modules_to_save"] += sum(1 for _ in module.parameters())
     for name, parameter in model.named_parameters():
+        if "model.visual.merger.linear_fc" in name and _is_lora(name):
+            projector_lora_dtypes.add(str(parameter.dtype))
         if "visual" in name and "visual.merger" not in name and parameter.requires_grad:
             counts["vision_trainable"] += parameter.numel()
     counts["attention_dtypes"] = sorted(attention_dtypes)
     counts["mlp_dtypes"] = sorted(mlp_dtypes)
-    counts["projector_dtypes"] = sorted(projector_dtypes)
+    active_projector = _active_modules_to_save_projector(model)
+    modules_to_save_projector_dtypes = set()
+    if active_projector is not None:
+        modules_to_save_projector_dtypes = {
+            str(parameter.dtype) for parameter in active_projector.parameters()
+        }
+    counts["modules_to_save_projector_dtypes"] = sorted(modules_to_save_projector_dtypes)
+    counts["projector_lora_dtypes"] = sorted(projector_lora_dtypes)
+    # Compatibility for callers written before the split. New code must use the
+    # explicit fields above; this alias intentionally represents LoRA only.
+    counts["projector_dtypes"] = counts["projector_lora_dtypes"]
     return counts
 
 
@@ -153,10 +176,13 @@ def validate_high_fidelity_deployment(model: Any, config: Any = None, *, smoke_i
         raise RuntimeError("deployment validation failed: PEFT adapter is not active")
     if getattr(model, "merged_adapters", None):
         raise RuntimeError("deployment validation failed: adapter is merged")
-    if any("torch.int" in dtype or "torch.uint" in dtype for dtype in summary["attention_dtypes"] + summary["projector_dtypes"]):
+    if any("torch.int" in dtype or "torch.uint" in dtype for dtype in summary["attention_dtypes"] + summary["projector_lora_dtypes"]):
         raise RuntimeError("deployment validation failed: adapter tensors must remain floating point")
     if any("torch.int" in dtype or "torch.uint" in dtype for dtype in summary["mlp_dtypes"]):
         raise RuntimeError("deployment validation failed: MLP adapter tensors must remain floating point")
+    if any(not dtype.startswith("torch.") or not getattr(torch, dtype.removeprefix("torch."), torch.float32).is_floating_point
+           for dtype in summary["modules_to_save_projector_dtypes"]):
+        raise RuntimeError("deployment validation failed: modules_to_save projector tensors must remain floating point")
 
     mode = getattr(getattr(config, "student", config), "train_multimodal_projector", False) if config else False
     use_projector_lora = getattr(getattr(config, "student", config), "use_projector_lora", False) if config else False
@@ -183,6 +209,9 @@ def validate_high_fidelity_deployment(model: Any, config: Any = None, *, smoke_i
                     "A1 validation failed: active modules_to_save projector checksum does not match adapter checkpoint"
                 )
     if use_projector_lora:
+        if any(not getattr(torch, dtype.removeprefix("torch."), torch.float32).is_floating_point
+               for dtype in summary["projector_lora_dtypes"]):
+            raise RuntimeError("A2 validation failed: projector LoRA tensors must remain floating point")
         if summary["projector_lora"] <= 0:
             raise RuntimeError("A2 validation failed: projector LoRA is missing")
         if any("deepstack_merger" in n or ("mlp" in n.lower() and "lora" in n.lower()) for n, _ in model.named_modules()):
@@ -227,8 +256,8 @@ def validate_high_fidelity_deployment(model: Any, config: Any = None, *, smoke_i
     print(f"modules_to_save tensor count: {summary['modules_to_save']}")
     print(f"Attention LoRA dtype summary: {summary['attention_dtypes']}")
     print(f"MLP LoRA dtype summary: {summary['mlp_dtypes']}")
-    print(f"Modules-to-save projector dtype summary: {summary['projector_dtypes']}")
-    print(f"Projector LoRA dtype summary: {summary['projector_dtypes']}")
+    print(f"Modules-to-save projector dtype summary: {summary['modules_to_save_projector_dtypes']}")
+    print(f"Projector LoRA dtype summary: {summary['projector_lora_dtypes']}")
     return summary
 
 
