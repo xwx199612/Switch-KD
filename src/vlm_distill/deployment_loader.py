@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,36 @@ MAIN_MERGER_PATHS = [
     "model.visual.merger.linear_fc1",
     "model.visual.merger.linear_fc2",
 ]
+
+_RUNTIME_LORA_PARAMETER_RE = re.compile(
+    r"(?:^|.*\.)model\.language_model\.layers\.(\d+)\."
+    r"(self_attn|mlp)\."
+    r"(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)\."
+    r"lora_([ab])(?:\.[^.]+)?\.weight$",
+    re.IGNORECASE,
+)
+_PROJECTOR_LORA_PARAMETER_RE = re.compile(
+    r"(?:^|.*\.)model\.visual\.merger\."
+    r"(linear_fc1|linear_fc2)\.lora_([ab])(?:\.[^.]+)?\.weight$",
+    re.IGNORECASE,
+)
+_LEGACY_SUMMARY_LORA_PARAMETER_RE = re.compile(
+    r"(?:^|.*\.)model\.language_model\.(attention\.(q_proj|k_proj|v_proj|o_proj)|mlp\.(gate_proj|up_proj|down_proj))\.lora_[ab]\.weight$",
+    re.IGNORECASE,
+)
+_LEGACY_SUMMARY_PROJECTOR_LORA_PARAMETER_RE = re.compile(
+    r"(?:^|.*\.)model\.visual\.merger\.(linear_fc1|linear_fc2)\.lora_[ab]\.weight$",
+    re.IGNORECASE,
+)
+_LEGACY_SUMMARY_LORA_MODULE_PARAMETER_RE = re.compile(
+    r"(?:^|.*\.)model\.language_model\.(?:attention\.(?:q_proj|k_proj|v_proj|o_proj)|mlp\.(?:gate_proj|up_proj|down_proj))\.lora_[ab]\.(?:weight|bias)$",
+    re.IGNORECASE,
+)
+_LEGACY_SUMMARY_PROJECTOR_LORA_MODULE_PARAMETER_RE = re.compile(
+    r"(?:^|.*\.)model\.visual\.merger\.(?:linear_fc1|linear_fc2)\.lora_[ab]\.(?:weight|bias)$",
+    re.IGNORECASE,
+)
+_ANY_LORA_PARAMETER_RE = re.compile(r"(?:^|\.)lora_[ab](?:\.|$)", re.IGNORECASE)
 
 
 def _processor_is_loadable(path: Path) -> bool:
@@ -190,6 +221,87 @@ def _is_lora(name: str) -> bool:
     return "lora_a" in lower or "lora_b" in lower
 
 
+def collect_runtime_lora_inventory(model: Any) -> dict[str, Any]:
+    """Collect runtime PEFT LoRA tensors from parameter names.
+
+    PEFT exposes adapters as parameters such as ``lora_A.default.weight``.
+    This inventory deliberately accepts only the exact Qwen3-VL language-model
+    layout and the two main projector linears; everything else is reported as
+    unmatched instead of being guessed into a target group.
+    """
+    attention_names: list[str] = []
+    mlp_names: list[str] = []
+    projector_names: list[str] = []
+    attention_dtypes: set[str] = set()
+    mlp_dtypes: set[str] = set()
+    projector_dtypes: set[str] = set()
+    attention_modules: set[tuple[int, str, str]] = set()
+    mlp_modules: set[tuple[int, str, str]] = set()
+    components: dict[tuple[str, int, str, str], set[str]] = {}
+    unmatched: list[str] = []
+    detected: dict[str, set[int]] = {target: set() for target in (*QWEN3_VL_ATTENTION_TARGETS, *QWEN3_VL_MLP_TARGETS)}
+
+    for name, parameter in model.named_parameters():
+        match = _RUNTIME_LORA_PARAMETER_RE.fullmatch(name)
+        if match:
+            layer, branch, target, component = int(match.group(1)), match.group(2).lower(), match.group(3).lower(), match.group(4).lower()
+            if ((branch == "self_attn" and target not in QWEN3_VL_ATTENTION_TARGETS)
+                    or (branch == "mlp" and target not in QWEN3_VL_MLP_TARGETS)):
+                unmatched.append(name)
+                continue
+            key = (layer, branch, target)
+            group = "attention" if branch == "self_attn" else "mlp"
+            (attention_modules if group == "attention" else mlp_modules).add(key)
+            (attention_names if group == "attention" else mlp_names).append(name)
+            (attention_dtypes if group == "attention" else mlp_dtypes).add(str(parameter.dtype))
+            components.setdefault((group, *key), set()).add(component)
+            detected[target].add(layer)
+            continue
+        match = _PROJECTOR_LORA_PARAMETER_RE.fullmatch(name)
+        if match:
+            projector_names.append(name)
+            projector_dtypes.add(str(parameter.dtype))
+            continue
+        # Keep the small pre-runtime test doubles useful without allowing
+        # their non-layer paths to satisfy the A3 exact layer contract.
+        legacy = _LEGACY_SUMMARY_LORA_PARAMETER_RE.fullmatch(name)
+        if legacy:
+            (mlp_dtypes if ".mlp." in name.lower() else attention_dtypes).add(str(parameter.dtype))
+            continue
+        if _LEGACY_SUMMARY_PROJECTOR_LORA_PARAMETER_RE.fullmatch(name):
+            projector_dtypes.add(str(parameter.dtype))
+            continue
+        if (_LEGACY_SUMMARY_LORA_MODULE_PARAMETER_RE.fullmatch(name)
+                or _LEGACY_SUMMARY_PROJECTOR_LORA_MODULE_PARAMETER_RE.fullmatch(name)):
+            continue
+        if _ANY_LORA_PARAMETER_RE.search(name):
+            unmatched.append(name)
+
+    missing_components = {
+        f"{group}:{layer}:{branch}:{target}": sorted({"a", "b"} - parts)
+        for (group, layer, branch, target), parts in sorted(components.items())
+        if parts != {"a", "b"}
+    }
+    return {
+        "attention_lora_names": sorted(attention_names),
+        "mlp_lora_names": sorted(mlp_names),
+        "projector_lora_names": sorted(projector_names),
+        "attention_tensor_count": len(attention_names),
+        "mlp_tensor_count": len(mlp_names),
+        "projector_tensor_count": len(projector_names),
+        "attention_logical_modules": attention_modules,
+        "mlp_logical_modules": mlp_modules,
+        "attention_module_count": len(attention_modules),
+        "mlp_module_count": len(mlp_modules),
+        "attention_dtypes": sorted(attention_dtypes),
+        "mlp_dtypes": sorted(mlp_dtypes),
+        "projector_dtypes": sorted(projector_dtypes),
+        "detected": detected,
+        "missing_components": missing_components,
+        "unmatched_lora_names": sorted(unmatched),
+    }
+
+
 def _active_merger(model: Any) -> Any:
     merger = _projector_wrapper(model)
     # PEFT's ModulesToSaveWrapper keeps the trained copy under this exact path.
@@ -215,36 +327,36 @@ def _summary(model: Any) -> dict[str, Any]:
         linear4bit = bnb.nn.Linear4bit
     except ImportError:
         linear4bit = ()
-    counts = {"linear4bit": 0, "attention_lora": 0, "mlp_lora": 0, "projector_lora": 0,
-              "modules_to_save": 0, "vision_trainable": 0, "projector_lora_names": [],
-              "attention_lora_names": [], "mlp_lora_names": []}
-    attention_dtypes: set[str] = set()
-    mlp_dtypes: set[str] = set()
-    projector_lora_dtypes: set[str] = set()
+    inventory = collect_runtime_lora_inventory(model)
+    counts = {"linear4bit": 0, "modules_to_save": 0, "vision_trainable": 0}
     for name, module in model.named_modules():
         if linear4bit and isinstance(module, linear4bit) and "language_model" in name:
             counts["linear4bit"] += 1
-        if _is_lora(name):
-            is_projector = "visual.merger.linear_fc" in name
-            is_mlp = any(f".{target}.lora_" in name.lower() for target in QWEN3_VL_MLP_TARGETS)
-            counts["projector_lora" if is_projector else ("mlp_lora" if is_mlp else "attention_lora")] += 1
-            if is_projector:
-                counts["projector_lora_names"].append(name)
-            elif is_mlp:
-                counts["mlp_lora_names"].append(name)
-            else:
-                counts["attention_lora_names"].append(name)
-            for parameter in module.parameters(recurse=False):
-                (projector_lora_dtypes if is_projector else (mlp_dtypes if is_mlp else attention_dtypes)).add(str(parameter.dtype))
         if "modules_to_save" in name and "default" in name:
             counts["modules_to_save"] += sum(1 for _ in module.parameters())
     for name, parameter in model.named_parameters():
-        if "model.visual.merger.linear_fc" in name and _is_lora(name):
-            projector_lora_dtypes.add(str(parameter.dtype))
         if "visual" in name and "visual.merger" not in name and parameter.requires_grad:
             counts["vision_trainable"] += parameter.numel()
-    counts["attention_dtypes"] = sorted(attention_dtypes)
-    counts["mlp_dtypes"] = sorted(mlp_dtypes)
+    counts.update({
+        "attention_lora": inventory["attention_tensor_count"],
+        "mlp_lora": inventory["mlp_tensor_count"],
+        "projector_lora": inventory["projector_tensor_count"],
+        "attention_lora_tensor_count": inventory["attention_tensor_count"],
+        "mlp_lora_tensor_count": inventory["mlp_tensor_count"],
+        "attention_lora_module_count": inventory["attention_module_count"],
+        "mlp_lora_module_count": inventory["mlp_module_count"],
+        "attention_lora_names": inventory["attention_lora_names"],
+        "mlp_lora_names": inventory["mlp_lora_names"],
+        "projector_lora_names": inventory["projector_lora_names"],
+        "attention_dtypes": inventory["attention_dtypes"],
+        "mlp_dtypes": inventory["mlp_dtypes"],
+        "projector_lora_dtypes": inventory["projector_dtypes"],
+        "runtime_lora_parameter_count": inventory["attention_tensor_count"] + inventory["mlp_tensor_count"] + inventory["projector_tensor_count"],
+        "runtime_lora_parameter_examples": (inventory["attention_lora_names"] + inventory["mlp_lora_names"] + inventory["projector_lora_names"])[:20],
+        "detected": inventory["detected"],
+        "missing_lora_components": inventory["missing_components"],
+        "unmatched_lora_parameter_names": inventory["unmatched_lora_names"],
+    })
     active_projector = _active_modules_to_save_projector(model)
     modules_to_save_projector_dtypes = set()
     if active_projector is not None:
@@ -252,7 +364,6 @@ def _summary(model: Any) -> dict[str, Any]:
             str(parameter.dtype) for parameter in active_projector.parameters()
         }
     counts["modules_to_save_projector_dtypes"] = sorted(modules_to_save_projector_dtypes)
-    counts["projector_lora_dtypes"] = sorted(projector_lora_dtypes)
     # Compatibility for callers written before the split. New code must use the
     # explicit fields above; this alias intentionally represents LoRA only.
     counts["projector_dtypes"] = counts["projector_lora_dtypes"]
@@ -267,6 +378,24 @@ def validate_high_fidelity_deployment(model: Any, config: Any = None, *, smoke_i
         if type(layer) is not torch.nn.Linear or layer.weight.dtype != torch.bfloat16:
             raise RuntimeError(f"main merger {child} must be torch.nn.Linear with BF16 weights")
     summary = _summary(model)
+    print(f"runtime LoRA parameter count: {summary['runtime_lora_parameter_count']}")
+    print(f"runtime LoRA parameter examples: {summary['runtime_lora_parameter_examples']}")
+    print(f"detected attention modules: {summary['attention_lora_module_count']}")
+    print(f"detected MLP modules: {summary['mlp_lora_module_count']}")
+    print(f"detected A/B tensor counts: attention={summary['attention_lora_tensor_count']} MLP={summary['mlp_lora_tensor_count']}")
+    print(f"unmatched LoRA parameter names: {summary['unmatched_lora_parameter_names'][:20]}")
+    if summary["unmatched_lora_parameter_names"]:
+        raise RuntimeError(
+            "deployment validation failed: unmatched runtime LoRA parameter names "
+            f"(first 20)={summary['unmatched_lora_parameter_names'][:20]!r}"
+        )
+    if any("torch.int" in dtype or "torch.uint" in dtype for dtype in summary["attention_dtypes"] + summary["projector_lora_dtypes"]):
+        raise RuntimeError("deployment validation failed: adapter tensors must remain floating point")
+    if any("torch.int" in dtype or "torch.uint" in dtype for dtype in summary["mlp_dtypes"]):
+        raise RuntimeError("deployment validation failed: MLP adapter tensors must remain floating point")
+    if any(not dtype.startswith("torch.") or not getattr(torch, dtype.removeprefix("torch."), torch.float32).is_floating_point
+           for dtype in summary["modules_to_save_projector_dtypes"]):
+        raise RuntimeError("deployment validation failed: modules_to_save projector tensors must remain floating point")
     if summary["linear4bit"] <= 0:
         raise RuntimeError("deployment validation failed: language model has no Linear4bit modules")
     if summary["attention_lora"] <= 0:
@@ -279,13 +408,6 @@ def validate_high_fidelity_deployment(model: Any, config: Any = None, *, smoke_i
         raise RuntimeError("deployment validation failed: PEFT adapter is not active")
     if getattr(model, "merged_adapters", None):
         raise RuntimeError("deployment validation failed: adapter is merged")
-    if any("torch.int" in dtype or "torch.uint" in dtype for dtype in summary["attention_dtypes"] + summary["projector_lora_dtypes"]):
-        raise RuntimeError("deployment validation failed: adapter tensors must remain floating point")
-    if any("torch.int" in dtype or "torch.uint" in dtype for dtype in summary["mlp_dtypes"]):
-        raise RuntimeError("deployment validation failed: MLP adapter tensors must remain floating point")
-    if any(not dtype.startswith("torch.") or not getattr(torch, dtype.removeprefix("torch."), torch.float32).is_floating_point
-           for dtype in summary["modules_to_save_projector_dtypes"]):
-        raise RuntimeError("deployment validation failed: modules_to_save projector tensors must remain floating point")
 
     mode = getattr(getattr(config, "student", config), "train_multimodal_projector", False) if config else False
     use_projector_lora = getattr(getattr(config, "student", config), "use_projector_lora", False) if config else False
@@ -330,18 +452,29 @@ def validate_high_fidelity_deployment(model: Any, config: Any = None, *, smoke_i
         raise RuntimeError("A1 validation failed: projector LoRA is not allowed")
     configured_targets = list(getattr(getattr(config, "student", config), "target_modules", []) or []) if config else []
     if mode and set(configured_targets) & set(QWEN3_VL_MLP_TARGETS):
+        expected_layers = set(range(36))
         expected_attn = set(QWEN3_VL_ATTENTION_TARGETS)
         expected_mlp = set(QWEN3_VL_MLP_TARGETS)
-        def _target_modules(names):
-            return {name.rsplit(".lora_", 1)[0] for name in names}
-        attn_modules = {name for name in _target_modules(summary["attention_lora_names"])
-                        if any(f".{target}." in name for target in expected_attn)}
-        mlp_modules = {name for name in _target_modules(summary["mlp_lora_names"])
-                       if any(f".{target}." in name for target in expected_mlp)}
-        if len(attn_modules) != 36 * 4 or len(mlp_modules) != 36 * 3:
+        detected = summary["detected"]
+        missing_layers = {
+            target: sorted(expected_layers - detected[target])
+            for target in (*QWEN3_VL_ATTENTION_TARGETS, *QWEN3_VL_MLP_TARGETS)
+            if expected_layers - detected[target]
+        }
+        extra_layers = {
+            target: sorted(detected[target] - expected_layers)
+            for target in (*QWEN3_VL_ATTENTION_TARGETS, *QWEN3_VL_MLP_TARGETS)
+            if detected[target] - expected_layers
+        }
+        missing_components = summary["missing_lora_components"]
+        if (summary["attention_lora_module_count"] != 36 * len(expected_attn)
+                or summary["mlp_lora_module_count"] != 36 * len(expected_mlp)
+                or missing_layers or extra_layers or missing_components):
             raise RuntimeError(
                 "A3 deployment validation failed: expected 144 attention and 108 MLP LoRA modules, "
-                f"got {len(attn_modules)} and {len(mlp_modules)}"
+                f"got {summary['attention_lora_module_count']} and {summary['mlp_lora_module_count']}; "
+                f"missing_layers={missing_layers}; extra_layers={extra_layers}; "
+                f"missing_A_or_B={missing_components}"
             )
         if summary["projector_lora"] or summary["modules_to_save"] <= 0:
             raise RuntimeError("A3 deployment validation failed: full modules_to_save projector is required")
