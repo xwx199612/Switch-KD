@@ -25,6 +25,7 @@ from .student_trainability import (
     resolve_language_model_lora_targets,
     validate_a2_projector_lora_contract,
     validate_a3_attn_mlp_full_projector_contract,
+    validate_a0_attention_lora_contract,
     validate_language_model_lora_scope,
     validate_projector_trainable_parameters,
     validate_projector_path,
@@ -838,7 +839,7 @@ def _validate_rows(config) -> list[dict[str, Any]]:
     return validated
 
 
-def _maybe_enable_student_lora(config, model):
+def _maybe_enable_student_lora(config, model, *, dry_run: bool = False):
     if not config.student.use_lora:
         return model
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
@@ -858,7 +859,8 @@ def _maybe_enable_student_lora(config, model):
         # prepare_model_for_kbit_training may cast floating parameters; do the
         # exact projector conversion after it and before PEFT copies it.
         conversion = dequantize_trainable_projector(
-            model, config.student.multimodal_projector_path
+            model, config.student.multimodal_projector_path,
+            validate_forward=not dry_run,
         )
         print(f"projector_dequantization={conversion}")
         validate_projector_trainable_parameters(model, config.student.multimodal_projector_path)
@@ -918,7 +920,8 @@ def _maybe_enable_student_lora(config, model):
     return wrapped
 
 
-def _apply_student_train_setup(config, model):
+def _apply_student_train_setup(config, model, *, dry_run: bool = False):
+    attention_targets = config.student.target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
     checkpointing_enabled = bool(config.training.gradient_checkpointing)
     use_reentrant = None
     student_is_gradient_checkpointing = None
@@ -942,10 +945,11 @@ def _apply_student_train_setup(config, model):
         # Do this before PEFT modules_to_save copies the module.
         if not config.student.use_lora:
             conversion = dequantize_trainable_projector(
-                model, config.student.multimodal_projector_path
+                model, config.student.multimodal_projector_path,
+                validate_forward=not dry_run,
             )
             print(f"projector_dequantization={conversion}")
-    model = _maybe_enable_student_lora(config, model)
+    model = _maybe_enable_student_lora(config, model, dry_run=dry_run)
     summary = freeze_student_vision_keep_merger_lm_trainable(
         model,
         use_lora=config.student.use_lora,
@@ -968,10 +972,22 @@ def _apply_student_train_setup(config, model):
         validate_projector_trainable_parameters(model, config.student.multimodal_projector_path)
     if getattr(config.student, "use_projector_lora", False):
         validate_a2_projector_lora_contract(model, projector_path=config.student.multimodal_projector_path)
-    if (set(config.student.target_modules) & set(QWEN3_VL_MLP_TARGETS)
+    if (set(attention_targets) & set(QWEN3_VL_MLP_TARGETS)
             and config.student.train_multimodal_projector
             and not config.student.use_projector_lora):
         validate_a3_attn_mlp_full_projector_contract(
+            model, projector_path=config.student.multimodal_projector_path
+        )
+    elif config.student.use_projector_lora:
+        # A2 is already validated above; keep the explicit mode contract in the
+        # startup path so dry-run and real training exercise the same checks.
+        validate_a2_projector_lora_contract(
+            model, projector_path=config.student.multimodal_projector_path
+        )
+    elif config.student.train_multimodal_projector:
+        _validate_a1_trainable_contract(model, config.student.multimodal_projector_path)
+    elif config.student.use_lora:
+        validate_a0_attention_lora_contract(
             model, projector_path=config.student.multimodal_projector_path
         )
     model.train()
@@ -1146,6 +1162,50 @@ def _gpu_mem_stats() -> tuple[int, int]:
     return int(torch.cuda.memory_allocated()), int(torch.cuda.memory_reserved())
 
 
+def _dtype_summary(model, predicate) -> str:
+    dtypes = sorted({str(parameter.dtype).replace("torch.", "")
+                     for name, parameter in model.named_parameters()
+                     if parameter.requires_grad and predicate(name)})
+    return ",".join(dtypes) if dtypes else "none"
+
+
+def _print_dry_run_summary(config, model) -> None:
+    groups = summarize_trainable_groups(model, config.student.multimodal_projector_path)
+    attention_modules = {
+        name.lower().rsplit(".lora_", 1)[0]
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad and ".lora_" in name.lower()
+        and any(f".{target}." in name.lower() for target in QWEN3_VL_ATTENTION_TARGETS)
+    }
+    mlp_modules = {
+        name.lower().rsplit(".lora_", 1)[0]
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad and ".lora_" in name.lower()
+        and any(f".{target}." in name.lower() for target in QWEN3_VL_MLP_TARGETS)
+    }
+    projector_mode = "modules_to_save.default" if config.student.train_multimodal_projector else (
+        "projector_lora" if config.student.use_projector_lora else "none"
+    )
+    print("Dry-run startup summary")
+    print(f"attention target modules = {len(attention_modules)}")
+    print(f"MLP target modules = {len(mlp_modules)}")
+    print(f"total LoRA target modules = {len(attention_modules | mlp_modules)}")
+    print(f"projector mode = {projector_mode}")
+    print(f"projector LoRA = {groups['projector_lora']}")
+    print(f"vision trainable = {groups['vision_encoder']}")
+    print(f"base LM trainable = {groups['base_lm']}")
+    print(f"other trainable = {groups['other']}")
+    is_attention = lambda name: any(f".{target}." in name.lower() for target in QWEN3_VL_ATTENTION_TARGETS)
+    is_mlp = lambda name: any(f".{target}." in name.lower() for target in QWEN3_VL_MLP_TARGETS)
+    is_projector = lambda name: parameter_matches_module_path(name, config.student.multimodal_projector_path)
+    print(f"attention dtype summary = {_dtype_summary(model, is_attention)}")
+    print(f"MLP dtype summary = {_dtype_summary(model, is_mlp)}")
+    print(f"projector dtype summary = {_dtype_summary(model, is_projector)}")
+    allocated, reserved = _gpu_mem_stats()
+    print(f"GPU allocated/reserved memory = {allocated}/{reserved} bytes")
+    print("dry-run complete: optimizer=not_created forward=not_run backward=not_run checkpoint=not_written")
+
+
 def _synchronize_for_timing(device: Any) -> None:
     import torch
 
@@ -1210,7 +1270,7 @@ def _format_device_map_summary(device_map: Any) -> str:
     return f"{preview}{suffix}"
 
 
-def run_training(config, *, max_steps_override: int | None = None) -> Path:
+def run_training(config, *, max_steps_override: int | None = None, dry_run: bool = False) -> Path | None:
     import torch
 
     if config.distillation.method != "online_align_dbild":
@@ -1237,6 +1297,17 @@ def run_training(config, *, max_steps_override: int | None = None) -> Path:
     print(f"lm_loss_weight={config.distillation.lm_loss_weight}")
     print(f"dbild_loss_weight={config.distillation.dbild_loss_weight}")
     print(f"vsd_loss_weight={config.distillation.vsd_loss_weight}")
+
+    if dry_run:
+        print("dry_run=true")
+        student_model, _student_processor, student_model_path, _student_device_map = _load_student(config)
+        student_model, trainable_summary = _apply_student_train_setup(
+            config, student_model, dry_run=True
+        )
+        _print_dry_run_summary(config, student_model)
+        print(f"student_model_path={student_model_path}")
+        print(f"trainable_param_count={trainable_summary.count}")
+        return None
 
     rows = _validate_rows(config)
     teacher_model, teacher_processor, teacher_model_path, _teacher_device_map, teacher_input_device = _load_teacher(config)

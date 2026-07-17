@@ -248,6 +248,25 @@ def validate_language_model_lora_scope(
     return report
 
 
+def validate_a0_attention_lora_contract(
+    model, *, projector_path: str = QWEN3_VL_PROJECTOR_PATH,
+    expected_layer_count: int = QWEN3_VL_LANGUAGE_LAYER_COUNT,
+) -> dict[str, object]:
+    """Validate A0: QKVO LoRA only, with no projector or other trainables."""
+    report = validate_language_model_lora_scope(
+        model, None, list(QWEN3_VL_ATTENTION_TARGETS),
+        expected_layer_count=expected_layer_count,
+        projector_path=projector_path,
+    )
+    report.update({
+        "attention_module_count": expected_layer_count * len(QWEN3_VL_ATTENTION_TARGETS),
+        "mlp_module_count": 0,
+        "total_module_count": expected_layer_count * len(QWEN3_VL_ATTENTION_TARGETS),
+    })
+    print(f"A0 trainability contract: {report}")
+    return report
+
+
 def _is_bnb_4bit_linear(module) -> bool:
     """Return whether *module* is specifically a bitsandbytes 4-bit linear."""
     try:

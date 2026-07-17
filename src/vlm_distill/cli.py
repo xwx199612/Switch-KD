@@ -68,6 +68,12 @@ def main() -> None:
     ):
         command_parser = subparsers.add_parser(command)
         command_parser.add_argument("--config", type=Path, required=True)
+        if command == "train":
+            command_parser.add_argument(
+                "--dry-run",
+                action="store_true",
+                help="Load and prepare the student, validate trainability, then exit without training.",
+            )
         if command == "validate-manifest":
             command_parser.add_argument(
                 "--split",
@@ -208,7 +214,9 @@ def main() -> None:
 
     if args.command == "train":
         print("Training backend: online_align_dbild")
-        artifact = run_training(config)
+        artifact = run_training(config, dry_run=True) if args.dry_run else run_training(config)
+        if args.dry_run:
+            return
         print(f"OK student artifact written: {artifact}")
         return
 
