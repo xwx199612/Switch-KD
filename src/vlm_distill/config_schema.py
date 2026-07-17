@@ -56,6 +56,7 @@ class StudentConfig:
     inference_adapter_path: Path | None = None
     inference_model_path: str | None = None
     device_map: str | None = "auto"
+    torch_dtype: str | None = None
     attn_implementation: str = "sdpa"
     use_lora: bool = True
     load_adapter: bool = False
@@ -155,6 +156,11 @@ class EvaluationConfig:
 
 
 @dataclass
+class PredictionConfig:
+    debug_inference_parity: bool = False
+
+
+@dataclass
 class PipelineConfig:
     data: DataConfig
     teacher: TeacherConfig
@@ -163,6 +169,7 @@ class PipelineConfig:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     distillation: DistillationConfig = field(default_factory=DistillationConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
+    prediction: PredictionConfig = field(default_factory=PredictionConfig)
 
 
 OUTPUT_ROOT_ENV_VARS = (
@@ -189,6 +196,7 @@ def load_config(path: str | Path) -> PipelineConfig:
         training=TrainingConfig(**raw.get("training", {})),
         distillation=_build_distillation_config(raw.get("distillation", {})),
         evaluation=_build_evaluation_config(raw.get("evaluation", {})),
+        prediction=PredictionConfig(**raw.get("prediction", {})),
     )
 
 
@@ -295,6 +303,12 @@ def _build_data_config(raw: dict[str, Any]) -> DataConfig:
 
 def _build_student_config(raw: dict[str, Any]) -> StudentConfig:
     values = dict(raw)
+    from .student_trainability import validate_configured_lora_targets
+    configured_targets = values.get("target_modules", [])
+    if not isinstance(configured_targets, list):
+        raise ValueError("student.target_modules must be a list of module target names.")
+    if configured_targets:
+        values["target_modules"] = validate_configured_lora_targets(configured_targets)
     layers_to_transform = values.get("lora_layers_to_transform")
     if layers_to_transform is not None:
         if not isinstance(layers_to_transform, list) or not layers_to_transform:
@@ -344,6 +358,8 @@ def _build_student_config(raw: dict[str, Any]) -> StudentConfig:
         configured = {str(item) for item in values.get("target_modules", [])}
         if "model.visual.merger" in configured or any("deepstack_merger" in item for item in configured):
             raise ValueError("A2 must not place the projector or deepstack merger in target_modules/modules_to_save.")
+    if values.get("train_multimodal_projector", False) and values.get("use_projector_lora", False):
+        raise ValueError("full projector and projector LoRA are mutually exclusive.")
     artifact_mode = str(values.get("merged_artifact_mode", "bf16_standalone"))
     if artifact_mode not in {
         "mixed_4bit_bf16", "bf16_standalone", "adapter_plus_projector",

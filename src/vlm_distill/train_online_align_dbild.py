@@ -15,12 +15,16 @@ from .loss_switch_kd import _causal_lm_loss, full_dynamic_bidirectional_logits_d
 from .model_loading import apply_attn_implementation, resolve_model_path
 from .student_trainability import (
     QWEN3_VL_PROJECTOR_PATH,
+    QWEN3_VL_ATTENTION_TARGETS,
+    QWEN3_VL_MLP_TARGETS,
     parameter_matches_module_path,
     summarize_trainable_groups,
     dequantize_trainable_projector,
     prepare_projector_for_lora,
     resolve_a2_lora_targets,
+    resolve_language_model_lora_targets,
     validate_a2_projector_lora_contract,
+    validate_a3_attn_mlp_full_projector_contract,
     validate_language_model_lora_scope,
     validate_projector_trainable_parameters,
     validate_projector_path,
@@ -467,6 +471,7 @@ def freeze_student_vision_keep_merger_lm_trainable(
     train_multimodal_projector: bool = False,
     use_projector_lora: bool = False,
     multimodal_projector_path: str = QWEN3_VL_PROJECTOR_PATH,
+    configured_targets: list[str] | None = None,
 ) -> TrainableSummary:
     trainable_names: list[str] = []
     trainable_tensor_count = 0
@@ -477,16 +482,19 @@ def freeze_student_vision_keep_merger_lm_trainable(
             parameter.requires_grad_(False)
             continue
 
-        is_attention_lora = "lora" in lowered and any(
-            target in lowered for target in ("q_proj", "k_proj", "v_proj", "o_proj")
-        )
+        lora_targets = configured_targets or list(QWEN3_VL_ATTENTION_TARGETS)
+        is_attention_lora = "lora" in lowered and any(target in lowered for target in QWEN3_VL_ATTENTION_TARGETS)
+        is_mlp_lora = "lora" in lowered and any(target in lowered for target in QWEN3_VL_MLP_TARGETS)
         is_projector_lora = ("lora_a" in lowered or "lora_b" in lowered) and (
             any(parameter_matches_module_path(name, f"{multimodal_projector_path}.{child}")
                 for child in ("linear_fc1", "linear_fc2"))
             if use_projector_lora else parameter_matches_module_path(name, multimodal_projector_path)
         )
         is_peft_original_copy = ".original_module." in name
-        should_train = (use_lora and (is_attention_lora or is_projector_lora)) or (
+        should_train = (use_lora and (
+            (is_attention_lora or is_mlp_lora) and any(target in lowered for target in lora_targets)
+            or is_projector_lora
+        )) or (
             train_multimodal_projector and not is_peft_original_copy
             and parameter_matches_module_path(name, multimodal_projector_path)
         )
@@ -518,15 +526,12 @@ def freeze_student_vision_keep_merger_lm_trainable(
     print(f"Attention LoRA parameters: {groups['attention_lora']}")
     print(f"Projector LoRA parameters: {groups['projector_lora']}")
     print(f"Projector full-train parameters: {groups['projector_full_train']}")
-    print(f"LLM MLP LoRA parameters: {groups['llm_mlp_lora']}")
+    print(f"MLP LoRA parameters: {groups['llm_mlp_lora']}")
     print(f"Vision encoder parameters: {groups['vision_encoder']}")
-    print(f"Base LLM parameters: {groups['base_llm']}")
+    print(f"Base LM parameters: {groups['base_lm']}")
     print(f"Other parameters: {groups['other']}")
     if groups["vision_encoder"] != 0:
         raise RuntimeError("Trainability validation failed: vision encoder parameters are trainable.")
-    if any("lora" in name.lower() and any(x in name.lower() for x in ("gate_proj", "up_proj", "down_proj"))
-           for name, p in model.named_parameters() if p.requires_grad):
-        raise RuntimeError("Trainability validation failed: MLP LoRA parameters are trainable.")
     if train_multimodal_projector and groups["projector"] == 0:
         raise RuntimeError("Trainability validation failed: configured projector has no trainable parameters.")
     if train_multimodal_projector:
@@ -859,6 +864,14 @@ def _maybe_enable_student_lora(config, model):
         validate_projector_trainable_parameters(model, config.student.multimodal_projector_path)
     attention_targets = config.student.target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
     target_modules = attention_targets
+    if set(target_modules) & set(QWEN3_VL_MLP_TARGETS):
+        resolved_lm = resolve_language_model_lora_targets(model, target_modules)
+        print(
+            "A3 resolved LM LoRA targets: "
+            f"attention_module_count={resolved_lm['attention_module_count']} "
+            f"mlp_module_count={resolved_lm['mlp_module_count']} "
+            f"total_module_count={resolved_lm['total_module_count']}"
+        )
     if projector_targets:
         resolved = resolve_a2_lora_targets(model, config.student.multimodal_projector_path)
         target_modules = list(resolved["all_targets"])
@@ -896,7 +909,7 @@ def _maybe_enable_student_lora(config, model):
     validate_projector_trainable_parameters(wrapped, config.student.multimodal_projector_path)
     if hasattr(config.student, "lora_layers_to_transform"):
         validate_language_model_lora_scope(
-            wrapped, layers_to_transform, attention_targets,
+            wrapped, layers_to_transform, target_modules,
             projector_path=config.student.multimodal_projector_path,
             allowed_projector_lora_paths=projector_targets,
         )
@@ -939,11 +952,28 @@ def _apply_student_train_setup(config, model):
         train_multimodal_projector=config.student.train_multimodal_projector,
         use_projector_lora=getattr(config.student, "use_projector_lora", False),
         multimodal_projector_path=config.student.multimodal_projector_path,
+        configured_targets=attention_targets,
     )
+    if set(attention_targets) & set(QWEN3_VL_MLP_TARGETS):
+        groups = summarize_trainable_groups(model, config.student.multimodal_projector_path)
+        print("Experiment mode: A3 attention + MLP LoRA + full projector")
+        print(f"Attention LoRA: targets={','.join(QWEN3_VL_ATTENTION_TARGETS)} module_count=144 parameter_count={groups['attention_lora']}")
+        print(f"MLP LoRA: targets={','.join(QWEN3_VL_MLP_TARGETS)} module_count=108 parameter_count={groups['llm_mlp_lora']}")
+        print("Full projector: path=model.visual.merger storage=modules_to_save.default dtype=bfloat16")
+        print("projector LoRA parameter count = 0")
+        print(f"vision encoder trainable count = {groups['vision_encoder']}")
+        print(f"base LM trainable count = {groups['base_lm']}")
+        print(f"other trainable count = {groups['other']}")
     if config.student.train_multimodal_projector:
         validate_projector_trainable_parameters(model, config.student.multimodal_projector_path)
     if getattr(config.student, "use_projector_lora", False):
         validate_a2_projector_lora_contract(model, projector_path=config.student.multimodal_projector_path)
+    if (set(config.student.target_modules) & set(QWEN3_VL_MLP_TARGETS)
+            and config.student.train_multimodal_projector
+            and not config.student.use_projector_lora):
+        validate_a3_attn_mlp_full_projector_contract(
+            model, projector_path=config.student.multimodal_projector_path
+        )
     model.train()
     return model, summary
 

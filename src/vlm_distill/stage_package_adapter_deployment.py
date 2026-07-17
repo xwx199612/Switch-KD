@@ -9,6 +9,7 @@ from pathlib import Path
 from .config_schema import PipelineConfig
 from .deployment_loader import MAIN_MERGER_PATHS, projector_checksum_from_adapter_checkpoint
 from .model_loading import resolve_model_path
+from .student_trainability import QWEN3_VL_ATTENTION_TARGETS, QWEN3_VL_MLP_TARGETS
 
 
 def package_high_fidelity_adapter_deployment(config: PipelineConfig) -> Path:
@@ -23,6 +24,17 @@ def package_high_fidelity_adapter_deployment(config: PipelineConfig) -> Path:
     adapter = (student.inference_adapter_path or student.adapter_dir).resolve()
     if not (adapter / "adapter_config.json").exists():
         raise FileNotFoundError(f"PEFT adapter is missing adapter_config.json: {adapter}")
+    adapter_config = json.loads((adapter / "adapter_config.json").read_text(encoding="utf-8"))
+    adapter_targets = adapter_config.get("target_modules", [])
+    configured_targets = list(student.target_modules or adapter_targets)
+    if set(adapter_targets) and set(adapter_targets) != set(configured_targets):
+        raise ValueError(
+            "Adapter target_modules do not match pipeline config: "
+            f"adapter={sorted(adapter_targets)!r}, config={sorted(configured_targets)!r}"
+        )
+    unknown = set(configured_targets) - set(QWEN3_VL_ATTENTION_TARGETS) - set(QWEN3_VL_MLP_TARGETS)
+    if unknown:
+        raise ValueError(f"Unsupported deployment LoRA targets: {sorted(unknown)}")
     output = (student.deployment_artifact_path or student.merged_model_path or student.output_dir / "deploy_4bit_bf16_adapter").resolve()
     if output == base_model:
         raise ValueError("Refusing to package into the base model directory")
@@ -60,6 +72,12 @@ def package_high_fidelity_adapter_deployment(config: PipelineConfig) -> Path:
         "adapter_path": "adapter",
         "processor_path": "processor" if processor_dir.exists() else None,
         "projector_mode": projector_mode,
+        "experiment_mode": (
+            "attention_mlp_lora_full_projector"
+            if set(configured_targets) & set(QWEN3_VL_MLP_TARGETS) and student.train_multimodal_projector
+            else ("attention_lora_full_projector" if student.train_multimodal_projector
+                  else ("attention_projector_lora" if student.use_projector_lora else "attention_lora"))
+        ),
         "projector_path": "model.visual.merger",
         "projector_source": "adapter" if projector_mode == "modules_to_save" else None,
         "projector_checksum": (
@@ -67,6 +85,10 @@ def package_high_fidelity_adapter_deployment(config: PipelineConfig) -> Path:
             if projector_mode == "modules_to_save" else None
         ),
         "projector_lora_targets": MAIN_MERGER_PATHS if projector_mode == "projector_lora" else [],
+        "lora_target_groups": {
+            "attention": [target for target in QWEN3_VL_ATTENTION_TARGETS if target in configured_targets],
+            "mlp": [target for target in QWEN3_VL_MLP_TARGETS if target in configured_targets],
+        },
         "excluded_from_quantization": MAIN_MERGER_PATHS,
         "quantization": "4bit_nf4",
         "attn_implementation": student.attn_implementation,

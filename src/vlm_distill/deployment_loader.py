@@ -13,6 +13,7 @@ import torch
 
 from .mixed_precision import build_mixed_precision_quantization_config
 from .model_loading import apply_attn_implementation, resolve_model_path
+from .student_trainability import QWEN3_VL_ATTENTION_TARGETS, QWEN3_VL_MLP_TARGETS
 
 MAIN_MERGER_PATHS = [
     "model.visual.merger.linear_fc1",
@@ -100,26 +101,34 @@ def _summary(model: Any) -> dict[str, Any]:
         linear4bit = bnb.nn.Linear4bit
     except ImportError:
         linear4bit = ()
-    counts = {"linear4bit": 0, "attention_lora": 0, "projector_lora": 0,
-              "modules_to_save": 0, "vision_trainable": 0, "projector_lora_names": []}
+    counts = {"linear4bit": 0, "attention_lora": 0, "mlp_lora": 0, "projector_lora": 0,
+              "modules_to_save": 0, "vision_trainable": 0, "projector_lora_names": [],
+              "attention_lora_names": [], "mlp_lora_names": []}
     attention_dtypes: set[str] = set()
+    mlp_dtypes: set[str] = set()
     projector_dtypes: set[str] = set()
     for name, module in model.named_modules():
         if linear4bit and isinstance(module, linear4bit) and "language_model" in name:
             counts["linear4bit"] += 1
         if _is_lora(name):
             is_projector = "visual.merger.linear_fc" in name
-            counts["projector_lora" if is_projector else "attention_lora"] += 1
+            is_mlp = any(f".{target}.lora_" in name.lower() for target in QWEN3_VL_MLP_TARGETS)
+            counts["projector_lora" if is_projector else ("mlp_lora" if is_mlp else "attention_lora")] += 1
             if is_projector:
                 counts["projector_lora_names"].append(name)
+            elif is_mlp:
+                counts["mlp_lora_names"].append(name)
+            else:
+                counts["attention_lora_names"].append(name)
             for parameter in module.parameters(recurse=False):
-                (projector_dtypes if is_projector else attention_dtypes).add(str(parameter.dtype))
+                (projector_dtypes if is_projector else (mlp_dtypes if is_mlp else attention_dtypes)).add(str(parameter.dtype))
         if "modules_to_save" in name and "default" in name:
             counts["modules_to_save"] += sum(1 for _ in module.parameters(recurse=False))
     for name, parameter in model.named_parameters():
         if "visual" in name and "visual.merger" not in name and parameter.requires_grad:
             counts["vision_trainable"] += parameter.numel()
     counts["attention_dtypes"] = sorted(attention_dtypes)
+    counts["mlp_dtypes"] = sorted(mlp_dtypes)
     counts["projector_dtypes"] = sorted(projector_dtypes)
     return counts
 
@@ -146,6 +155,8 @@ def validate_high_fidelity_deployment(model: Any, config: Any = None, *, smoke_i
         raise RuntimeError("deployment validation failed: adapter is merged")
     if any("torch.int" in dtype or "torch.uint" in dtype for dtype in summary["attention_dtypes"] + summary["projector_dtypes"]):
         raise RuntimeError("deployment validation failed: adapter tensors must remain floating point")
+    if any("torch.int" in dtype or "torch.uint" in dtype for dtype in summary["mlp_dtypes"]):
+        raise RuntimeError("deployment validation failed: MLP adapter tensors must remain floating point")
 
     mode = getattr(getattr(config, "student", config), "train_multimodal_projector", False) if config else False
     use_projector_lora = getattr(getattr(config, "student", config), "use_projector_lora", False) if config else False
@@ -185,6 +196,23 @@ def validate_high_fidelity_deployment(model: Any, config: Any = None, *, smoke_i
         raise RuntimeError("A2 validation failed: modules_to_save projector is not allowed")
     if mode and summary["projector_lora"]:
         raise RuntimeError("A1 validation failed: projector LoRA is not allowed")
+    configured_targets = list(getattr(getattr(config, "student", config), "target_modules", []) or []) if config else []
+    if mode and set(configured_targets) & set(QWEN3_VL_MLP_TARGETS):
+        expected_attn = set(QWEN3_VL_ATTENTION_TARGETS)
+        expected_mlp = set(QWEN3_VL_MLP_TARGETS)
+        def _target_modules(names):
+            return {name.rsplit(".lora_", 1)[0] for name in names}
+        attn_modules = {name for name in _target_modules(summary["attention_lora_names"])
+                        if any(f".{target}." in name for target in expected_attn)}
+        mlp_modules = {name for name in _target_modules(summary["mlp_lora_names"])
+                       if any(f".{target}." in name for target in expected_mlp)}
+        if len(attn_modules) != 36 * 4 or len(mlp_modules) != 36 * 3:
+            raise RuntimeError(
+                "A3 deployment validation failed: expected 144 attention and 108 MLP LoRA modules, "
+                f"got {len(attn_modules)} and {len(mlp_modules)}"
+            )
+        if summary["projector_lora"] or summary["modules_to_save"] <= 0:
+            raise RuntimeError("A3 deployment validation failed: full modules_to_save projector is required")
     if smoke_inputs is not None:
         with torch.no_grad():
             outputs = model(**smoke_inputs)
@@ -194,9 +222,12 @@ def validate_high_fidelity_deployment(model: Any, config: Any = None, *, smoke_i
     print(f"language_model Linear4bit count: {summary['linear4bit']}")
     print("main merger BF16 linear count: 2")
     print(f"attention LoRA tensor count: {summary['attention_lora']}")
+    print(f"MLP LoRA tensor count: {summary['mlp_lora']}")
     print(f"projector LoRA tensor count: {summary['projector_lora']}")
     print(f"modules_to_save tensor count: {summary['modules_to_save']}")
     print(f"Attention LoRA dtype summary: {summary['attention_dtypes']}")
+    print(f"MLP LoRA dtype summary: {summary['mlp_dtypes']}")
+    print(f"Modules-to-save projector dtype summary: {summary['projector_dtypes']}")
     print(f"Projector LoRA dtype summary: {summary['projector_dtypes']}")
     return summary
 
@@ -238,7 +269,17 @@ def load_high_fidelity_adapter_deployment(
         train_multimodal_projector=projector_mode == "modules_to_save",
         use_projector_lora=projector_mode == "projector_lora",
         projector_checksum=(metadata.get("projector_checksum") or projector_checksum_from_adapter_checkpoint(adapter_path)),
+        target_modules=[*metadata.get("lora_target_groups", {}).get("attention", []),
+                        *metadata.get("lora_target_groups", {}).get("mlp", [])],
     ))
     validate_high_fidelity_deployment(model, validation_config)
+    print(f"prediction_model_source={metadata.get('artifact_mode')}")
+    print(f"experiment_mode={metadata.get('experiment_mode', '<unspecified>')}")
+    print("adapter_merged=false")
+    print(f"language_model_quantization={metadata.get('quantization', '4bit_nf4')}")
+    print("main_merger_dtype=bfloat16")
+    print(f"attention_lora_active={bool(metadata.get('lora_target_groups', {}).get('attention'))}")
+    print(f"mlp_lora_active={bool(metadata.get('lora_target_groups', {}).get('mlp'))}")
+    print(f"modules_to_save_projector_active={metadata.get('projector_mode') == 'modules_to_save'}")
     print("High-fidelity quantized adapter deployment loaded; adapter_merged=false")
     return model, processor

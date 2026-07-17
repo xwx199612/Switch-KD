@@ -55,12 +55,26 @@ artifact: a 4-bit NF4 language model, BF16 main merger, and floating BF16 PEFT a
 adapter is never merged, providing high-fidelity low-volume deployment. It is not a single
 merged checkpoint; `deployment_loader` must load the referenced base and attach the adapter.
 
-Package and use one of the A0/A1/A2 deployment configs:
+Stage A modes are:
+
+```text
+A0 = Attention LoRA only
+A1 = Attention LoRA + Full Projector
+A2 = Attention LoRA + Projector LoRA
+A3 = Attention LoRA + MLP LoRA + Full Projector
+```
+
+A3 tests whether adding the language-model MLP nonlinear feature transformation to distillation,
+in addition to attention routing, improves Android TV full-screen parsing, text recognition, and
+bbox grounding. Its high-fidelity deployment is a 4-bit NF4 LM base plus floating attention and
+MLP LoRA plus a BF16 full-trained projector; the adapter remains active and is never merged.
+
+Package and use the A3 deployment config (the A0/A1/A2 configs remain available):
 
 ```bash
-vlm-distill package-adapter --config configs/lora_ablation/deploy/stage1_a2_4bit_base_bf16_adapter.yaml
-vlm-distill predict --config configs/lora_ablation/deploy/stage1_a2_4bit_base_bf16_adapter.yaml
-vlm-distill evaluate-predictions --config configs/lora_ablation/deploy/stage1_a2_4bit_base_bf16_adapter.yaml
+vlm-distill package-adapter --config configs/lora_ablation/deploy/stage1_a3_4bit_base_bf16_adapter.yaml
+vlm-distill predict --config configs/lora_ablation/deploy/stage1_a3_4bit_base_bf16_adapter.yaml
+vlm-distill evaluate-predictions --config configs/lora_ablation/deploy/stage1_a3_4bit_base_bf16_adapter.yaml
 ```
 
 ---

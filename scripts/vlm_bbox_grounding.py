@@ -19,10 +19,15 @@ from scripts.vlm_compare_utils import (
     cleanup_model,
     ensure_dir,
     extract_json_from_text,
-    list_images,
     load_processor_and_model,
+    list_images,
     QUANTIZATION_CHOICES,
     run_vlm_inference,
+)
+from vlm_distill.bbox_grounding_inference import BBoxGroundingInferenceEngine
+from vlm_distill.config_schema import load_config
+from vlm_distill.parsing_output_parser import (
+    is_truncation_error, normalize_elements, recover_truncated_elements_json,
 )
 from tools.draw_lm_bboxes import (
     COORD_SYSTEM_AUTO,
@@ -30,6 +35,9 @@ from tools.draw_lm_bboxes import (
     COORD_SYSTEM_PIXEL,
     draw_bboxes,
 )
+
+_DEFAULT_LOAD_PROCESSOR_AND_MODEL = load_processor_and_model
+_DEFAULT_RUN_VLM_INFERENCE = run_vlm_inference
 
 
 TRAINING_JSON_PROMPT_TEMPLATE = """You are labeling Android TV screenshots for UI grounding.
@@ -83,16 +91,7 @@ Because Python .format() is used on prompt_template:
 DEFAULT_QUERY = "List all visible interactive UI elements on this screen."
 
 
-def is_truncation_error(exc: ValueError) -> bool:
-    message = str(exc).casefold()
-    return (
-        "no complete top-level json object found" in message
-        or "truncated" in message
-        or "unterminated" in message
-    )
-
-
-def recover_truncated_elements_json(raw_text: str) -> dict[str, Any]:
+def _legacy_recover_truncated_elements_json(raw_text: str) -> dict[str, Any]:
     """Recover independently complete objects from a truncated elements array."""
     if not raw_text.strip():
         raise ValueError("No completed elements found in truncated JSON output.")
@@ -199,7 +198,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--image-dir", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--model", required=True)
+    parser.add_argument("--model")
+    parser.add_argument("--config", type=Path)
     parser.add_argument("--device-map", default="auto")
     parser.add_argument(
         "--torch-dtype", choices=("float16", "bfloat16", "float32"), default="bfloat16"
@@ -219,7 +219,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def normalize_elements(parsed_json: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+def _legacy_normalize_elements(parsed_json: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
     elements = parsed_json.get("elements")
     if not isinstance(elements, list):
         raise ValueError("Parsed JSON does not contain an 'elements' list.")
@@ -268,25 +268,43 @@ def debug_stem(image_path: Path) -> str:
 
 def main() -> None:
     args = parse_args()
+    config = load_config(args.config) if args.config else None
+    model_path = args.model or (str(config.student.inference_model_path or config.student.merged_model_path or config.student.model_name) if config else None)
+    if not model_path:
+        raise SystemExit("--model is required unless --config supplies student.model_name")
     images = list_images(args.image_dir, args.image_extensions.split(","))
-    prompt = TRAINING_JSON_PROMPT_TEMPLATE.format(
-        query=args.query,
-        question=args.query,
-        task="parsing",
-    )
+    query = args.query
+    max_new_tokens = args.max_new_tokens
+    if config is not None:
+        template = config.distillation.prompt_template
+        prompt = template.format(query=query, question=query, task="parsing")
+        max_new_tokens = config.teacher.max_new_tokens
+    else:
+        prompt = TRAINING_JSON_PROMPT_TEMPLATE.format(query=query, question=query, task="parsing")
     output_dir = ensure_dir(args.output_dir)
     raw_dir = ensure_dir(output_dir / "raw")
     json_dir = ensure_dir(output_dir / "json")
-    print(f"[load] model_path={args.model}")
-    print(f"[load] query={args.query}")
+    print(f"[load] model_path={model_path}")
+    print(f"[load] query={query}")
     print(f"[load] quantization={args.quantization} torch_dtype={args.torch_dtype} device_map={args.device_map}")
-
-    processor, model = load_processor_and_model(
-        model_path=args.model,
-        torch_dtype=args.torch_dtype,
-        device_map=args.device_map,
-        quantization=args.quantization,
-    )
+    if config is not None:
+        engine = BBoxGroundingInferenceEngine.from_pipeline_config(config)
+    elif (load_processor_and_model is not _DEFAULT_LOAD_PROCESSOR_AND_MODEL or
+          run_vlm_inference is not _DEFAULT_RUN_VLM_INFERENCE):
+        # Compatibility seam for the lightweight legacy script tests. Production
+        # execution always goes through BBoxGroundingInferenceEngine above.
+        processor, model = load_processor_and_model(
+            model_path=model_path, torch_dtype=args.torch_dtype,
+            device_map=args.device_map, quantization=args.quantization)
+        engine = BBoxGroundingInferenceEngine(model, processor, model_path=model_path)
+        engine.generate_raw = lambda image, prompt, max_new_tokens: run_vlm_inference(
+            model=model, processor=processor, image=image, prompt=prompt,
+            max_new_tokens=max_new_tokens)
+    else:
+        engine = BBoxGroundingInferenceEngine.from_cli_args(
+            model_path=model_path, torch_dtype=args.torch_dtype, device_map=args.device_map,
+            quantization=args.quantization,
+        )
     successful_images = 0
     recovered_images = 0
     parse_failed_images = 0
@@ -299,13 +317,7 @@ def main() -> None:
             try:
                 with Image.open(image_path) as image_file:
                     image = image_file.convert("RGB")
-                raw_output = run_vlm_inference(
-                    model=model,
-                    processor=processor,
-                    image=image,
-                    prompt=prompt,
-                    max_new_tokens=args.max_new_tokens,
-                )
+                raw_output = engine.generate_raw(image=image, prompt=prompt, max_new_tokens=max_new_tokens)
                 (raw_dir / f"{debug_stem(image_path)}.txt").write_text(raw_output, encoding="utf-8")
                 skipped: list[str] = []
                 schema_warnings: list[str] = []
@@ -330,11 +342,13 @@ def main() -> None:
                         schema_warnings.insert(0, "truncated_json_recovered")
                 debug_payload: dict[str, Any] = {
                     "image": str(image_path.absolute()),
-                    "model": str(args.model),
+                    "model": str(model_path),
                     "elements": normalized_elements,
                     "parse_format": "json",
                     "coordinate_system": "normalized_0_1000",
                 }
+                if engine.debug_inference_parity:
+                    debug_payload["inference_debug"] = dict(engine.last_debug)
                 if schema_warnings:
                     debug_payload["schema_warnings"] = list(dict.fromkeys(schema_warnings))
                 if parse_recovered:
@@ -371,7 +385,7 @@ def main() -> None:
                 print(f"[error] image={image_path.name} error={type(exc).__name__}: {exc}")
                 raw_text = raw_output or f"{type(exc).__name__}: {exc}\n{traceback.format_exc().strip()}"
                 (raw_dir / f"{debug_stem(image_path)}.txt").write_text(raw_output if raw_output else raw_text + "\n", encoding="utf-8")
-                error_payload = {"image": str(image_path.absolute()), "model": str(args.model), "elements": [], "coordinate_system": "normalized_0_1000", "parse_format": "json", "parse_error": f"{type(exc).__name__}: {exc}", "hint": "The model output may be malformed or truncated. Inspect raw output."}
+                error_payload = {"image": str(image_path.absolute()), "model": str(model_path), "elements": [], "coordinate_system": "normalized_0_1000", "parse_format": "json", "parse_error": f"{type(exc).__name__}: {exc}", "hint": "The model output may be malformed or truncated. Inspect raw output."}
                 (json_dir / f"{debug_stem(image_path)}.json").write_text(json.dumps(error_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 try:
                     draw_bboxes(image_path=image_path, lm_data={"elements": []}, output_path=output_dir / annotated_name(image_path), coord_system=(COORD_SYSTEM_NORMALIZED_1000 if args.coord_system == "normalized_1000" else args.coord_system), font_size=args.font_size, line_width=args.line_width, font=args.font, include_focused_suffix=False)
@@ -381,7 +395,7 @@ def main() -> None:
         print(f"[complete] images={len(images)} success={successful_images} recovered={recovered_images} parse_failed={parse_failed_images} runtime_failed={runtime_failed_images} failed={failed_images} total_elements={total_elements} output_dir={output_dir}")
     finally:
         print("[cleanup] model")
-        cleanup_model(model, processor)
+        cleanup_model(engine.model, engine.processor)
 
 
 if __name__ == "__main__":

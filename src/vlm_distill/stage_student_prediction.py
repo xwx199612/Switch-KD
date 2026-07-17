@@ -10,7 +10,7 @@ from typing import Protocol
 from .config_schema import PipelineConfig, resolve_prediction_path
 from .data_manifest import VlmSample, read_jsonl
 from .model_loading import apply_attn_implementation, resolve_model_path
-from .deployment_loader import load_high_fidelity_adapter_deployment
+from .bbox_grounding_inference import BBoxGroundingInferenceEngine
 from .model_output_artifacts import refresh_parsing_sidecar_reports, write_parsing_sidecar
 from .stage_teacher_precompute import (
     _format_prompt as _format_teacher_prompt,
@@ -56,125 +56,23 @@ class MockStudent:
 class HuggingFaceStudent:
     def __init__(self, config: PipelineConfig):
         self.config = config
-        try:
-            import torch
-            from transformers import AutoProcessor, BitsAndBytesConfig
-            try:
-                from transformers import AutoModelForImageTextToText as AutoModelForVLM
-            except ImportError:  # pragma: no cover - fallback for older transformers
-                from transformers import AutoModelForVision2Seq as AutoModelForVLM
-        except ImportError as exc:
-            raise RuntimeError(
-                "Install torch, transformers and bitsandbytes to use the Hugging Face student backend."
-            ) from exc
-
-        model_selection = _resolve_prediction_model_selection(config)
-        if model_selection.deployment_path is not None:
-            self.model, self.processor = load_high_fidelity_adapter_deployment(model_selection.deployment_path)
-            print(
-                "prediction_model_source=4bit_base_bf16_adapter\n"
-                f"base_model_path={getattr(getattr(self.model, 'config', None), '_name_or_path', 'deployment metadata')}\n"
-                f"adapter_path={model_selection.deployment_path / 'adapter'}\n"
-                "adapter_merged=false\nlanguage_model_quantization=4bit_nf4\nmain_merger_dtype=bfloat16"
-            )
-            return
-        model_path = model_selection.model_path
-        adapter_path = _resolve_prediction_adapter_path(config)
-        should_load_adapter = model_selection.should_load_adapter
-        print(
-            "Initializing Hugging Face student backend: "
-            f"prediction_model_source={model_selection.source}, "
-            f"model_path={model_path}, "
-            f"adapter={adapter_path if should_load_adapter else 'disabled'}, "
-            f"load_adapter={config.student.load_adapter}, "
-            f"merge_adapter={config.student.merge_adapter}, "
-            f"quantization={config.student.quantization}"
-        )
-        self.processor = AutoProcessor.from_pretrained(
-            model_path,
-            trust_remote_code=True,
-            use_fast=False,
-            local_files_only=True,
-        )
-
-        model_kwargs: dict = {
-            "device_map": "auto",
-            "trust_remote_code": True,
-        }
-        apply_attn_implementation(model_kwargs, config.student.attn_implementation)
-        if config.student.quantization == "4bit":
-            model_kwargs["quantization_config"] = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True,
-            )
-        elif config.student.quantization == "8bit":
-            model_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
-
-        model_kwargs["local_files_only"] = True
-        self.model = AutoModelForVLM.from_pretrained(model_path, **model_kwargs)
-        if should_load_adapter:
-            _validate_prediction_adapter_path(adapter_path)
-            print(f"Loading prediction adapter from {adapter_path}")
-            try:
-                from peft import PeftModel
-            except ImportError as exc:
-                raise RuntimeError(
-                    "Install peft to load prediction adapters, or disable adapter loading for prediction."
-                ) from exc
-
-            self.model = PeftModel.from_pretrained(
-                self.model,
-                str(adapter_path),
-                local_files_only=True,
-            )
-            if config.student.merge_adapter:
-                if config.student.quantization in {"4bit", "8bit"}:
-                    print(
-                        "Warning: merge_adapter=true with 4bit/8bit quantization may be unsupported "
-                        "or produce incorrect behavior. Disable quantization or set merge_adapter=false "
-                        "if adapter merging fails."
-                    )
-                self.model = self.model.merge_and_unload()
-        self.model.eval()
+        self.engine = BBoxGroundingInferenceEngine.from_pipeline_config(config)
+        self.model, self.processor = self.engine.model, self.engine.processor
 
     def answer(self, sample: VlmSample) -> dict:
         prompt = _format_teacher_prompt(self.config, sample)
         image_path = self.config.data.image_root / sample.image
         image = _load_teacher_image(image_path, self.config.training.image_resize)
 
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ]
-        text = self.processor.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        inputs = self.processor(text=[text], images=[image], return_tensors="pt").to(self.model.device)
-        output_ids = self.model.generate(
-            **inputs,
-            do_sample=False,
-            max_new_tokens=self.config.teacher.max_new_tokens,
-        )
-        generated_ids = output_ids[:, inputs["input_ids"].shape[1] :]
-        answer = self.processor.batch_decode(
-            generated_ids,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
-        )[0]
-        return {
+        answer = self.engine.generate_raw(image, prompt, self.config.teacher.max_new_tokens)
+        result = {
             "student_answer": answer.strip(),
             "student_confidence": 1.0,
             "student_rationale": "Generated by Hugging Face student backend.",
         }
+        if self.engine.debug_inference_parity:
+            result["inference_debug"] = dict(self.engine.last_debug)
+        return result
 
     def tokenize_student_answer(self, answer: str) -> list[int]:
         tokenizer = getattr(self.processor, "tokenizer", None)
@@ -334,11 +232,14 @@ def _predict_sample(student: StudentBackend, sample: VlmSample) -> tuple[dict | 
     parsed = parse_parsing_answer(raw_model_output)
     if not parsed.get("usable"):
         return None, raw_model_output
-    return {
+    result = {
         **_base_prediction_row(sample),
         "elements": parsed["elements"],
         "coordinate_system": COORDINATE_SYSTEM_NORMALIZED_0_1000,
-    }, raw_model_output
+    }
+    if prediction.get("inference_debug"):
+        result["inference_debug"] = prediction["inference_debug"]
+    return result, raw_model_output
 
 
 def _load_completed_ids(path: Path) -> set[str]:

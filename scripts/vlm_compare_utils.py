@@ -243,64 +243,12 @@ def run_vlm_inference(
     prompt: str,
     max_new_tokens: int,
 ) -> str:
-    messages = build_qwen_messages(image, prompt)
-    if hasattr(processor, "apply_chat_template"):
-        chat_text = processor.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-    else:
-        chat_text = prompt
-
-    qwen_images = None
-    qwen_videos = None
-    try:
-        from qwen_vl_utils import process_vision_info
-
-        qwen_images, qwen_videos = process_vision_info(messages)
-    except ImportError:
-        qwen_images, qwen_videos = None, None
-
-    processor_kwargs: dict[str, Any] = {
-        "text": [chat_text],
-        "return_tensors": "pt",
-    }
-    if qwen_images is not None:
-        processor_kwargs["images"] = qwen_images
-    else:
-        processor_kwargs["images"] = [image]
-    if qwen_videos is not None:
-        processor_kwargs["videos"] = qwen_videos
-
-    try:
-        inputs = processor(**processor_kwargs)
-    except TypeError:
-        processor_kwargs.pop("videos", None)
-        inputs = processor(
-            images=processor_kwargs["images"],
-            text=processor_kwargs["text"],
-            return_tensors="pt",
-        )
-    input_device = select_input_device(model)
-    inputs = _move_inputs_to_device(inputs, input_device)
-
-    output_ids = model.generate(
-        **inputs,
-        do_sample=False,
-        max_new_tokens=max_new_tokens,
+    # Kept as a compatibility API for comparison scripts; the implementation
+    # lives in the package so src code never imports from scripts.
+    from vlm_distill.bbox_grounding_inference import BBoxGroundingInferenceEngine
+    return BBoxGroundingInferenceEngine(model, processor).generate_raw(
+        image=image, prompt=prompt, max_new_tokens=max_new_tokens
     )
-    input_ids = inputs.get("input_ids")
-    if input_ids is not None:
-        generated_ids = output_ids[:, input_ids.shape[1]:]
-    else:
-        generated_ids = output_ids
-    decoded = processor.batch_decode(
-        generated_ids,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False,
-    )
-    return decoded[0].strip() if decoded else ""
 
 
 EXPECTED_TOP_LEVEL_KEYS = (

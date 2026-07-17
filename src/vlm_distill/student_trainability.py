@@ -7,6 +7,8 @@ import re
 QWEN3_VL_PROJECTOR_PATH = "model.visual.merger"
 QWEN3_VL_LANGUAGE_LAYER_COUNT = 36
 QWEN3_VL_ATTENTION_TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj")
+QWEN3_VL_MLP_TARGETS = ("gate_proj", "up_proj", "down_proj")
+QWEN3_VL_LANGUAGE_MODEL_LORA_TARGETS = QWEN3_VL_ATTENTION_TARGETS + QWEN3_VL_MLP_TARGETS
 A2_PROJECTOR_LINEAR_NAMES = ("linear_fc1", "linear_fc2")
 _LM_LORA_RE = re.compile(
     r"(?:^|.*\.)model\.language_model\.layers\.(\d+)\."
@@ -14,6 +16,71 @@ _LM_LORA_RE = re.compile(
     re.IGNORECASE,
 )
 _LM_LAYER_RE = re.compile(r"(?:^|.*\.)model\.language_model\.layers\.(\d+)(?:\.|$)")
+_EXACT_LM_TARGET_RE = re.compile(
+    r"^model\.language_model\.layers\.(\d+)\.(self_attn|mlp)\.([^\.]+)$"
+)
+
+
+def validate_configured_lora_targets(configured_targets: list[str] | tuple[str, ...]) -> list[str]:
+    """Validate the sole target_modules truth source before model injection."""
+    targets = list(dict.fromkeys(str(target) for target in configured_targets))
+    allowed = set(QWEN3_VL_LANGUAGE_MODEL_LORA_TARGETS)
+    unknown = [target for target in targets if target not in allowed]
+    if unknown:
+        raise ValueError(
+            "student.target_modules may contain only Qwen3-VL language-model targets "
+            f"{sorted(allowed)}; rejected {unknown!r}. Visual/projector/deepstack modules are forbidden."
+        )
+    if not targets:
+        raise ValueError("student.target_modules must not be empty when LoRA is enabled.")
+    return targets
+
+
+def resolve_language_model_lora_targets(
+    model, configured_targets: list[str] | tuple[str, ...], *,
+    expected_layer_count: int = QWEN3_VL_LANGUAGE_LAYER_COUNT,
+) -> dict[str, object]:
+    """Resolve exact Qwen3-VL LM target modules and verify every expected layer."""
+    targets = validate_configured_lora_targets(configured_targets)
+    expected_layers = set(range(expected_layer_count))
+    resolved: dict[str, list[str]] = {target: [] for target in targets}
+    for name, module in model.named_modules():
+        match = _EXACT_LM_TARGET_RE.fullmatch(name)
+        if match is None or not hasattr(module, "weight"):
+            continue
+        layer, group, target = int(match.group(1)), match.group(2), match.group(3)
+        expected_group = "self_attn" if target in QWEN3_VL_ATTENTION_TARGETS else "mlp"
+        if target in resolved and group == expected_group:
+            resolved[target].append(name)
+    missing = {
+        target: sorted(expected_layers - {
+            int(name.split(".layers.", 1)[1].split(".", 1)[0]) for name in paths
+        }) for target, paths in resolved.items()
+    }
+    extra = {
+        target: sorted({int(name.split(".layers.", 1)[1].split(".", 1)[0]) for name in paths} - expected_layers)
+        for target, paths in resolved.items()
+    }
+    if any(missing.values()) or any(extra.values()):
+        raise RuntimeError(f"Exact language-model LoRA target resolution failed: missing={missing}, extra={extra}")
+    attention = [path for target in QWEN3_VL_ATTENTION_TARGETS if target in resolved for path in resolved[target]]
+    mlp = [path for target in QWEN3_VL_MLP_TARGETS if target in resolved for path in resolved[target]]
+    return {"targets": targets, "attention_targets": attention, "mlp_targets": mlp,
+            "all_targets": attention + mlp, "attention_module_count": len(attention),
+            "mlp_module_count": len(mlp), "total_module_count": len(attention) + len(mlp),
+            "layers": {target: sorted({int(path.split(".layers.", 1)[1].split(".", 1)[0]) for path in paths})
+                       for target, paths in resolved.items()}}
+
+
+def resolve_language_model_lora_targets_from_names(
+    names: list[str] | tuple[str, ...], configured_targets: list[str] | tuple[str, ...], *,
+    expected_layer_count: int = QWEN3_VL_LANGUAGE_LAYER_COUNT,
+) -> dict[str, object]:
+    """Name-only resolver useful for PEFT inspection and fake-tree tests."""
+    class _Named:
+        def named_modules(self):
+            return ((name, type("_Linear", (), {"weight": object()})()) for name in names)
+    return resolve_language_model_lora_targets(_Named(), configured_targets, expected_layer_count=expected_layer_count)
 
 
 def get_module_by_exact_path(model, path: str):
@@ -139,7 +206,8 @@ def validate_language_model_lora_scope(
     visual_lora = [name for name, _ in trainable_lora
                    if _LM_LORA_RE.search(name) is None and not _is_projector_lora_parameter(name, allowed_projector)]
     mlp_lora = [name for name, _ in trainable_lora
-                if any(f".{target}.lora_" in name.lower() for target in ("gate_proj", "up_proj", "down_proj"))]
+                if any(f".{target}.lora_" in name.lower() for target in QWEN3_VL_MLP_TARGETS)
+                and not any(target.lower() in name.lower() for target in targets)]
     projector = [name for name, parameter in model.named_parameters()
                  if parameter.requires_grad and parameter_matches_module_path(name, projector_path)
                  and not _is_projector_lora_parameter(name, allowed_projector)]
@@ -153,7 +221,7 @@ def validate_language_model_lora_scope(
     other = [name for name, parameter in model.named_parameters()
              if parameter.requires_grad and "lora_" not in name.lower()
              and name not in projector and name not in base_model and name not in vision]
-    if (set(targets) - set(QWEN3_VL_ATTENTION_TARGETS) or any(missing.values())
+    if (set(targets) - set(QWEN3_VL_LANGUAGE_MODEL_LORA_TARGETS) or any(missing.values())
             or any(unexpected.values()) or unexpected_lora_targets or visual_lora or mlp_lora
             or projector or base_model or vision or other):
         raise RuntimeError(
@@ -412,7 +480,7 @@ def summarize_trainable_groups(model, projector_path: str) -> dict[str, int]:
                 groups["attention_lora"] += parameter.numel()
             elif parameter_matches_module_path(name, projector_path):
                 groups["projector_lora"] += parameter.numel()
-            elif any(f".{target}." in lowered for target in ("gate_proj", "up_proj", "down_proj")):
+            elif any(f".{target}." in lowered for target in QWEN3_VL_MLP_TARGETS):
                 groups["llm_mlp_lora"] += parameter.numel()
             else:
                 groups["other"] += parameter.numel()
@@ -425,7 +493,78 @@ def summarize_trainable_groups(model, projector_path: str) -> dict[str, int]:
         else:
             groups["other"] += parameter.numel()
     groups["projector"] = groups["projector_lora"] + groups["projector_full_train"]
+    # Public contract name; keep base_llm for compatibility with existing callers.
+    groups["base_lm"] = groups["base_llm"]
     return groups
+
+
+def validate_a3_attn_mlp_full_projector_contract(
+    model, *, projector_path: str = QWEN3_VL_PROJECTOR_PATH,
+    expected_layer_count: int = QWEN3_VL_LANGUAGE_LAYER_COUNT,
+) -> dict[str, object]:
+    """Fail-fast A3 contract: QKVO + gated MLP LoRA and only saved full projector."""
+    trainable = [(name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad]
+    expected = set(range(expected_layer_count))
+    groups = {"attention": set(), "mlp": set()}
+    counts = {"attention": 0, "mlp": 0}
+    forbidden = []
+    for name, parameter in trainable:
+        lowered = name.lower()
+        if "lora_" in lowered:
+            match = re.search(
+                r"model\.language_model\.layers\.(\d+)\.(self_attn|mlp)\.([^.]+)\.lora_[ab]",
+                lowered,
+            )
+            if match:
+                layer, branch, target = int(match.group(1)), match.group(2), match.group(3)
+                allowed = (branch == "self_attn" and target in QWEN3_VL_ATTENTION_TARGETS) or (
+                    branch == "mlp" and target in QWEN3_VL_MLP_TARGETS
+                )
+                if not allowed:
+                    forbidden.append(name)
+                else:
+                    group = "attention" if branch == "self_attn" else "mlp"
+                    groups[group].add((target, layer)); counts[group] += 1
+                if not parameter.is_floating_point():
+                    forbidden.append(name)
+            elif "visual" in lowered or "deepstack" in lowered:
+                forbidden.append(name)
+            else:
+                forbidden.append(name)
+        elif ".modules_to_save.default." in lowered and parameter_matches_module_path(name, projector_path):
+            if not parameter.is_floating_point():
+                forbidden.append(name)
+        elif ".original_module." in lowered or "deepstack" in lowered or "model.language_model." in lowered:
+            forbidden.append(name)
+        elif parameter_matches_module_path(name, projector_path):
+            forbidden.append(name)
+        else:
+            forbidden.append(name)
+    missing = {
+        "attention": sorted(f"{target}:{layer}" for target in QWEN3_VL_ATTENTION_TARGETS for layer in expected
+                             if (target, layer) not in groups["attention"]),
+        "mlp": sorted(f"{target}:{layer}" for target in QWEN3_VL_MLP_TARGETS for layer in expected
+                      if (target, layer) not in groups["mlp"]),
+    }
+    expected_counts = {"attention": expected_layer_count * 4 * 2, "mlp": expected_layer_count * 3 * 2}
+    if any(missing.values()) or forbidden or counts != expected_counts:
+        raise RuntimeError(
+            "A3 trainability contract failed: "
+            f"missing={missing}, lora_tensor_counts={counts}, forbidden={forbidden[:10]}"
+        )
+    projector_saved = [name for name, _ in trainable if ".modules_to_save.default." in name
+                       and parameter_matches_module_path(name, projector_path)]
+    if not projector_saved or any("lora_" in name.lower() for name in projector_saved):
+        raise RuntimeError("A3 trainability contract failed: modules_to_save.default full projector is missing.")
+    report = {
+        "attention_module_count": expected_layer_count * 4,
+        "mlp_module_count": expected_layer_count * 3,
+        "total_module_count": expected_layer_count * 7,
+        "attention_tensor_count": counts["attention"], "mlp_tensor_count": counts["mlp"],
+        "projector_full_tensor_count": len(projector_saved), "projector_lora_tensor_count": 0,
+    }
+    print(f"A3 trainability contract: {report}")
+    return report
 
 
 def validate_a2_projector_lora_contract(
