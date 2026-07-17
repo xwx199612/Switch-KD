@@ -340,6 +340,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Online teacher-student full-logits DBiLD training.")
     parser.add_argument("--config", required=True, help="Path to YAML config.")
     parser.add_argument("--max-steps", type=int, default=None, help="Override config.training.max_steps.")
+    parser.add_argument(
+        "--smoke-test", action="store_true",
+        help="Run exactly one real training step and save an isolated smoke adapter.",
+    )
     return parser.parse_args()
 
 
@@ -1227,6 +1231,135 @@ def _gpu_peak_memory_allocated() -> int:
     )
 
 
+SMOKE_ADAPTER_DIR = Path("outputs/lora_ablation/smoke/stage1_a3_one_step/adapter")
+
+
+def _format_gib(byte_count: int) -> str:
+    return f"{byte_count / (1024 ** 3):.3f} GiB"
+
+
+def _print_gpu_memory_stage(stage: str) -> None:
+    allocated, reserved = _gpu_mem_stats()
+    peak = _gpu_peak_memory_allocated()
+    print(
+        f"GPU memory {stage}: allocated={allocated} bytes ({_format_gib(allocated)}), "
+        f"reserved={reserved} bytes ({_format_gib(reserved)}), "
+        f"peak={peak} bytes ({_format_gib(peak)})"
+    )
+
+
+def _gradient_group(name: str, projector_path: str) -> str:
+    lowered = name.lower()
+    if "lora_a" in lowered or "lora_b" in lowered:
+        if any(target in lowered for target in QWEN3_VL_ATTENTION_TARGETS):
+            return "attention_lora"
+        if any(target in lowered for target in QWEN3_VL_MLP_TARGETS):
+            return "mlp_lora"
+        if parameter_matches_module_path(name, projector_path):
+            return "projector_lora"
+        return "other"
+    if ".modules_to_save.default." in lowered and parameter_matches_module_path(name, projector_path):
+        return "full_projector"
+    if any(term in lowered for term in ("visual", "vision_tower", "vision_model", "patch_embed")):
+        return "vision_encoder"
+    if "model.language_model" in lowered or ".language_model." in lowered:
+        return "base_lm"
+    return "other"
+
+
+def collect_gradient_contract(model, projector_path: str) -> dict[str, dict[str, float | int]]:
+    """Collect the post-backward contract without changing parameter state."""
+    groups = {
+        key: {
+            "parameter_count": 0,
+            "tensors_with_grad": 0,
+            "tensors_without_grad": 0,
+            "finite_gradient_tensors": 0,
+            "nonfinite_gradient_tensors": 0,
+            "gradient_norm": 0.0,
+        }
+        for key in (
+            "attention_lora", "mlp_lora", "full_projector", "projector_lora",
+            "vision_encoder", "base_lm", "other",
+        )
+    }
+    import torch
+
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        group = groups[_gradient_group(name, projector_path)]
+        group["parameter_count"] += int(parameter.numel())
+        if parameter.grad is None:
+            group["tensors_without_grad"] += 1
+            continue
+        group["tensors_with_grad"] += 1
+        gradient = parameter.grad.detach()
+        if torch.isfinite(gradient).all().item():
+            group["finite_gradient_tensors"] += 1
+        else:
+            group["nonfinite_gradient_tensors"] += 1
+        group["gradient_norm"] += float(torch.linalg.vector_norm(gradient.float()).item() ** 2)
+
+    for group in groups.values():
+        group["gradient_norm"] = float(group["gradient_norm"] ** 0.5)
+    return groups
+
+
+def validate_smoke_gradient_contract(model, projector_path: str) -> dict[str, dict[str, float | int]]:
+    groups = collect_gradient_contract(model, projector_path)
+    for name, stats in groups.items():
+        print(f"gradient_group={name} {stats}")
+    for name in ("attention_lora", "mlp_lora", "full_projector"):
+        stats = groups[name]
+        if stats["parameter_count"] <= 0:
+            raise RuntimeError(f"Smoke gradient contract failed: {name} has no trainable parameters.")
+        if stats["tensors_with_grad"] <= 0:
+            raise RuntimeError(f"Smoke gradient contract failed: {name} has no gradient tensors.")
+        if stats["nonfinite_gradient_tensors"]:
+            raise FloatingPointError(f"Smoke gradient contract failed: {name} has non-finite gradients.")
+        if stats["gradient_norm"] <= 0.0:
+            raise RuntimeError(f"Smoke gradient contract failed: {name} gradient norm is zero.")
+    if groups["projector_lora"]["parameter_count"] != 0:
+        raise RuntimeError("Smoke gradient contract failed: projector LoRA is trainable.")
+    for name in ("vision_encoder", "base_lm", "other"):
+        if groups[name]["parameter_count"] or groups[name]["tensors_with_grad"]:
+            raise RuntimeError(f"Smoke gradient contract failed: unexpected trainable group {name}.")
+    return groups
+
+
+def validate_smoke_losses(lm_loss, dbild_loss, vsd_loss, total_loss) -> None:
+    import torch
+
+    values = torch.stack(tuple(value.detach().float() for value in (lm_loss, dbild_loss, vsd_loss, total_loss)))
+    if not torch.isfinite(values).all().item():
+        raise FloatingPointError("Smoke loss contract failed: loss is non-finite.")
+    if float(total_loss.detach().float().item()) <= 0.0:
+        raise FloatingPointError("Smoke loss contract failed: total_loss must be > 0.")
+    if float(vsd_loss.detach().float().item()) != 0.0:
+        raise RuntimeError("Smoke loss contract failed: vsd_loss must be 0.")
+
+
+def _validate_smoke_adapter_checkpoint(adapter_dir: Path) -> None:
+    config_path = adapter_dir / "adapter_config.json"
+    weights_path = adapter_dir / "adapter_model.safetensors"
+    if not config_path.is_file() or not weights_path.is_file():
+        raise RuntimeError(f"Smoke adapter is incomplete: expected {config_path} and {weights_path}.")
+    from safetensors.torch import load_file
+
+    keys = list(load_file(str(weights_path), device="cpu"))
+    for target in ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"):
+        if not any(target in key and "lora_" in key.lower() for key in keys):
+            raise RuntimeError(f"Smoke adapter checkpoint is missing {target} LoRA keys.")
+    if not any("modules_to_save.default" in key and "visual.merger" in key for key in keys):
+        raise RuntimeError("Smoke adapter checkpoint is missing modules_to_save.default projector keys.")
+    if any("projector" in key.lower() and "lora_" in key.lower() for key in keys):
+        raise RuntimeError("Smoke adapter checkpoint unexpectedly contains projector LoRA keys.")
+    if any("deepstack" in key.lower() for key in keys):
+        raise RuntimeError("Smoke adapter checkpoint unexpectedly contains deepstack keys.")
+    print(f"Smoke adapter checkpoint validation passed: path={adapter_dir}")
+
+
 def _check_no_quantized_cpu_offload(
     model,
     *,
@@ -1273,7 +1406,10 @@ def _format_device_map_summary(device_map: Any) -> str:
     return f"{preview}{suffix}"
 
 
-def run_training(config, *, max_steps_override: int | None = None, dry_run: bool = False) -> Path | None:
+def run_training(
+    config, *, max_steps_override: int | None = None, dry_run: bool = False,
+    smoke_test: bool = False,
+) -> Path | None:
     import torch
 
     if config.distillation.method != "online_align_dbild":
@@ -1286,7 +1422,7 @@ def run_training(config, *, max_steps_override: int | None = None, dry_run: bool
             "Online Align DBiLD training does not implement a VSD forward path; "
             "distillation.vsd_loss_weight must be 0.0."
         )
-    if config.training.batch_size != 1:
+    if config.training.batch_size != 1 and not smoke_test:
         raise ValueError(
             "This online full-logits DBiLD script currently requires training.batch_size == 1 "
             "for strict causal shifted teacher/student answer-logit alignment."
@@ -1313,7 +1449,24 @@ def run_training(config, *, max_steps_override: int | None = None, dry_run: bool
         return None
 
     rows = _validate_rows(config)
+    if smoke_test:
+        # These are deliberately local values: the production A3 config must remain unchanged.
+        rows = rows[:1]
+        effective_epochs = 1
+        effective_batch_size = 1
+        effective_grad_accum_steps = 1
+        total_target_steps = 1
+        adapter_dir = SMOKE_ADAPTER_DIR
+        print("smoke_test=true (effective max_samples=1 epochs=1 batch_size=1 gradient_accumulation_steps=1 max_optimizer_steps=1)")
+    else:
+        effective_epochs = int(config.training.epochs)
+        effective_batch_size = int(config.training.batch_size)
+        effective_grad_accum_steps = int(config.training.gradient_accumulation_steps)
+        adapter_dir = config.student.adapter_dir
+        max_steps = max_steps_override if max_steps_override is not None else config.training.max_steps
+        total_target_steps = int(max_steps) if max_steps is not None else None
     teacher_model, teacher_processor, teacher_model_path, _teacher_device_map, teacher_input_device = _load_teacher(config)
+    _print_gpu_memory_stage("teacher_loaded")
     _check_no_quantized_cpu_offload(
         teacher_model,
         role="teacher",
@@ -1322,6 +1475,7 @@ def run_training(config, *, max_steps_override: int | None = None, dry_run: bool
         input_device=teacher_input_device,
     )
     student_model, student_processor, student_model_path, _student_device_map = _load_student(config)
+    _print_gpu_memory_stage("student_loaded")
     _validate_online_dbild_token_alignment_rows(
         rows=rows,
         teacher_processor=teacher_processor,
@@ -1341,14 +1495,12 @@ def run_training(config, *, max_steps_override: int | None = None, dry_run: bool
     student_input_device = select_model_input_device(student_model, label="student")
 
     dataset = OnlineAlignDataset(rows, config, student_processor)
-    dataloader = _dataloader(dataset, student_processor, config.training.batch_size)
+    dataloader = _dataloader(dataset, student_processor, effective_batch_size)
     optimizer = _build_optimizer(config, student_model)
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
 
-    max_steps = max_steps_override if max_steps_override is not None else config.training.max_steps
-    total_target_steps = int(max_steps) if max_steps is not None else None
-    grad_accum_steps = int(config.training.gradient_accumulation_steps)
+    grad_accum_steps = effective_grad_accum_steps
     global_step = 0
     first_batch_debug_printed = False
     token_alignment_batch_validated = False
@@ -1375,7 +1527,7 @@ def run_training(config, *, max_steps_override: int | None = None, dry_run: bool
     print(f"trainable_param_ratio={trainable_summary.ratio:.6f}")
     print(f"trainable_tensor_count={trainable_summary.tensor_count}")
 
-    for epoch in range(int(config.training.epochs)):
+    for epoch in range(effective_epochs):
         if total_target_steps is not None and global_step >= total_target_steps:
             break
         optimizer.zero_grad(set_to_none=True)
@@ -1485,12 +1637,22 @@ def run_training(config, *, max_steps_override: int | None = None, dry_run: bool
                     lm_loss_weight=config.distillation.lm_loss_weight,
                     dbild_loss_weight=config.distillation.dbild_loss_weight,
                 )
+                vsd_loss = total_loss.new_zeros(())
             _synchronize_for_timing(student_input_device)
             dbild_loss_seconds = time.perf_counter() - dbild_loss_started
-            if not torch.isfinite(total_loss.detach()).all():
+            if smoke_test:
+                _print_gpu_memory_stage("after_forward")
+                validate_smoke_losses(lm_loss, align_loss, vsd_loss, total_loss)
+            elif not torch.isfinite(torch.stack((lm_loss.detach(), align_loss.detach(), vsd_loss.detach(), total_loss.detach()))).all():
                 raise FloatingPointError(
                     f"Online DBiLD produced non-finite loss for sample_id={batch.get('sample_id')}"
                 )
+            print(
+                f"lm_loss={lm_loss.detach().float().item():.6f} "
+                f"dbild_loss={align_loss.detach().float().item():.6f} "
+                f"vsd_loss={vsd_loss.detach().float().item():.6f} "
+                f"total_loss={total_loss.detach().float().item():.6f}"
+            )
             last_step_log_values = {
                 "lm_loss": float(lm_loss.detach().float().item()),
                 "align_loss": float(align_loss.detach().float().item()),
@@ -1529,6 +1691,9 @@ def run_training(config, *, max_steps_override: int | None = None, dry_run: bool
             loss_for_backward.backward()
             _synchronize_for_timing(student_input_device)
             backward_seconds = time.perf_counter() - backward_started
+            if smoke_test and global_step == 0:
+                validate_smoke_gradient_contract(student_model, config.student.multimodal_projector_path)
+                _print_gpu_memory_stage("after_backward")
             print(
                 "Online DBiLD micro_batch "
                 f"sample_id={batch.get('sample_id')} "
@@ -1543,6 +1708,8 @@ def run_training(config, *, max_steps_override: int | None = None, dry_run: bool
 
             if micro_step % grad_accum_steps == 0:
                 optimizer.step()
+                if smoke_test:
+                    _print_gpu_memory_stage("after_optimizer_step")
                 optimizer.zero_grad(set_to_none=True)
                 global_step += 1
                 step_message = (
@@ -1589,18 +1756,22 @@ def run_training(config, *, max_steps_override: int | None = None, dry_run: bool
                 step_message += f" shared_vocab_size={last_step_log_values['shared_vocab_size']}"
             print(step_message)
 
-    config.student.adapter_dir.mkdir(parents=True, exist_ok=True)
-    student_model.save_pretrained(config.student.adapter_dir)
-    student_processor.save_pretrained(config.student.adapter_dir)
+    if smoke_test and global_step != 1:
+        raise RuntimeError(f"Smoke test expected exactly one optimizer step, got {global_step}.")
+    adapter_dir.mkdir(parents=True, exist_ok=True)
+    student_model.save_pretrained(adapter_dir)
+    student_processor.save_pretrained(adapter_dir)
+    if smoke_test:
+        _validate_smoke_adapter_checkpoint(adapter_dir)
     print(f"peak_vram_allocated_bytes={_gpu_peak_memory_allocated()}")
     print(f"OK online DBiLD training completed: optimizer_steps={global_step}")
-    return config.student.adapter_dir
+    return adapter_dir
 
 
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
-    run_training(config, max_steps_override=args.max_steps)
+    run_training(config, max_steps_override=args.max_steps, smoke_test=args.smoke_test)
 
 
 if __name__ == "__main__":

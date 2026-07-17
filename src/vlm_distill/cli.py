@@ -74,6 +74,17 @@ def main() -> None:
                 action="store_true",
                 help="Load and prepare the student, validate trainability, then exit without training.",
             )
+            command_parser.add_argument(
+                "--smoke-test",
+                action="store_true",
+                help="Run exactly one real training step and save an isolated smoke adapter.",
+            )
+            command_parser.add_argument(
+                "--max-steps",
+                type=int,
+                default=None,
+                help="Override config.training.max_steps.",
+            )
         if command == "validate-manifest":
             command_parser.add_argument(
                 "--split",
@@ -214,7 +225,16 @@ def main() -> None:
 
     if args.command == "train":
         print("Training backend: online_align_dbild")
-        artifact = run_training(config, dry_run=True) if args.dry_run else run_training(config)
+        if args.dry_run:
+            artifact = run_training(config, dry_run=True)
+        elif args.smoke_test or args.max_steps is not None:
+            artifact = run_training(
+                config,
+                max_steps_override=args.max_steps,
+                smoke_test=args.smoke_test,
+            )
+        else:
+            artifact = run_training(config)
         if args.dry_run:
             return
         print(f"OK student artifact written: {artifact}")
