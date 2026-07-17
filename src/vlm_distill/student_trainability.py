@@ -482,8 +482,18 @@ def parameter_matches_module_path(name: str, path: str) -> bool:
     return module_name == path or module_name.endswith("." + path) or f".{path}." in dotted
 
 
+def full_projector_modules_to_save_path(projector_path: str) -> str:
+    """Return the active PEFT copy path for a fully trainable projector."""
+    return f"{projector_path}.modules_to_save.default"
+
+
 def is_allowed_full_projector_parameter(name: str, allowed_projector_path: str) -> bool:
     """Match only the active PEFT full-projector copy and its approved children."""
+    if not allowed_projector_path.endswith(".modules_to_save.default"):
+        raise ValueError(
+            "allowed_full_projector_path must identify the active "
+            "modules_to_save.default copy"
+        )
     if ".modules_to_save.default." not in name.lower():
         return False
     if not parameter_matches_module_path(name, allowed_projector_path):
@@ -551,7 +561,7 @@ def validate_a3_attn_mlp_full_projector_contract(
     groups = {"attention": set(), "mlp": set()}
     counts = {"attention": 0, "mlp": 0}
     forbidden = []
-    allowed_full_projector_path = f"{projector_path}.modules_to_save.default"
+    allowed_full_projector_path = full_projector_modules_to_save_path(projector_path)
     for name, parameter in trainable:
         lowered = name.lower()
         if "lora_" in lowered:

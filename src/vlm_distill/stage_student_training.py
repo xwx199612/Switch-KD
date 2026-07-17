@@ -32,7 +32,11 @@ from .logits_cache_utils import (
     vocab_sizes_compatible,
 )
 from .model_loading import apply_attn_implementation, resolve_model_path
-from .student_trainability import validate_language_model_lora_scope, validate_projector_path
+from .student_trainability import (
+    full_projector_modules_to_save_path,
+    validate_language_model_lora_scope,
+    validate_projector_path,
+)
 from .parsing_output_parser import COORDINATE_SYSTEM_NORMALIZED_0_1000, serialize_parsing_label
 from .token_alignment import build_token_mismatch_details, coerce_token_ids
 
@@ -346,7 +350,7 @@ def _train_hf_student(config: PipelineConfig, rows: list[dict]) -> Path:
             model, config.student.lora_layers_to_transform, target_modules,
             projector_path=config.student.multimodal_projector_path,
             allowed_full_projector_path=(
-                config.student.multimodal_projector_path
+                full_projector_modules_to_save_path(config.student.multimodal_projector_path)
                 if config.student.train_multimodal_projector and not getattr(config.student, "use_projector_lora", False)
                 else None
             ),

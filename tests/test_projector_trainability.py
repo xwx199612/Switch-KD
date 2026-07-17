@@ -344,6 +344,48 @@ def test_linear8bit_projector_is_explicitly_rejected():
         dequantize_trainable_projector(model, "model.visual.merger", validate_forward=False)
 
 
+def test_maybe_enable_student_lora_passes_active_full_projector_path(monkeypatch):
+    pytest.importorskip("peft")
+    from torch import nn
+    from transformers import PretrainedConfig
+    import vlm_distill.train_online_align_dbild as online
+
+    class Visual(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.merger = nn.Linear(2, 2)
+
+    class Toy(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = PretrainedConfig(model_type="toy")
+            self.model = nn.Module()
+            self.model.visual = Visual()
+            self.model.q_proj = nn.Linear(2, 2)
+
+        def prepare_inputs_for_generation(self, *args, **kwargs):
+            return kwargs
+
+    student = type("S", (), {
+        "use_lora": True, "quantization": "none", "target_modules": ["q_proj"],
+        "lora_rank": 1, "lora_alpha": 2, "lora_dropout": 0.0,
+        "train_multimodal_projector": True,
+        "use_projector_lora": False,
+        "multimodal_projector_path": "model.visual.merger",
+        "lora_layers_to_transform": None,
+        "lora_layers_pattern": None,
+    })()
+    config = type("C", (), {"student": student})()
+    captured = []
+
+    def capture(*args, **kwargs):
+        captured.append(kwargs["allowed_full_projector_path"])
+
+    monkeypatch.setattr(online, "validate_language_model_lora_scope", capture)
+    online._maybe_enable_student_lora(config, Toy(), dry_run=True)
+    assert captured == ["model.visual.merger.modules_to_save.default"]
+
+
 def test_projector_survives_peft_save_reload_and_merge(tmp_path):
     torch = pytest.importorskip("torch")
     pytest.importorskip("peft")

@@ -8,7 +8,11 @@ import torch
 from torch import nn
 
 from vlm_distill.config_schema import load_config
-from vlm_distill.student_trainability import validate_language_model_lora_scope
+from vlm_distill.student_trainability import (
+    full_projector_modules_to_save_path,
+    is_allowed_full_projector_parameter,
+    validate_language_model_lora_scope,
+)
 
 
 TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj"]
@@ -167,6 +171,29 @@ def test_peft_prefixed_active_projector_is_allowed_only_in_explicit_mode():
     for mode in ("A0", "A2"):
         with pytest.raises(RuntimeError):
             validate_language_model_lora_scope(wrapper, B1, TARGETS)
+
+
+def test_peft_prefixed_full_projector_call_site_names_are_allowed():
+    names = [
+        "base_model.model.model.visual.merger.modules_to_save.default.norm.weight",
+        "base_model.model.model.visual.merger.modules_to_save.default.norm.bias",
+        "base_model.model.model.visual.merger.modules_to_save.default.linear_fc1.weight",
+        "base_model.model.model.visual.merger.modules_to_save.default.linear_fc1.bias",
+        "base_model.model.model.visual.merger.modules_to_save.default.linear_fc2.weight",
+        "base_model.model.model.visual.merger.modules_to_save.default.linear_fc2.bias",
+    ]
+    allowed = full_projector_modules_to_save_path("model.visual.merger")
+    assert all(is_allowed_full_projector_parameter(name, allowed) for name in names)
+    with pytest.raises(ValueError, match="modules_to_save.default"):
+        is_allowed_full_projector_parameter(names[0], "model.visual.merger")
+
+
+def test_full_projector_allowlist_rejects_base_path_immediately():
+    with pytest.raises(ValueError, match="modules_to_save.default"):
+        is_allowed_full_projector_parameter(
+            "base_model.model.model.visual.merger.modules_to_save.default.norm.weight",
+            "model.visual.merger",
+        )
 
 
 @pytest.mark.parametrize("allowed", [None, "model.visual.merger.modules_to_save.default"])

@@ -20,6 +20,7 @@ from .student_trainability import (
     parameter_matches_module_path,
     summarize_trainable_groups,
     dequantize_trainable_projector,
+    full_projector_modules_to_save_path,
     prepare_projector_for_lora,
     resolve_a2_lora_targets,
     resolve_language_model_lora_targets,
@@ -911,7 +912,7 @@ def _maybe_enable_student_lora(config, model, *, dry_run: bool = False):
     validate_projector_trainable_parameters(wrapped, config.student.multimodal_projector_path)
     if hasattr(config.student, "lora_layers_to_transform"):
         allowed_full_projector_path = (
-            config.student.multimodal_projector_path
+            full_projector_modules_to_save_path(config.student.multimodal_projector_path)
             if config.student.train_multimodal_projector and not getattr(config.student, "use_projector_lora", False)
             else None
         )
