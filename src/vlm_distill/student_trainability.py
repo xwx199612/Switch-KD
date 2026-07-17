@@ -10,6 +10,7 @@ QWEN3_VL_ATTENTION_TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj")
 QWEN3_VL_MLP_TARGETS = ("gate_proj", "up_proj", "down_proj")
 QWEN3_VL_LANGUAGE_MODEL_LORA_TARGETS = QWEN3_VL_ATTENTION_TARGETS + QWEN3_VL_MLP_TARGETS
 A2_PROJECTOR_LINEAR_NAMES = ("linear_fc1", "linear_fc2")
+FULL_PROJECTOR_MODULES_TO_SAVE_CHILDREN = ("norm", "linear_fc1", "linear_fc2")
 _LM_LORA_RE = re.compile(
     r"(?:^|.*\.)model\.language_model\.layers\.(\d+)\."
     r"(?:[^.]+\.)*([A-Za-z][A-Za-z0-9_]*)\.lora_[ab](?:\.|$)",
@@ -160,6 +161,7 @@ def validate_language_model_lora_scope(
     expected_layer_count: int = QWEN3_VL_LANGUAGE_LAYER_COUNT,
     projector_path: str = QWEN3_VL_PROJECTOR_PATH,
     allowed_projector_lora_paths: list[str] | None = None,
+    allowed_full_projector_path: str | None = None,
 ) -> dict[str, object]:
     """Validate PEFT trainability using only exact Qwen3-VL LM paths."""
     targets = list(dict.fromkeys(configured_targets))
@@ -203,6 +205,10 @@ def validate_language_model_lora_scope(
     missing = {target: sorted(expected - detected[target]) for target in targets}
     unexpected = {target: sorted(detected[target] - expected) for target in targets}
     allowed_projector = set(allowed_projector_lora_paths or [])
+    allowed_full_projector = lambda name: (
+        allowed_full_projector_path is not None
+        and is_allowed_full_projector_parameter(name, allowed_full_projector_path)
+    )
     visual_lora = [name for name, _ in trainable_lora
                    if _LM_LORA_RE.search(name) is None and not _is_projector_lora_parameter(name, allowed_projector)]
     mlp_lora = [name for name, _ in trainable_lora
@@ -210,16 +216,19 @@ def validate_language_model_lora_scope(
                 and not any(target.lower() in name.lower() for target in targets)]
     projector = [name for name, parameter in model.named_parameters()
                  if parameter.requires_grad and parameter_matches_module_path(name, projector_path)
+                 and not allowed_full_projector(name)
                  and not _is_projector_lora_parameter(name, allowed_projector)]
     base_model = [name for name, parameter in model.named_parameters()
                   if parameter.requires_grad and "lora_" not in name.lower()
                   and ("model.language_model." in name or ".language_model." in name)]
     vision = [name for name, parameter in model.named_parameters()
-              if parameter.requires_grad and not _is_projector_lora_parameter(name, allowed_projector)
+              if parameter.requires_grad and not allowed_full_projector(name)
+              and not _is_projector_lora_parameter(name, allowed_projector)
               and any(term in name.lower() for term in
                       ("visual", "vision_tower", "vision_model", "patch_embed"))]
     other = [name for name, parameter in model.named_parameters()
              if parameter.requires_grad and "lora_" not in name.lower()
+             and not allowed_full_projector(name)
              and name not in projector and name not in base_model and name not in vision]
     if (set(targets) - set(QWEN3_VL_LANGUAGE_MODEL_LORA_TARGETS) or any(missing.values())
             or any(unexpected.values()) or unexpected_lora_targets or visual_lora or mlp_lora
@@ -473,6 +482,21 @@ def parameter_matches_module_path(name: str, path: str) -> bool:
     return module_name == path or module_name.endswith("." + path) or f".{path}." in dotted
 
 
+def is_allowed_full_projector_parameter(name: str, allowed_projector_path: str) -> bool:
+    """Match only the active PEFT full-projector copy and its approved children."""
+    if ".modules_to_save.default." not in name.lower():
+        return False
+    if not parameter_matches_module_path(name, allowed_projector_path):
+        return False
+    module_name = name.rsplit(".", 1)[0]
+    marker = allowed_projector_path + "."
+    position = module_name.rfind(marker)
+    if position < 0:
+        return False
+    relative = module_name[position + len(marker):]
+    return relative.split(".", 1)[0] in FULL_PROJECTOR_MODULES_TO_SAVE_CHILDREN
+
+
 def find_relevant_module_names(model) -> list[str]:
     return [
         name for name, module in model.named_modules()
@@ -527,6 +551,7 @@ def validate_a3_attn_mlp_full_projector_contract(
     groups = {"attention": set(), "mlp": set()}
     counts = {"attention": 0, "mlp": 0}
     forbidden = []
+    allowed_full_projector_path = f"{projector_path}.modules_to_save.default"
     for name, parameter in trainable:
         lowered = name.lower()
         if "lora_" in lowered:
@@ -550,7 +575,7 @@ def validate_a3_attn_mlp_full_projector_contract(
                 forbidden.append(name)
             else:
                 forbidden.append(name)
-        elif ".modules_to_save.default." in lowered and parameter_matches_module_path(name, projector_path):
+        elif is_allowed_full_projector_parameter(name, allowed_full_projector_path):
             if not parameter.is_floating_point():
                 forbidden.append(name)
         elif ".original_module." in lowered or "deepstack" in lowered or "model.language_model." in lowered:
@@ -571,8 +596,8 @@ def validate_a3_attn_mlp_full_projector_contract(
             "A3 trainability contract failed: "
             f"missing={missing}, lora_tensor_counts={counts}, forbidden={forbidden[:10]}"
         )
-    projector_saved = [name for name, _ in trainable if ".modules_to_save.default." in name
-                       and parameter_matches_module_path(name, projector_path)]
+    projector_saved = [name for name, _ in trainable
+                       if is_allowed_full_projector_parameter(name, allowed_full_projector_path)]
     if not projector_saved or any("lora_" in name.lower() for name in projector_saved):
         raise RuntimeError("A3 trainability contract failed: modules_to_save.default full projector is missing.")
     report = {

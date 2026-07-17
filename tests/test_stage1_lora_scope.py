@@ -77,7 +77,8 @@ def _config_differences(left, right, *, allowed_paths: set[str]) -> dict:
 
 
 class _Toy(nn.Module):
-    def __init__(self, layers=B1, *, extra=None, visual=False, mlp=False, projector=False, base=False):
+    def __init__(self, layers=B1, *, extra=None, visual=False, mlp=False, projector=False,
+                 active_projector=False, base=False):
         super().__init__()
         self.model = nn.Module()
         self.model.language_model = nn.Module()
@@ -100,14 +101,30 @@ class _Toy(nn.Module):
             self.model.visual.register_parameter("lora_A", nn.Parameter(torch.ones(2, 2)))
         if projector:
             self.model.visual = getattr(self.model, "visual", nn.Module())
-            self.model.visual.merger = nn.Linear(2, 2)
+            self.model.visual.merger = nn.Module()
+            if active_projector:
+                self.model.visual.merger.norm = nn.LayerNorm(2)
+                self.model.visual.merger.linear_fc1 = nn.Linear(2, 2)
+                self.model.visual.merger.linear_fc2 = nn.Linear(2, 2)
+                self.model.visual.merger.modules_to_save = nn.ModuleDict({
+                    "default": nn.ModuleDict({
+                        "norm": nn.LayerNorm(2),
+                        "linear_fc1": nn.Linear(2, 2),
+                        "linear_fc2": nn.Linear(2, 2),
+                    })
+                })
+            else:
+                self.model.visual.merger.linear_fc1 = nn.Linear(2, 2)
         if base:
             self.model.language_model.base = nn.Parameter(torch.ones(2, 2))
         for name, parameter in self.named_parameters():
             parameter.requires_grad_("lora_" in name)
         if projector:
-            for parameter in self.model.visual.merger.parameters():
-                parameter.requires_grad_(True)
+            for name, parameter in self.model.visual.merger.named_parameters():
+                parameter.requires_grad_(
+                    (active_projector and "modules_to_save.default." in name)
+                    or not active_projector
+                )
         if base:
             self.model.language_model.base.requires_grad_(True)
 
@@ -127,6 +144,41 @@ def test_scopes_target_exact_layers(layers):
 def test_invalid_trainability_fails(kwargs):
     with pytest.raises(RuntimeError):
         validate_language_model_lora_scope(_Toy(**kwargs), B1, TARGETS)
+
+
+def test_a1_allows_only_the_active_full_projector_copy():
+    report = validate_language_model_lora_scope(
+        _Toy(B1, projector=True, active_projector=True), B1, TARGETS,
+        allowed_full_projector_path="model.visual.merger.modules_to_save.default",
+    )
+    assert report["trainable_tensor_count"] == len(B1) * len(TARGETS) * 2
+
+
+def test_peft_prefixed_active_projector_is_allowed_only_in_explicit_mode():
+    wrapper = nn.Module()
+    wrapper.base_model = nn.Module()
+    wrapper.base_model.model = _Toy(B1, projector=True, active_projector=True)
+    path = "model.visual.merger.modules_to_save.default"
+    report = validate_language_model_lora_scope(
+        wrapper, B1, TARGETS, allowed_full_projector_path=path,
+    )
+    assert report["trainable_tensor_count"] == len(B1) * len(TARGETS) * 2
+
+    for mode in ("A0", "A2"):
+        with pytest.raises(RuntimeError):
+            validate_language_model_lora_scope(wrapper, B1, TARGETS)
+
+
+@pytest.mark.parametrize("allowed", [None, "model.visual.merger.modules_to_save.default"])
+def test_projector_allowlist_is_not_a_wildcard(allowed):
+    model = _Toy(B1, projector=True, active_projector=True)
+    model.model.visual.merger.modules_to_save.other_adapter = nn.Linear(2, 2)
+    for parameter in model.model.visual.merger.modules_to_save.other_adapter.parameters():
+        parameter.requires_grad_(True)
+    with pytest.raises(RuntimeError):
+        validate_language_model_lora_scope(
+            model, B1, TARGETS, allowed_full_projector_path=allowed,
+        )
 
 
 @pytest.mark.parametrize("bad", [[1, 1], [-1], []])

@@ -36,7 +36,13 @@ class _FakeQwen3VL(nn.Module):
             self.model.language_model.layers.append(layer)
         self.model.visual = nn.Module()
         self.model.visual.merger = nn.Module()
-        self.model.visual.merger.modules_to_save = nn.ModuleDict({"default": nn.Linear(2, 2, dtype=torch.bfloat16)})
+        self.model.visual.merger.modules_to_save = nn.ModuleDict({
+            "default": nn.ModuleDict({
+                "norm": nn.LayerNorm(2, dtype=torch.bfloat16),
+                "linear_fc1": nn.Linear(2, 2, dtype=torch.bfloat16),
+                "linear_fc2": nn.Linear(2, 2, dtype=torch.bfloat16),
+            })
+        })
         self.model.visual.merger.original_module = nn.Linear(2, 2)
         self.model.visual.encoder = nn.Linear(2, 2)
         self.model.visual.deepstack_merger_list = nn.ModuleList([nn.Linear(2, 2)])
@@ -72,6 +78,30 @@ def test_a3_contract_allows_mlp_and_requires_full_projector():
     assert report["attention_module_count"] == 144
     assert report["mlp_module_count"] == 108
     assert report["projector_lora_tensor_count"] == 0
+
+
+@pytest.mark.parametrize("bad_kind", [
+    "blocks", "deepstack", "other_adapter", "original", "projector_lora",
+])
+def test_a3_contract_rejects_forbidden_trainables(bad_kind):
+    model = _FakeQwen3VL()
+    if bad_kind == "blocks":
+        model.model.visual.blocks = nn.ModuleList([nn.Linear(2, 2)])
+        parameter = model.model.visual.blocks[0].weight
+    elif bad_kind == "deepstack":
+        parameter = model.model.visual.deepstack_merger_list[0].weight
+    elif bad_kind == "other_adapter":
+        model.model.visual.merger.modules_to_save["other_adapter"] = nn.Linear(2, 2)
+        parameter = model.model.visual.merger.modules_to_save["other_adapter"].weight
+    elif bad_kind == "original":
+        parameter = model.model.visual.merger.original_module.weight
+    else:
+        module = model.model.visual.merger.modules_to_save["default"]["linear_fc1"]
+        module.lora_A = nn.Parameter(torch.ones(1, 2))
+        parameter = module.lora_A
+    parameter.requires_grad_(True)
+    with pytest.raises(RuntimeError, match="A3 trainability contract failed"):
+        validate_a3_attn_mlp_full_projector_contract(model)
 
 
 def test_unknown_or_visual_targets_are_rejected(tmp_path: Path):

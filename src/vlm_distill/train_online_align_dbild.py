@@ -910,13 +910,17 @@ def _maybe_enable_student_lora(config, model, *, dry_run: bool = False):
     wrapped = get_peft_model(model, lora_config)
     validate_projector_trainable_parameters(wrapped, config.student.multimodal_projector_path)
     if hasattr(config.student, "lora_layers_to_transform"):
+        allowed_full_projector_path = (
+            config.student.multimodal_projector_path
+            if config.student.train_multimodal_projector and not getattr(config.student, "use_projector_lora", False)
+            else None
+        )
         validate_language_model_lora_scope(
             wrapped, layers_to_transform, target_modules,
             projector_path=config.student.multimodal_projector_path,
             allowed_projector_lora_paths=projector_targets,
+            allowed_full_projector_path=allowed_full_projector_path,
         )
-    if projector_targets:
-        validate_a2_projector_lora_contract(wrapped, projector_path=config.student.multimodal_projector_path)
     return wrapped
 
 
@@ -970,8 +974,6 @@ def _apply_student_train_setup(config, model, *, dry_run: bool = False):
         print(f"other trainable count = {groups['other']}")
     if config.student.train_multimodal_projector:
         validate_projector_trainable_parameters(model, config.student.multimodal_projector_path)
-    if getattr(config.student, "use_projector_lora", False):
-        validate_a2_projector_lora_contract(model, projector_path=config.student.multimodal_projector_path)
     if (set(attention_targets) & set(QWEN3_VL_MLP_TARGETS)
             and config.student.train_multimodal_projector
             and not config.student.use_projector_lora):
@@ -979,8 +981,8 @@ def _apply_student_train_setup(config, model, *, dry_run: bool = False):
             model, projector_path=config.student.multimodal_projector_path
         )
     elif config.student.use_projector_lora:
-        # A2 is already validated above; keep the explicit mode contract in the
-        # startup path so dry-run and real training exercise the same checks.
+        # Keep the explicit mode contract in the startup path so dry-run and
+        # real training exercise the same checks.
         validate_a2_projector_lora_contract(
             model, projector_path=config.student.multimodal_projector_path
         )

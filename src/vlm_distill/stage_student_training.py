@@ -345,6 +345,11 @@ def _train_hf_student(config: PipelineConfig, rows: list[dict]) -> Path:
         validate_language_model_lora_scope(
             model, config.student.lora_layers_to_transform, target_modules,
             projector_path=config.student.multimodal_projector_path,
+            allowed_full_projector_path=(
+                config.student.multimodal_projector_path
+                if config.student.train_multimodal_projector and not getattr(config.student, "use_projector_lora", False)
+                else None
+            ),
         )
 
     train_dataset = VlmTrainingDataset(rows, config, processor)
