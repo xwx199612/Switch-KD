@@ -74,11 +74,115 @@ def projector_checksum_from_adapter_checkpoint(path: str | Path) -> str | None:
         return None
 
 
-def _module(model: Any, path: str) -> Any:
-    current = model
+def _walk_module(root: Any, path: str) -> Any:
+    current = root
     for part in path.split("."):
         current = getattr(current, part)
     return current
+
+
+def _deployment_roots(model: Any) -> list[tuple[str, Any]]:
+    """Return the model roots used by the known PEFT wrapper layouts."""
+    base_model = getattr(model, "base_model", None)
+    return [
+        ("model", model),
+        ("base_model", base_model),
+        ("base_model.model", getattr(base_model, "model", None)),
+        ("model.model", getattr(model, "model", None)),
+    ]
+
+
+def _resolve_exact_module_with_path(model: Any, path: str) -> tuple[Any, str]:
+    """Resolve the main module path across unwrapped and PEFT model layouts.
+
+    The suffix is exact: a module is accepted only when its name ends in the
+    requested path, never merely because it contains ``merger``.  The only
+    accepted prefixes are the deterministic PEFT prefixes observed in saved
+    Qwen-VL models.
+    """
+    roots = _deployment_roots(model)
+    root_descriptions = [name for name, root in roots if root is not None]
+    attempts: list[str] = []
+    candidates: dict[str, Any] = {}
+    allowed_prefixes = {"", "model", "base_model", "base_model.model", "base_model.model.model"}
+
+    # named_modules gives the actual runtime path and avoids accidentally
+    # treating an arbitrary attribute called ``merger`` as the main merger.
+    try:
+        named_modules = dict(model.named_modules())
+    except (AttributeError, TypeError):
+        named_modules = {}
+    suffix = "." + path
+    for name, module in named_modules.items():
+        if name == path:
+            candidates[name] = module
+        elif name.endswith(suffix):
+            prefix = name[: -len(suffix)].rstrip(".")
+            if prefix in allowed_prefixes:
+                candidates[name] = module
+
+    # Keep the explicit roots as a fallback for lightweight model doubles that
+    # do not implement named_modules(), while recording every attempted root.
+    direct_candidates: dict[str, Any] = {}
+    for root_name, root in roots:
+        if root is None:
+            attempts.append(f"{root_name}: <missing>")
+            continue
+        try:
+            resolved = _walk_module(root, path)
+        except AttributeError as exc:
+            attempts.append(f"{root_name}: {exc}")
+        else:
+            full_name = path if root_name == "model" else f"{root_name}.{path}"
+            direct_candidates.setdefault(full_name, resolved)
+            attempts.append(f"{root_name}: {full_name}")
+
+    # Prefer the authoritative named_modules result.  This also prevents a
+    # successful traversal from a shorter alias root from being counted as a
+    # second match for the same PEFT-wrapped module.
+    if not candidates:
+        candidates = direct_candidates
+
+    if len(candidates) == 1:
+        return next(iter(candidates.values())), next(iter(candidates))
+
+    projector_candidates = [
+        name for name in named_modules
+        if ".visual." in name and "merger" in name
+    ]
+    details = ", ".join(projector_candidates) if projector_candidates else "<none>"
+    raise AttributeError(
+        f"unable to resolve exact module {path!r}; requested path={path!r}; "
+        f"tried roots={root_descriptions!r}; attempts={attempts!r}; "
+        f"projector candidates named_modules=[{details}]"
+    )
+
+
+def resolve_exact_module(model: Any, path: str) -> Any:
+    """Resolve an exact deployment module path through PEFT wrappers."""
+    module, _ = _resolve_exact_module_with_path(model, path)
+    return module
+
+
+def _projector_wrapper(model: Any) -> Any:
+    wrapper, resolved_path = _resolve_exact_module_with_path(model, "model.visual.merger")
+    print(f"resolved_projector_wrapper_path={resolved_path}")
+    print(f"resolved_projector_wrapper_type={type(wrapper)}")
+    active_copy = _modules_to_save_default(wrapper)
+    if active_copy is not None:
+        print("active_projector_source=modules_to_save.default")
+        print(f"active_projector_type={type(active_copy)}")
+    return wrapper
+
+
+def _modules_to_save_default(wrapper: Any) -> Any | None:
+    modules_to_save = getattr(wrapper, "modules_to_save", None)
+    if modules_to_save is None:
+        return None
+    try:
+        return modules_to_save["default"]
+    except (KeyError, IndexError, TypeError):
+        return getattr(modules_to_save, "default", None)
 
 
 def _is_lora(name: str) -> bool:
@@ -87,19 +191,18 @@ def _is_lora(name: str) -> bool:
 
 
 def _active_merger(model: Any) -> Any:
-    merger = _module(model, "model.visual.merger")
+    merger = _projector_wrapper(model)
     # PEFT's ModulesToSaveWrapper keeps the trained copy under this exact path.
-    modules_to_save = getattr(merger, "modules_to_save", None)
-    if modules_to_save is not None and hasattr(modules_to_save, "default"):
-        return modules_to_save.default
+    active_copy = _modules_to_save_default(merger)
+    if active_copy is not None:
+        return active_copy
     return merger
 
 
 def _active_modules_to_save_projector(model: Any) -> Any | None:
     """Return the active full projector copy, but only for the default adapter copy."""
-    wrapper = _module(model, "model.visual.merger")
-    modules_to_save = getattr(wrapper, "modules_to_save", None)
-    active_copy = getattr(modules_to_save, "default", None) if modules_to_save is not None else None
+    wrapper = _projector_wrapper(model)
+    active_copy = _modules_to_save_default(wrapper)
     active_adapter = getattr(wrapper, "active_adapter", "default")
     if isinstance(active_adapter, (list, tuple)):
         active_adapter = active_adapter[0] if active_adapter else "default"
@@ -189,8 +292,8 @@ def validate_high_fidelity_deployment(model: Any, config: Any = None, *, smoke_i
     if mode and (summary["modules_to_save"] <= 0 or summary["projector_lora"]):
         raise RuntimeError("A1 validation failed: active modules_to_save projector is missing or projector LoRA exists")
     if mode:
-        wrapper = _module(model, "model.visual.merger")
-        active_copy = getattr(getattr(wrapper, "modules_to_save", None), "default", None)
+        wrapper = _projector_wrapper(model)
+        active_copy = _modules_to_save_default(wrapper)
         if active_copy is None:
             raise RuntimeError("A1 validation failed: model.visual.merger.modules_to_save.default is missing")
         active_adapter = getattr(wrapper, "active_adapter", "default")
