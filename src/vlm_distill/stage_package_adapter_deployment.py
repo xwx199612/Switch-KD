@@ -65,6 +65,7 @@ def package_high_fidelity_adapter_deployment(config: PipelineConfig) -> Path:
         shutil.rmtree(processor_dir)
         print(f"Processor bundle omitted; base-model fallback will be used ({exc})")
     projector_mode = "projector_lora" if student.use_projector_lora else ("modules_to_save" if student.train_multimodal_projector else "base_bf16")
+    excluded_from_quantization = MAIN_MERGER_PATHS if projector_mode != "base_bf16" else []
     metadata = {
         "artifact_mode": "4bit_base_bf16_adapter",
         "description": "High-fidelity quantized adapter deployment",
@@ -84,17 +85,29 @@ def package_high_fidelity_adapter_deployment(config: PipelineConfig) -> Path:
             projector_checksum_from_adapter_checkpoint(destination_adapter)
             if projector_mode == "modules_to_save" else None
         ),
+        "base_projector_checksum_before_lora": None,
+        "base_projector_dtype_map": None,
+        "mixed_precision_source": "load_time_exclusion",
+        "merger_norm_dtype": "torch.float32",
         "projector_lora_targets": MAIN_MERGER_PATHS if projector_mode == "projector_lora" else [],
         "lora_target_groups": {
             "attention": [target for target in QWEN3_VL_ATTENTION_TARGETS if target in configured_targets],
             "mlp": [target for target in QWEN3_VL_MLP_TARGETS if target in configured_targets],
         },
-        "excluded_from_quantization": MAIN_MERGER_PATHS,
+        "excluded_from_quantization": excluded_from_quantization,
+        "main_merger_bf16": projector_mode != "base_bf16",
         "quantization": "4bit_nf4",
         "attn_implementation": student.attn_implementation,
         "adapter_merged": False,
         "base_model_copied": False,
     }
+    adapter_metadata_path = destination_adapter / "adapter_metadata.json"
+    if adapter_metadata_path.exists():
+        adapter_metadata = json.loads(adapter_metadata_path.read_text(encoding="utf-8"))
+        metadata.update({key: adapter_metadata.get(key) for key in (
+            "base_projector_checksum_before_lora", "base_projector_dtype_map",
+            "mixed_precision_source", "merger_norm_dtype",
+        )})
     (output / "deployment_config.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     (output / "README.txt").write_text(
         "High-fidelity quantized adapter deployment\n\n"

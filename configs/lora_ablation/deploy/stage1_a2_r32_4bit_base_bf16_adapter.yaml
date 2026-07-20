@@ -1,0 +1,8 @@
+extends: ../stage1_a2_r32_attn_projector_lora.yaml
+
+student:
+  inference_adapter_path: outputs/lora_ablation/stage1_a2_r32_attn_projector_lora/r32_attn_projector_lora/adapter
+  inference_model_path: outputs/lora_ablation/stage1_a2_r32_attn_projector_lora/deploy_4bit_bf16_adapter
+  deployment_artifact_path: outputs/lora_ablation/stage1_a2_r32_attn_projector_lora/deploy_4bit_bf16_adapter
+  quantization: 4bit
+  merged_artifact_mode: 4bit_base_bf16_adapter

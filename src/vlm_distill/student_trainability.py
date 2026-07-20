@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import hashlib
 
 QWEN3_VL_PROJECTOR_PATH = "model.visual.merger"
 QWEN3_VL_LANGUAGE_LAYER_COUNT = 36
@@ -10,6 +11,8 @@ QWEN3_VL_ATTENTION_TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj")
 QWEN3_VL_MLP_TARGETS = ("gate_proj", "up_proj", "down_proj")
 QWEN3_VL_LANGUAGE_MODEL_LORA_TARGETS = QWEN3_VL_ATTENTION_TARGETS + QWEN3_VL_MLP_TARGETS
 A2_PROJECTOR_LINEAR_NAMES = ("linear_fc1", "linear_fc2")
+MERGER_NORM_DTYPE = "torch.float32"
+MERGER_LINEAR_DTYPE = "torch.bfloat16"
 FULL_PROJECTOR_MODULES_TO_SAVE_CHILDREN = ("norm", "linear_fc1", "linear_fc2")
 _LM_LORA_RE = re.compile(
     r"(?:^|.*\.)model\.language_model\.layers\.(\d+)\."
@@ -143,7 +146,30 @@ def resolve_a2_lora_targets(model, projector_path: str = QWEN3_VL_PROJECTOR_PATH
     if len(projector_targets) != 2:
         raise RuntimeError("A2 must resolve exactly two main-merger targets.")
     return {"attention_targets": attention_targets, "projector_targets": projector_targets,
-            "all_targets": attention_targets + projector_targets}
+            "language_model_targets": list(QWEN3_VL_ATTENTION_TARGETS),
+            "all_targets": list(QWEN3_VL_ATTENTION_TARGETS) + projector_targets}
+
+
+def build_a2_lora_scope(
+    model, configured_targets: list[str] | tuple[str, ...] | None = None,
+    projector_path: str = QWEN3_VL_PROJECTOR_PATH,
+    *, expected_layer_count: int = QWEN3_VL_LANGUAGE_LAYER_COUNT,
+) -> dict[str, object]:
+    """Build the shared A2 scope: canonical LM names plus exact projector paths."""
+    language_model_targets = validate_configured_lora_targets(
+        configured_targets or list(QWEN3_VL_ATTENTION_TARGETS)
+    )
+    if tuple(language_model_targets) != QWEN3_VL_ATTENTION_TARGETS:
+        raise ValueError("A2 language-model LoRA targets must be exactly q_proj,k_proj,v_proj,o_proj.")
+    resolved = resolve_a2_lora_targets(
+        model, projector_path, expected_layer_count=expected_layer_count
+    )
+    return {
+        "language_model_targets": language_model_targets,
+        "projector_targets": resolved["projector_targets"],
+        "peft_target_modules": language_model_targets + list(resolved["projector_targets"]),
+        "attention_targets": resolved["attention_targets"],
+    }
 
 
 def _is_projector_lora_parameter(name: str, allowed_paths: set[str]) -> bool:
@@ -164,7 +190,9 @@ def validate_language_model_lora_scope(
     allowed_full_projector_path: str | None = None,
 ) -> dict[str, object]:
     """Validate PEFT trainability using only exact Qwen3-VL LM paths."""
-    targets = list(dict.fromkeys(configured_targets))
+    # This API intentionally accepts canonical suffixes only.  Full expanded
+    # module paths belong to the independent projector validator.
+    targets = validate_configured_lora_targets(configured_targets)
     expected = set(range(expected_layer_count)) if configured_layers is None else set(configured_layers)
     architecture_layers = {
         int(match.group(1))
@@ -293,6 +321,85 @@ def _is_bnb_8bit_linear(module) -> bool:
     return isinstance(module, bnb.nn.Linear8bitLt)
 
 
+def merger_base_tensors(model, projector_path: str = QWEN3_VL_PROJECTOR_PATH) -> dict[str, object]:
+    """Return the canonical, pre-adapter merger tensors used for parity checks."""
+    projector = get_module_by_exact_path(model, projector_path)
+    expected = ("norm.weight", "norm.bias", "linear_fc1.weight", "linear_fc1.bias",
+                "linear_fc2.weight", "linear_fc2.bias")
+    parameters = dict(projector.named_parameters())
+    required = ("norm.weight", "linear_fc1.weight", "linear_fc2.weight")
+    missing = [name for name in required if name not in parameters]
+    if missing:
+        raise RuntimeError(f"Main merger checksum is missing tensors: {missing}")
+    # Biases are optional in the actual merger architecture.  Keep the same
+    # canonical selection rule for training and deployment, while omitting
+    # fields that are not present.
+    return {name: parameters[name] for name in expected if name in parameters}
+
+
+def tensor_storage_bytes(tensor) -> bytes:
+    """Return the tensor's exact contiguous CPU storage representation."""
+    import torch
+
+    value = tensor.detach().cpu().contiguous()
+    if value.is_quantized:
+        raise TypeError(
+            "Checksum does not support PyTorch quantized tensors; "
+            "the mixed-precision main merger must contain floating tensors."
+        )
+    return value.view(torch.uint8).numpy().tobytes()
+
+
+def merger_base_checksum(model, projector_path: str = QWEN3_VL_PROJECTOR_PATH) -> str:
+    projector = get_module_by_exact_path(model, projector_path)
+    non_floating = [
+        name for name, parameter in projector.named_parameters()
+        if not parameter.is_floating_point()
+    ]
+    if non_floating:
+        raise RuntimeError(
+            f"Main merger checksum requires floating tensors: {non_floating}"
+        )
+
+    digest = hashlib.sha256()
+    tensors = merger_base_tensors(model, projector_path)
+    for name, parameter in sorted(projector.named_parameters()):
+        if name not in tensors:
+            continue
+        tensor = parameter.detach().cpu().contiguous()
+        digest.update(name.encode("utf-8"))
+        digest.update(str(tuple(tensor.shape)).encode("utf-8"))
+        digest.update(str(tensor.dtype).encode("utf-8"))
+        digest.update(tensor_storage_bytes(tensor))
+    return digest.hexdigest()
+
+
+def merger_dtype_map(model, projector_path: str = QWEN3_VL_PROJECTOR_PATH) -> dict[str, str]:
+    return {name: str(parameter.dtype) for name, parameter in merger_base_tensors(model, projector_path).items()}
+
+
+def validate_mixed_precision_merger(model, projector_path: str = QWEN3_VL_PROJECTOR_PATH) -> dict[str, object]:
+    """Fail before PEFT if load-time exclusion did not preserve the merger."""
+    import torch
+    merger = get_module_by_exact_path(model, projector_path)
+    details = {}
+    for child in A2_PROJECTOR_LINEAR_NAMES:
+        path = f"{projector_path}.{child}"
+        layer = getattr(merger, child, None)
+        if type(layer) is not torch.nn.Linear:
+            raise RuntimeError(f"Mixed-precision merger load failed: {path} must be exact torch.nn.Linear, got {type(layer)!r}")
+        if layer.weight.dtype != torch.bfloat16 or not layer.weight.is_floating_point():
+            raise RuntimeError(f"Mixed-precision merger load failed: {path} must have floating torch.bfloat16 weights")
+        details[path] = {"type": type(layer).__name__, "dtype": str(layer.weight.dtype), "floating": True}
+    norm = getattr(merger, "norm", None)
+    if norm is None:
+        raise RuntimeError("Mixed-precision merger load failed: model.visual.merger.norm is missing")
+    norm.to(dtype=torch.float32)
+    if any(parameter.dtype != torch.float32 for parameter in norm.parameters()):
+        raise RuntimeError("Mixed-precision merger load failed: merger.norm must be torch.float32")
+    return {"main_merger_linear_count": 2, "norm_dtype": "torch.float32", "details": details}
+
+
 def _quant_state_type_name(quant_state) -> str:
     value = getattr(quant_state, "quant_type", None)
     if value is None and isinstance(quant_state, dict):
@@ -417,6 +524,19 @@ def dequantize_trainable_projector(model, projector_path: str, *, dtype=None, va
 
     dtype = torch.bfloat16 if dtype is None else dtype
     projector = get_module_by_exact_path(model, projector_path)
+    if all(type(getattr(projector, child, None)) is torch.nn.Linear
+           and getattr(projector, child).weight.dtype == torch.bfloat16
+           for child in A2_PROJECTOR_LINEAR_NAMES):
+        return {"converted_linears": 0, "before": {name: str(p.dtype) for name, p in projector.named_parameters()},
+                "after": {name: str(p.dtype) for name, p in projector.named_parameters()},
+                "metadata": [], "source": "load_time_exclusion"}
+    quantized_children = any(_is_bnb_4bit_linear(getattr(projector, child, None)) for child in A2_PROJECTOR_LINEAR_NAMES)
+    fallback_setting = getattr(model, "_allow_dequantized_projector_fallback", None)
+    if quantized_children and fallback_setting is False:
+        raise RuntimeError(
+            "Main merger is still quantized; refusing quantize->dequantize projector fallback. "
+            "Use load-time exclusion or set student.allow_dequantized_projector_fallback=true."
+        )
     before = {name: str(parameter.dtype) for name, parameter in projector.named_parameters()}
     converted, metadata = _replace_quantized_linears(
         projector, dtype=dtype, prefix=projector_path, validate_forward=validate_forward
@@ -439,7 +559,8 @@ def dequantize_trainable_projector(model, projector_path: str, *, dtype=None, va
         module = projector.get_submodule(relative_path)
         if module.weight.dtype != dtype or not module.weight.is_floating_point():
             raise RuntimeError(f"Converted projector linear is not floating {dtype}: {item['path']}")
-    return {"converted_linears": converted, "before": before, "after": after, "metadata": metadata}
+    return {"converted_linears": converted, "before": before, "after": after, "metadata": metadata,
+            "source": "quantized_dequantized_fallback"}
 
 
 def prepare_projector_for_lora(model, projector_path: str = QWEN3_VL_PROJECTOR_PATH, *, dtype=None) -> dict[str, object]:
@@ -448,16 +569,22 @@ def prepare_projector_for_lora(model, projector_path: str = QWEN3_VL_PROJECTOR_P
     dtype = torch.bfloat16 if dtype is None else dtype
     resolved = resolve_a2_lora_targets(model, projector_path)
     projector = get_module_by_exact_path(model, projector_path)
-    converted, metadata = _replace_quantized_linears(
-        projector, dtype=dtype, prefix=projector_path, validate_forward=False
-    )
+    if any(_is_bnb_4bit_linear(getattr(projector, child, None)) for child in A2_PROJECTOR_LINEAR_NAMES):
+        if any(_is_bnb_4bit_linear(getattr(projector, child, None)) for child in A2_PROJECTOR_LINEAR_NAMES) and getattr(model, "_allow_dequantized_projector_fallback", None) is False:
+            raise RuntimeError("A2 projector is Linear4bit before PEFT; load-time merger exclusion is required.")
+        converted, metadata = _replace_quantized_linears(
+            projector, dtype=dtype, prefix=projector_path, validate_forward=False
+        )
+        source = "quantized_dequantized_fallback"
+    else:
+        converted, metadata, source = 0, [], "load_time_exclusion"
     for parameter in projector.parameters():
         parameter.requires_grad_(False)
     for path in resolved["projector_targets"]:
         module = get_module_by_exact_path(model, path)
         if not module.weight.is_floating_point():
             raise RuntimeError(f"A2 projector LoRA requires floating-point base weight at {path}.")
-    return {"converted_linears": converted, "metadata": metadata,
+    return {"converted_linears": converted, "metadata": metadata, "source": source,
             "projector_targets": resolved["projector_targets"]}
 
 
@@ -621,6 +748,36 @@ def validate_a3_attn_mlp_full_projector_contract(
     return report
 
 
+def validate_projector_lora_scope(
+    model, projector_targets: list[str] | tuple[str, ...],
+) -> dict[str, object]:
+    """Validate projector LoRA independently from the language-model scope."""
+    targets = list(dict.fromkeys(str(target) for target in projector_targets))
+    expected = {f"{QWEN3_VL_PROJECTOR_PATH}.{child}" for child in A2_PROJECTOR_LINEAR_NAMES}
+    if set(targets) != expected:
+        raise ValueError(f"A2 projector LoRA targets must be exactly {sorted(expected)}.")
+    trainable_projector = []
+    illegal = []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad or not parameter_matches_module_path(name, QWEN3_VL_PROJECTOR_PATH):
+            continue
+        if "lora_" in name.lower() and _is_projector_lora_parameter(name, expected):
+            trainable_projector.append((name, parameter))
+        else:
+            illegal.append(name)
+    if len(trainable_projector) != 4 or illegal:
+        raise RuntimeError(
+            "Projector LoRA scope validation failed: "
+            f"expected_targets={sorted(expected)}, tensors={len(trainable_projector)}, "
+            f"illegal={illegal[:10]}"
+        )
+    return {
+        "projector_logical_module_count": len(expected),
+        "projector_lora_tensor_count": len(trainable_projector),
+        "projector_targets": sorted(expected),
+    }
+
+
 def validate_a2_projector_lora_contract(
     model, *, projector_path: str = QWEN3_VL_PROJECTOR_PATH,
     expected_layer_count: int = QWEN3_VL_LANGUAGE_LAYER_COUNT,
@@ -628,6 +785,7 @@ def validate_a2_projector_lora_contract(
     """Fail-fast A2 contract: all LM QKVO plus only main-merger LoRA A/B train."""
     resolved = resolve_a2_lora_targets(model, projector_path, expected_layer_count=expected_layer_count)
     allowed = set(resolved["projector_targets"])
+    projector_report = validate_projector_lora_scope(model, resolved["projector_targets"])
     trainable = [(name, p) for name, p in model.named_parameters() if p.requires_grad]
     illegal = []
     attention = {target: set() for target in QWEN3_VL_ATTENTION_TARGETS}
@@ -649,6 +807,16 @@ def validate_a2_projector_lora_contract(
             f"{illegal[:20]}; missing attention={missing}; projector_lora={projector_lora}"
         )
     report = {
+        "attention_module_count": expected_layer_count * len(QWEN3_VL_ATTENTION_TARGETS),
+        "attention_tensor_count": sum(
+            1 for n, _ in trainable if _LM_LORA_RE.search(n)
+            and _LM_LORA_RE.search(n).group(2).lower() in {x.lower() for x in QWEN3_VL_ATTENTION_TARGETS}
+        ),
+        "projector_logical_module_count": projector_report["projector_logical_module_count"],
+        "projector_lora_tensor_count": projector_report["projector_lora_tensor_count"],
+        "mlp_module_count": 0,
+        "modules_to_save_projector_tensor_count": 0,
+        "vision_trainable": 0,
         "attention_lora_parameters": sum(p.numel() for n, p in trainable if _LM_LORA_RE.search(n)),
         "projector_lora_parameters": sum(p.numel() for n, p in trainable if n in projector_lora),
         "attention_targets": resolved["attention_targets"],

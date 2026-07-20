@@ -14,6 +14,7 @@ from .data_manifest import read_jsonl
 from .device_utils import batch_to_device, resolve_requested_device_map, resolve_training_device_map, select_model_input_device
 from .loss_switch_kd import _causal_lm_loss, full_dynamic_bidirectional_logits_difference
 from .model_loading import apply_attn_implementation, resolve_model_path
+from .mixed_precision import build_mixed_precision_quantization_config
 from .student_trainability import (
     QWEN3_VL_PROJECTOR_PATH,
     QWEN3_VL_ATTENTION_TARGETS,
@@ -23,6 +24,7 @@ from .student_trainability import (
     dequantize_trainable_projector,
     full_projector_modules_to_save_path,
     prepare_projector_for_lora,
+    build_a2_lora_scope,
     resolve_a2_lora_targets,
     resolve_language_model_lora_targets,
     validate_a2_projector_lora_contract,
@@ -31,6 +33,9 @@ from .student_trainability import (
     validate_language_model_lora_scope,
     validate_projector_trainable_parameters,
     validate_projector_path,
+    validate_mixed_precision_merger,
+    merger_base_checksum,
+    merger_dtype_map,
 )
 from .parsing_output_parser import serialize_parsing_label
 from .stage_student_training import VlmTrainingDataset
@@ -456,14 +461,61 @@ def _load_student(config):
         trust_remote_code=True,
         local_files_only=True,
     )
-    model_kwargs, resolved_device_map = _build_model_kwargs(
-        quantization=config.student.quantization,
-        device_map=config.student.device_map,
-        attn_implementation=config.student.attn_implementation,
-        torch_dtype_name="bfloat16",
-        role="student",
+    mixed_merger = bool(
+        getattr(config.student, "train_multimodal_projector", False)
+        or getattr(config.student, "use_projector_lora", False)
     )
+    allow_fallback = bool(getattr(config.student, "allow_dequantized_projector_fallback", False))
+    if mixed_merger and config.student.quantization in {"4bit", "8bit"}:
+        model_kwargs, resolved_device_map = _build_model_kwargs(
+            quantization=config.student.quantization,
+            device_map=config.student.device_map,
+            attn_implementation=config.student.attn_implementation,
+            torch_dtype_name="bfloat16",
+            role="student",
+        )
+        try:
+            model_kwargs["quantization_config"] = build_mixed_precision_quantization_config(
+                quantization=config.student.quantization,
+                excluded_module_paths=[
+                    "model.visual.merger.linear_fc1",
+                    "model.visual.merger.linear_fc2",
+                ],
+            )
+        except RuntimeError:
+            if not allow_fallback:
+                raise
+            # Explicit compatibility mode: retain the old quantized load and let
+            # the projector helper perform the documented dequantization fallback.
+            model_kwargs, resolved_device_map = _build_model_kwargs(
+                quantization=config.student.quantization,
+                device_map=config.student.device_map,
+                attn_implementation=config.student.attn_implementation,
+                torch_dtype_name="bfloat16", role="student",
+            )
+    else:
+        model_kwargs, resolved_device_map = _build_model_kwargs(
+            quantization=config.student.quantization,
+            device_map=config.student.device_map,
+            attn_implementation=config.student.attn_implementation,
+            torch_dtype_name="bfloat16",
+            role="student",
+        )
     model = AutoModelForVLM.from_pretrained(student_model_path, **model_kwargs)
+    if mixed_merger and config.student.quantization in {"4bit", "8bit"} and "quantization_config" in model_kwargs and allow_fallback is False:
+        validation = validate_mixed_precision_merger(model, config.student.multimodal_projector_path)
+        model._mixed_precision_source = "load_time_exclusion"
+        model._main_merger_base_checksum = merger_base_checksum(model, config.student.multimodal_projector_path)
+        model._main_merger_dtype_map = merger_dtype_map(model, config.student.multimodal_projector_path)
+        print(f"main_merger_base_checksum={model._main_merger_base_checksum}")
+        print("mixed precision merger validation passed")
+        print("training_mixed_precision_source=load_time_exclusion")
+        print("main_merger_quantized_before_peft=false")
+        print(f"language_model_linear4bit_count={sum(1 for _, m in model.named_modules() if type(m).__name__ == 'Linear4bit')}")
+        print(f"main_merger_linear_count={validation['main_merger_linear_count']}")
+        print(f"training_merger_norm_dtype_before_peft={validation['norm_dtype']}")
+    setattr(model, "_allow_dequantized_projector_fallback",
+            bool(getattr(config.student, "allow_dequantized_projector_fallback", False)))
     return model, processor, student_model_path, resolved_device_map
 
 
@@ -851,6 +903,11 @@ def _maybe_enable_student_lora(config, model, *, dry_run: bool = False):
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
     if config.student.quantization in {"4bit", "8bit"}:
+        model._allow_dequantized_projector_fallback = bool(
+            getattr(config.student, "allow_dequantized_projector_fallback", False)
+        )
+
+    if config.student.quantization in {"4bit", "8bit"}:
         model = prepare_model_for_kbit_training(model)
     projector_targets = []
     if getattr(config.student, "use_projector_lora", False):
@@ -859,6 +916,7 @@ def _maybe_enable_student_lora(config, model, *, dry_run: bool = False):
         if not config.student.use_lora:
             raise ValueError("use_projector_lora=true requires use_lora=true.")
         preparation = prepare_projector_for_lora(model, config.student.multimodal_projector_path)
+        model._mixed_precision_source = preparation.get("source", "load_time_exclusion")
         projector_targets = list(preparation["projector_targets"])
         print(f"projector_lora_preparation={preparation}")
     if config.student.train_multimodal_projector:
@@ -868,24 +926,29 @@ def _maybe_enable_student_lora(config, model, *, dry_run: bool = False):
             model, config.student.multimodal_projector_path,
             validate_forward=not dry_run,
         )
+        model._mixed_precision_source = conversion.get("source", "load_time_exclusion")
         print(f"projector_dequantization={conversion}")
         validate_projector_trainable_parameters(model, config.student.multimodal_projector_path)
-    attention_targets = config.student.target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
-    target_modules = attention_targets
-    if set(target_modules) & set(QWEN3_VL_MLP_TARGETS):
-        resolved_lm = resolve_language_model_lora_targets(model, target_modules)
+    language_model_targets = config.student.target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
+    target_modules = language_model_targets
+    a2_scope = None
+    if projector_targets:
+        a2_scope = build_a2_lora_scope(
+            model, language_model_targets, config.student.multimodal_projector_path
+        )
+        projector_targets = list(a2_scope["projector_targets"])
+        target_modules = list(a2_scope["peft_target_modules"])
+        print("A2 resolved LoRA target module names:")
+        for target in target_modules:
+            print(f"  - {target}")
+    if set(language_model_targets) & set(QWEN3_VL_MLP_TARGETS):
+        resolved_lm = resolve_language_model_lora_targets(model, language_model_targets)
         print(
             "A3 resolved LM LoRA targets: "
             f"attention_module_count={resolved_lm['attention_module_count']} "
             f"mlp_module_count={resolved_lm['mlp_module_count']} "
             f"total_module_count={resolved_lm['total_module_count']}"
         )
-    if projector_targets:
-        resolved = resolve_a2_lora_targets(model, config.student.multimodal_projector_path)
-        target_modules = list(resolved["all_targets"])
-        print("A2 resolved LoRA target module names:")
-        for target in target_modules:
-            print(f"  - {target}")
     rank_pattern = {}
     alpha_pattern = {}
     if projector_targets:
@@ -914,6 +977,10 @@ def _maybe_enable_student_lora(config, model, *, dry_run: bool = False):
         lora_kwargs["layers_pattern"] = layers_pattern
     lora_config = LoraConfig(**lora_kwargs)
     wrapped = get_peft_model(model, lora_config)
+    for attr in ("_main_merger_base_checksum", "_main_merger_dtype_map", "_mixed_precision_source",
+                 "_allow_dequantized_projector_fallback"):
+        if hasattr(model, attr):
+            setattr(wrapped, attr, getattr(model, attr))
     validate_projector_trainable_parameters(wrapped, config.student.multimodal_projector_path)
     if hasattr(config.student, "lora_layers_to_transform"):
         allowed_full_projector_path = (
@@ -922,7 +989,7 @@ def _maybe_enable_student_lora(config, model, *, dry_run: bool = False):
             else None
         )
         validate_language_model_lora_scope(
-            wrapped, layers_to_transform, target_modules,
+            wrapped, layers_to_transform, language_model_targets,
             projector_path=config.student.multimodal_projector_path,
             allowed_projector_lora_paths=projector_targets,
             allowed_full_projector_path=allowed_full_projector_path,
@@ -951,6 +1018,22 @@ def _apply_student_train_setup(config, model, *, dry_run: bool = False):
     print(f"student_gradient_checkpointing_module_count={len(checkpointing_modules)}")
     print(f"student_gradient_checkpointing_module_examples={checkpointing_modules[:20]}")
     validate_projector_path(model, config.student.multimodal_projector_path)
+    mixed_merger = bool(
+        getattr(config.student, "train_multimodal_projector", False)
+        or getattr(config.student, "use_projector_lora", False)
+    ) and config.student.quantization in {"4bit", "8bit"} and not bool(
+        getattr(config.student, "allow_dequantized_projector_fallback", False)
+    )
+    if mixed_merger:
+        # prepare_model_for_kbit_training may promote floating parameters to FP32;
+        # restore the explicit deployment contract without quantize->dequantize.
+        from .student_trainability import get_module_by_exact_path
+        import torch
+        prepared_merger = get_module_by_exact_path(model, config.student.multimodal_projector_path)
+        for child_name in ("linear_fc1", "linear_fc2"):
+            getattr(prepared_merger, child_name).to(dtype=torch.bfloat16)
+        validation = validate_mixed_precision_merger(model, config.student.multimodal_projector_path)
+        print(f"training_merger_norm_dtype_after_prepare_model_for_kbit_training={validation['norm_dtype']}")
     if config.student.train_multimodal_projector:
         # Do this before PEFT modules_to_save copies the module.
         if not config.student.use_lora:
@@ -958,6 +1041,7 @@ def _apply_student_train_setup(config, model, *, dry_run: bool = False):
                 model, config.student.multimodal_projector_path,
                 validate_forward=not dry_run,
             )
+            model._mixed_precision_source = conversion.get("source", "load_time_exclusion")
             print(f"projector_dequantization={conversion}")
     model = _maybe_enable_student_lora(config, model, dry_run=dry_run)
     summary = freeze_student_vision_keep_merger_lm_trainable(
@@ -999,6 +1083,18 @@ def _apply_student_train_setup(config, model, *, dry_run: bool = False):
             model, projector_path=config.student.multimodal_projector_path
         )
     model.train()
+    if mixed_merger:
+        # PEFT's modules_to_save copy must obey the same dtype contract.
+        merger = model
+        try:
+            from .student_trainability import get_module_by_exact_path
+            merger = get_module_by_exact_path(model, config.student.multimodal_projector_path)
+            active = getattr(getattr(merger, "modules_to_save", None), "default", None)
+            if active is not None:
+                active.norm.to(dtype=__import__("torch").float32)
+                print(f"training_merger_norm_dtype_modules_to_save={next(active.norm.parameters()).dtype}")
+        except AttributeError:
+            pass
     return model, summary
 
 
@@ -1577,6 +1673,7 @@ def run_training(
         input_device=teacher_input_device,
     )
     student_model, student_processor, student_model_path, _student_device_map = _load_student(config)
+    print("student loaded")
     _print_gpu_memory_stage("student_loaded")
     _validate_online_dbild_token_alignment_rows(
         rows=rows,
@@ -1828,6 +1925,7 @@ def run_training(
                 if last_step_log_values["vocab_prefix_alignment_used"]:
                     step_message += f" shared_vocab_size={last_step_log_values['shared_vocab_size']}"
                 print(step_message)
+                print(f"optimizer step {global_step} completed")
 
                 if total_target_steps is not None and global_step >= total_target_steps:
                     break
@@ -1857,12 +1955,23 @@ def run_training(
             if last_step_log_values["vocab_prefix_alignment_used"]:
                 step_message += f" shared_vocab_size={last_step_log_values['shared_vocab_size']}"
             print(step_message)
+            print(f"optimizer step {global_step} completed")
 
     if smoke_test and global_step != 1:
         raise RuntimeError(f"Smoke test expected exactly one optimizer step, got {global_step}.")
     adapter_dir.mkdir(parents=True, exist_ok=True)
     student_model.save_pretrained(adapter_dir)
     student_processor.save_pretrained(adapter_dir)
+    adapter_metadata = {
+        "base_projector_checksum_before_lora": getattr(student_model, "_main_merger_base_checksum", None),
+        "base_projector_dtype_map": getattr(student_model, "_main_merger_dtype_map", None),
+        "mixed_precision_source": getattr(student_model, "_mixed_precision_source", "load_time_exclusion"),
+        "main_merger_quantized_before_peft": False,
+        "merger_norm_dtype": "torch.float32",
+    }
+    (adapter_dir / "adapter_metadata.json").write_text(
+        json.dumps(adapter_metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     if smoke_test:
         _validate_smoke_adapter_checkpoint(adapter_dir)
     print(f"peak_vram_allocated_bytes={_gpu_peak_memory_allocated()}")

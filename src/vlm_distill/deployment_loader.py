@@ -14,7 +14,10 @@ import torch
 
 from .mixed_precision import build_mixed_precision_quantization_config
 from .model_loading import apply_attn_implementation, resolve_model_path
-from .student_trainability import QWEN3_VL_ATTENTION_TARGETS, QWEN3_VL_MLP_TARGETS
+from .student_trainability import (
+    QWEN3_VL_ATTENTION_TARGETS, QWEN3_VL_MLP_TARGETS,
+    merger_base_checksum, merger_dtype_map, tensor_storage_bytes,
+)
 
 MAIN_MERGER_PATHS = [
     "model.visual.merger.linear_fc1",
@@ -69,10 +72,10 @@ def _tensor_digest(tensors: dict[str, torch.Tensor]) -> str:
     digest = hashlib.sha256()
     for name in sorted(tensors):
         tensor = tensors[name].detach().cpu().contiguous()
-        digest.update(name.encode())
-        digest.update(str(tensor.dtype).encode())
-        digest.update(repr(tuple(tensor.shape)).encode())
-        digest.update(tensor.numpy().tobytes())
+        digest.update(name.encode("utf-8"))
+        digest.update(str(tuple(tensor.shape)).encode("utf-8"))
+        digest.update(str(tensor.dtype).encode("utf-8"))
+        digest.update(tensor_storage_bytes(tensor))
     return digest.hexdigest()
 
 
@@ -373,10 +376,14 @@ def _summary(model: Any) -> dict[str, Any]:
 def validate_high_fidelity_deployment(model: Any, config: Any = None, *, smoke_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
     """Validate the deployment contract and return a machine-readable summary."""
     merger = _active_merger(model)
+    require_bf16_merger = getattr(getattr(config, "student", config), "main_merger_bf16", True) if config else True
     for child in ("linear_fc1", "linear_fc2"):
         layer = getattr(merger, child, None)
-        if type(layer) is not torch.nn.Linear or layer.weight.dtype != torch.bfloat16:
+        if require_bf16_merger and (type(layer) is not torch.nn.Linear or layer.weight.dtype != torch.bfloat16):
             raise RuntimeError(f"main merger {child} must be torch.nn.Linear with BF16 weights")
+    norm = getattr(merger, "norm", None)
+    if require_bf16_merger and norm is not None and any(parameter.dtype != torch.float32 for parameter in norm.parameters()):
+        raise RuntimeError("deployment validation failed: merger.norm must be torch.float32")
     summary = _summary(model)
     print(f"runtime LoRA parameter count: {summary['runtime_lora_parameter_count']}")
     print(f"runtime LoRA parameter examples: {summary['runtime_lora_parameter_examples']}")
@@ -494,6 +501,8 @@ def validate_high_fidelity_deployment(model: Any, config: Any = None, *, smoke_i
     print(f"MLP LoRA dtype summary: {summary['mlp_dtypes']}")
     print(f"Modules-to-save projector dtype summary: {summary['modules_to_save_projector_dtypes']}")
     print(f"Projector LoRA dtype summary: {summary['projector_lora_dtypes']}")
+    if norm is not None:
+        print(f"deployment_merger_norm_dtype_after_peft={next(norm.parameters()).dtype}")
     return summary
 
 
@@ -521,10 +530,28 @@ def load_high_fidelity_adapter_deployment(
     processor = AutoProcessor.from_pretrained(str(processor_source), trust_remote_code=True, use_fast=False, local_files_only=True)
     kwargs: dict[str, Any] = {"device_map": "auto", "torch_dtype": torch.bfloat16, "trust_remote_code": True, "local_files_only": True}
     apply_attn_implementation(kwargs, metadata.get("attn_implementation", "sdpa"))
+    excluded = metadata.get("excluded_from_quantization", MAIN_MERGER_PATHS)
     kwargs["quantization_config"] = build_mixed_precision_quantization_config(
-        quantization="4bit", excluded_module_paths=MAIN_MERGER_PATHS
+        quantization="4bit", excluded_module_paths=excluded
     )
     model = AutoModelForVLM.from_pretrained(base, **kwargs)
+    # The checksum is intentionally computed before PEFT attaches any adapter.
+    # A2 stores only deltas, so this is the base-weight identity contract.
+    merger = resolve_exact_module(model, "model.visual.merger")
+    if metadata.get("projector_mode") in {"projector_lora", "modules_to_save"}:
+        for child in ("linear_fc1", "linear_fc2"):
+            getattr(merger, child).to(dtype=torch.bfloat16)
+        merger.norm.to(dtype=torch.float32)
+        expected_dtype_map = metadata.get("base_projector_dtype_map")
+        actual_dtype_map = merger_dtype_map(model)
+        if expected_dtype_map and actual_dtype_map != expected_dtype_map:
+            raise RuntimeError("A2 deployment base projector dtype map does not match the projector used during training")
+        expected_checksum = metadata.get("base_projector_checksum_before_lora")
+        if expected_checksum:
+            actual_checksum = merger_base_checksum(model)
+            if actual_checksum != expected_checksum:
+                raise RuntimeError("A2 deployment base projector does not match the projector used during training")
+        print(f"deployment_merger_norm_dtype_before_peft={next(merger.norm.parameters()).dtype}")
     adapter_path = deployment_path / metadata.get("adapter_path", "adapter")
     from peft import PeftModel
     model = PeftModel.from_pretrained(model, str(adapter_path), local_files_only=True)
@@ -536,6 +563,7 @@ def load_high_fidelity_adapter_deployment(
         projector_checksum=(metadata.get("projector_checksum") or projector_checksum_from_adapter_checkpoint(adapter_path)),
         target_modules=[*metadata.get("lora_target_groups", {}).get("attention", []),
                         *metadata.get("lora_target_groups", {}).get("mlp", [])],
+        main_merger_bf16=bool(metadata.get("main_merger_bf16", True)),
     ))
     validate_high_fidelity_deployment(model, validation_config)
     print(f"prediction_model_source={metadata.get('artifact_mode')}")

@@ -75,6 +75,7 @@ class StudentConfig:
     projector_lora_dropout: float | None = None
     multimodal_projector_path: str = "model.visual.merger"
     merged_artifact_mode: str = "bf16_standalone"
+    allow_dequantized_projector_fallback: bool = False
 
 
 @dataclass
@@ -334,6 +335,8 @@ def _build_student_config(raw: dict[str, Any]) -> StudentConfig:
         raise ValueError("student.train_multimodal_projector must be a boolean.")
     if not isinstance(values.get("use_projector_lora", False), bool):
         raise ValueError("student.use_projector_lora must be a boolean.")
+    if not isinstance(values.get("allow_dequantized_projector_fallback", False), bool):
+        raise ValueError("student.allow_dequantized_projector_fallback must be a boolean.")
     if values.get("train_multimodal_projector", False) and values.get("use_projector_lora", False):
         raise ValueError("student.train_multimodal_projector and student.use_projector_lora are mutually exclusive (A1/A2).")
     if values.get("use_projector_lora", False) and not values.get("use_lora", True):
