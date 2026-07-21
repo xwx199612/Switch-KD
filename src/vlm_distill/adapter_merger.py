@@ -41,11 +41,52 @@ def _sha256_directory(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _candidate_module_roots(model: Any) -> list[Any]:
+    roots: list[Any] = []
+
+    def add(candidate: Any) -> None:
+        if candidate is None:
+            return
+        if any(candidate is existing for existing in roots):
+            return
+        roots.append(candidate)
+
+    add(model)
+
+    get_base_model = getattr(model, "get_base_model", None)
+    if callable(get_base_model):
+        try:
+            add(get_base_model())
+        except Exception:
+            pass
+
+    base_model = getattr(model, "base_model", None)
+    add(base_model)
+    add(getattr(base_model, "model", None))
+
+    return roots
+
+
 def _module(model: Any, path: str) -> Any:
-    current = model
-    for part in path.split("."):
-        current = getattr(current, part)
-    return current
+    failures: list[str] = []
+
+    for root in _candidate_module_roots(model):
+        try:
+            get_submodule = getattr(root, "get_submodule", None)
+            if callable(get_submodule):
+                return get_submodule(path)
+
+            current = root
+            for part in path.split("."):
+                current = getattr(current, part)
+            return current
+        except (AttributeError, KeyError) as exc:
+            failures.append(f"{type(root).__name__}: {exc}")
+
+    raise AttributeError(
+        f"Unable to resolve module path {path!r} from "
+        f"{type(model).__name__}; attempted roots: {'; '.join(failures)}"
+    )
 
 
 def _checksum_module(module: Any) -> str:

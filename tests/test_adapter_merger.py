@@ -39,6 +39,48 @@ class _Model(torch.nn.Module):
         self.lm = torch.nn.Linear(2, 2, dtype=torch.bfloat16)
 
 
+class _FakeConditionalGeneration(torch.nn.Module):
+    def __init__(self, merger):
+        super().__init__()
+        self.model = torch.nn.Module()
+        self.model.visual = torch.nn.Module()
+        self.model.visual.merger = merger
+
+
+class _FakePeftModel(torch.nn.Module):
+    def __init__(self, base_model):
+        super().__init__()
+        self._base_model = base_model
+
+    def get_base_model(self):
+        return self._base_model
+
+    @property
+    def model(self):
+        return self._base_model
+
+
+def test_module_resolves_peft_and_merged_model_roots():
+    expected_merger = torch.nn.Linear(2, 2)
+    base_model = _FakeConditionalGeneration(expected_merger)
+    fake_peft_model = _FakePeftModel(base_model)
+
+    resolved = adapter_merger._module(fake_peft_model, "model.visual.merger")
+    assert resolved is expected_merger
+
+    fake_merged_model = base_model
+    resolved = adapter_merger._module(fake_merged_model, "model.visual.merger")
+    assert resolved is expected_merger
+
+
+def test_module_error_lists_attempted_roots():
+    base_model = _FakeConditionalGeneration(torch.nn.Linear(2, 2))
+    fake_peft_model = _FakePeftModel(base_model)
+
+    with pytest.raises(AttributeError, match=r"attempted roots:.*_FakePeftModel.*_FakeConditionalGeneration"):
+        adapter_merger._module(fake_peft_model, "model.visual.missing")
+
+
 def test_a0_after_merge_has_no_peft_modules(tmp_path):
     model = _Model()
     model.lora_A = torch.nn.Linear(2, 2, bias=False, dtype=torch.bfloat16)
