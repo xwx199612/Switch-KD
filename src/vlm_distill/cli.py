@@ -21,6 +21,7 @@ from .model_output_artifacts import refresh_parsing_sidecar_reports
 from .stage_evaluation import evaluate
 from .stage_merge_adapter import merge_student_adapter
 from .stage_package_adapter_deployment import package_high_fidelity_adapter_deployment
+from .adapter_merger import merge_adapter_artifact
 from .stage_prediction_evaluation import evaluate_predictions
 from .stage_student_prediction import create_student_predictions
 from .stage_teacher_precompute import create_teacher_precompute_dataset
@@ -109,6 +110,17 @@ def main() -> None:
     validate_adapter_parser.add_argument("--config", type=Path, required=True)
     validate_adapter_parser.add_argument("--adapter-path", type=Path)
     validate_adapter_parser.add_argument("--projector-path")
+    adapter_merger_parser = subparsers.add_parser(
+        "adapter-merger", help="Merge a PEFT adapter into a standalone BF16 artifact."
+    )
+    adapter_merger_parser.add_argument("--config", type=Path, required=True)
+    adapter_merger_parser.add_argument("--output-dir", type=Path, required=True)
+    adapter_merger_parser.add_argument("--quantization", choices=("none", "bnb4"), default="none")
+    adapter_merger_parser.add_argument("--overwrite", action="store_true")
+    adapter_merger_parser.add_argument("--keep-bf16-intermediate", action="store_true")
+    adapter_merger_parser.add_argument("--max-shard-size", default="5GB")
+    adapter_merger_parser.add_argument("--device-map", default="auto")
+    adapter_merger_parser.add_argument("--smoke-test", action="store_true")
     annotate_parser = subparsers.add_parser(
         "annotate-predictions", help="Draw predicted UI element boxes on image copies."
     )
@@ -126,6 +138,16 @@ def main() -> None:
     annotate_parser.add_argument("--show-focused", action=argparse.BooleanOptionalAction, default=True)
     annotate_parser.add_argument("--write-sidecar", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
+
+    if args.command == "adapter-merger":
+        config = load_config(args.config)
+        output = merge_adapter_artifact(
+            config, args.output_dir, quantization=args.quantization, overwrite=args.overwrite,
+            keep_bf16_intermediate=args.keep_bf16_intermediate, max_shard_size=args.max_shard_size,
+            device_map=args.device_map, smoke_test=args.smoke_test,
+        )
+        print(f"OK adapter-merger artifact written: {output}")
+        return
 
     if args.command == "create-manifest":
         config = load_config(args.config)
