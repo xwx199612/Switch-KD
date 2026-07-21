@@ -170,23 +170,45 @@ def _adapter_metadata(adapter_path: Path) -> dict[str, Any]:
     }
 
 
-def _validate_adapter_target_contract(config: PipelineConfig, adapter_path: Path) -> None:
+def _validate_adapter_target_contract(
+    config: PipelineConfig,
+    adapter_path: Path,
+) -> None:
     """Check configured LM targets without applying A2 projector restrictions to A3."""
-    raw = json.loads((adapter_path / "adapter_config.json").read_text(encoding="utf-8"))
-    actual = {str(item) for item in raw.get("target_modules", [])}
-    expected = {str(item) for item in (config.student.target_modules or [])}
+    raw = json.loads(
+        (adapter_path / "adapter_config.json").read_text(encoding="utf-8")
+    )
+
+    actual = {
+        str(item)
+        for item in (raw.get("target_modules") or [])
+    }
+    expected = {
+        str(item)
+        for item in (config.student.target_modules or [])
+    }
+
     missing = sorted(expected - actual)
     if missing:
-        raise RuntimeError(f"Adapter target contract failed: missing={missing!r}")
-    if not config.student.train_multimodal_projector and not config.student.use_projector_lora:
-        modules_to_save = {str(item) for item in raw.get("modules_to_save", [])}
+        raise RuntimeError(
+            f"Adapter target contract failed: missing={missing!r}"
+        )
+
+    if (
+        not config.student.train_multimodal_projector
+        and not config.student.use_projector_lora
+    ):
+        modules_to_save = {
+            str(item)
+            for item in (raw.get("modules_to_save") or [])
+        }
+
         if modules_to_save:
             raise RuntimeError(
-                "Frozen-projector adapter target contract failed: modules_to_save must be empty; "
+                "Frozen-projector adapter target contract failed: "
+                "modules_to_save must be empty; "
                 f"found={sorted(modules_to_save)!r}"
             )
-
-
 def _write_readme(path: Path, mode: str) -> None:
     text = (
         "Standalone BF16 adapter-merger artifact.\n"
