@@ -316,7 +316,13 @@ def load_adapter_merger_artifact(path: str | Path, *, device_map: str = "auto"):
     if not metadata_path.exists():
         raise FileNotFoundError(f"Not an adapter-merger artifact: {metadata_path}")
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    source = path / metadata.get("merged_model_path", "") if metadata["artifact_mode"] == "post_merge_bnb4" else path
+    merged_model_path = metadata.get("merged_model_path")
+    if metadata.get("artifact_mode") == "post_merge_bnb4" and not merged_model_path:
+        deployment_path = path / "deployment_config.json"
+        if deployment_path.exists():
+            deployment = json.loads(deployment_path.read_text(encoding="utf-8"))
+            merged_model_path = deployment.get("merged_model_path")
+    source = path / merged_model_path if metadata["artifact_mode"] == "post_merge_bnb4" else path
     if not source.exists():
         raise FileNotFoundError(f"Adapter-merger model source does not exist: {source}")
     model_class = _vlm_class()
@@ -331,4 +337,12 @@ def load_adapter_merger_artifact(path: str | Path, *, device_map: str = "auto"):
         )
     model = model_class.from_pretrained(str(source), **kwargs)
     processor = processor_class.from_pretrained(str(source), trust_remote_code=True, use_fast=False, local_files_only=True)
+    lora_count = sum("lora_" in name.lower() for name, _ in model.named_modules())
+    linear4bit_count = sum(type(module).__name__ == "Linear4bit" for module in model.modules())
+    print("artifact_mode=post_merge_bnb4")
+    print("adapter_path=none")
+    print("runtime_adapter_required=false")
+    print(f"merged_model_source={source}")
+    print(f"LoRA count={lora_count}")
+    print(f"Linear4bit count={linear4bit_count}")
     return model, processor

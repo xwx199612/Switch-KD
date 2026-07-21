@@ -8,6 +8,7 @@ from typing import Any
 from PIL import Image
 
 from .deployment_loader import load_high_fidelity_adapter_deployment
+from .adapter_merger import load_adapter_merger_artifact
 from .model_loading import apply_attn_implementation, resolve_model_path
 
 
@@ -70,6 +71,26 @@ class BBoxGroundingInferenceEngine:
     @classmethod
     def from_pipeline_config(cls, config):
         student = config.student
+        merger_artifact = None
+        for candidate in (student.deployment_artifact_path,
+                          Path(student.inference_model_path) if student.inference_model_path else None):
+            if candidate is None:
+                continue
+            candidate = Path(candidate)
+            metadata_path = candidate / "adapter_merger_config.json"
+            if metadata_path.exists():
+                import json
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                if metadata.get("artifact_mode") == "post_merge_bnb4":
+                    merger_artifact = candidate
+                    break
+        if merger_artifact is not None:
+            model, processor = load_adapter_merger_artifact(
+                merger_artifact, device_map=getattr(student, "device_map", None) or "auto"
+            )
+            return cls(model, processor, model_path=str(merger_artifact),
+                       debug_inference_parity=bool(getattr(getattr(config, "prediction", None), "debug_inference_parity", False)))
+
         deployment = None
         for candidate in (student.deployment_artifact_path, student.merged_model_path,
                           Path(student.inference_model_path) if student.inference_model_path else None):
