@@ -98,9 +98,11 @@ def package_high_fidelity_adapter_deployment(config: PipelineConfig) -> Path:
         "experiment_mode": (
             "attention_mlp_lora_full_projector"
             if set(configured_targets) & set(QWEN3_VL_MLP_TARGETS) and student.train_multimodal_projector
-            else ("attention_lora_full_projector" if student.train_multimodal_projector
-                  else ("attention_projector_lora" if student.use_projector_lora else "attention_lora"))
+            else ("attention_mlp_lora" if set(configured_targets) & set(QWEN3_VL_MLP_TARGETS)
+                  else ("attention_lora_full_projector" if student.train_multimodal_projector
+                        else ("attention_projector_lora" if student.use_projector_lora else "attention_lora")))
         ),
+        "experiment": "a3_r32_attn_mlp" if set(configured_targets) >= set(QWEN3_VL_ATTENTION_TARGETS) | set(QWEN3_VL_MLP_TARGETS) and not student.train_multimodal_projector and not student.use_projector_lora else None,
         "projector_path": "model.visual.merger",
         "projector_source": "adapter" if projector_mode == "modules_to_save" else None,
         "projector_checksum": (

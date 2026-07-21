@@ -1,0 +1,12 @@
+extends: ../stage1_a3_r32_attn_mlp.yaml
+
+student:
+  output_dir: outputs/lora_ablation/stage1_a3_r32_attn_mlp
+  adapter_dir: outputs/lora_ablation/stage1_a3_r32_attn_mlp/adapter
+  inference_adapter_path: outputs/lora_ablation/stage1_a3_r32_attn_mlp/adapter
+  inference_model_path: outputs/lora_ablation/stage1_a3_r32_attn_mlp/deploy_4bit_bf16_adapter
+  deployment_artifact_path: outputs/lora_ablation/stage1_a3_r32_attn_mlp/deploy_4bit_bf16_adapter
+  quantization: 4bit
+  load_adapter: false
+  merge_adapter: false
+  merged_artifact_mode: 4bit_base_bf16_adapter

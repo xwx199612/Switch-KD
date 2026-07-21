@@ -170,6 +170,23 @@ def _adapter_metadata(adapter_path: Path) -> dict[str, Any]:
     }
 
 
+def _validate_adapter_target_contract(config: PipelineConfig, adapter_path: Path) -> None:
+    """Check configured LM targets without applying A2 projector restrictions to A3."""
+    raw = json.loads((adapter_path / "adapter_config.json").read_text(encoding="utf-8"))
+    actual = {str(item) for item in raw.get("target_modules", [])}
+    expected = {str(item) for item in (config.student.target_modules or [])}
+    missing = sorted(expected - actual)
+    if missing:
+        raise RuntimeError(f"Adapter target contract failed: missing={missing!r}")
+    if not config.student.train_multimodal_projector and not config.student.use_projector_lora:
+        modules_to_save = {str(item) for item in raw.get("modules_to_save", [])}
+        if modules_to_save:
+            raise RuntimeError(
+                "Frozen-projector adapter target contract failed: modules_to_save must be empty; "
+                f"found={sorted(modules_to_save)!r}"
+            )
+
+
 def _write_readme(path: Path, mode: str) -> None:
     text = (
         "Standalone BF16 adapter-merger artifact.\n"
@@ -222,6 +239,7 @@ def merge_adapter_artifact(
         raise FileNotFoundError(f"Base model path does not exist: {base_path}")
     if not adapter_path.exists():
         raise FileNotFoundError(f"Adapter path does not exist: {adapter_path}")
+    _validate_adapter_target_contract(config, adapter_path)
 
     model_class = _vlm_class()
     processor_class = _load_processor_class()
@@ -270,10 +288,17 @@ def merge_adapter_artifact(
     mode = "bf16_merged" if quantization == "none" else "post_merge_bnb4"
     adapter_info = _adapter_metadata(adapter_path)
     projector_mode = "projector_lora" if config.student.use_projector_lora else ("modules_to_save" if config.student.train_multimodal_projector else "base")
+    configured_targets = set(config.student.target_modules or [])
+    has_mlp_lora = bool(configured_targets & {"gate_proj", "up_proj", "down_proj"})
     metadata: dict[str, Any] = {
         "artifact_mode": mode, "base_model_path": str(base_path), "source_adapter_path": str(adapter_path),
-        **adapter_info, "experiment_mode": "attention_projector_lora" if config.student.use_projector_lora else "attention_lora",
+        **adapter_info, "experiment_mode": (
+            "attention_mlp_lora" if has_mlp_lora and not config.student.train_multimodal_projector
+            else ("attention_mlp_lora_full_projector" if has_mlp_lora else
+                  ("attention_projector_lora" if config.student.use_projector_lora else "attention_lora"))
+        ),
         "projector_mode": projector_mode, "adapter_merged": True, "merge_input_dtype": "bfloat16",
+        "experiment": "a3_r32_attn_mlp" if has_mlp_lora and config.student.lora_rank == 32 and not config.student.train_multimodal_projector and not config.student.use_projector_lora else None,
         "merge_input_quantization": "none", "quantization": "none" if quantization == "none" else "bnb_nf4_4bit",
         "quantization_stage": None if quantization == "none" else "after_merge",
         "quantized_weights_persisted": False if quantization == "bnb4" else None,
@@ -337,8 +362,12 @@ def load_adapter_merger_artifact(path: str | Path, *, device_map: str = "auto"):
         )
     model = model_class.from_pretrained(str(source), **kwargs)
     processor = processor_class.from_pretrained(str(source), trust_remote_code=True, use_fast=False, local_files_only=True)
-    lora_count = sum("lora_" in name.lower() for name, _ in model.named_modules())
-    linear4bit_count = sum(type(module).__name__ == "Linear4bit" for module in model.modules())
+    named_modules = model.named_modules() if hasattr(model, "named_modules") else ()
+    modules = model.modules() if hasattr(model, "modules") else ()
+    lora_count = sum("lora_" in name.lower() for name, _ in named_modules)
+    linear4bit_count = sum(type(module).__name__ == "Linear4bit" for module in modules)
+    if metadata.get("experiment"):
+        print(f"experiment={metadata['experiment']}")
     print("artifact_mode=post_merge_bnb4")
     print("adapter_path=none")
     print("runtime_adapter_required=false")

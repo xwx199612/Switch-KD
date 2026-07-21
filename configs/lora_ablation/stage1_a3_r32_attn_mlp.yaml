@@ -1,0 +1,34 @@
+extends: stage1_a0_r32_attn.yaml
+
+student:
+  output_dir: outputs/lora_ablation/stage1_a3_r32_attn_mlp
+  adapter_dir: outputs/lora_ablation/stage1_a3_r32_attn_mlp/adapter
+  merged_model_path: outputs/lora_ablation/stage1_a3_r32_attn_mlp/merged_bf16
+
+  inference_model_path: outputs/lora_ablation/stage1_a3_r32_attn_mlp/deploy_4bit_bf16_adapter
+  inference_adapter_path: outputs/lora_ablation/stage1_a3_r32_attn_mlp/adapter
+  deployment_artifact_path: outputs/lora_ablation/stage1_a3_r32_attn_mlp/deploy_4bit_bf16_adapter
+
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+  train_multimodal_projector: false
+  use_projector_lora: false
+
+  lora_rank: 32
+  lora_alpha: 64
+  lora_dropout: 0.05
+
+data:
+  distill_path: outputs/lora_ablation/stage1_a3_r32_attn_mlp/{task_name}_online_dbild_{response_profile}.jsonl
+  eval_path: outputs/lora_ablation/stage1_a3_r32_attn_mlp/{task_name}_online_dbild_{response_profile}.jsonl
+  prediction_path: outputs/lora_ablation/stage1_a3_r32_attn_mlp/{task_name}_online_dbild_{response_profile}/student_predictions.jsonl
+
+evaluation:
+  output_path: outputs/lora_ablation/stage1_a3_r32_attn_mlp/{task_name}_online_dbild_{response_profile}/eval_report.json

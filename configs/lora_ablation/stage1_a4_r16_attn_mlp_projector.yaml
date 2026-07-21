@@ -1,0 +1,20 @@
+extends: stage1_a1_r16_attn_projector.yaml
+
+student:
+  output_dir: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector
+  adapter_dir: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/adapter
+  merged_model_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/merged_bf16
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  train_multimodal_projector: true
+  use_projector_lora: false
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+
+data:
+  distill_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/{task_name}_online_dbild_{response_profile}.jsonl
+  eval_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/{task_name}_online_dbild_{response_profile}.jsonl
+  prediction_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/{task_name}_online_dbild_{response_profile}/student_predictions.jsonl
+
+evaluation:
+  output_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/{task_name}_online_dbild_{response_profile}/eval_report.json

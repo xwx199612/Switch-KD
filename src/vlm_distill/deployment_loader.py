@@ -514,8 +514,8 @@ def validate_high_fidelity_deployment(model: Any, config: Any = None, *, smoke_i
                 f"missing_layers={missing_layers}; extra_layers={extra_layers}; "
                 f"missing_A_or_B={missing_components}"
             )
-        if summary["projector_lora"] or summary["modules_to_save"] <= 0:
-            raise RuntimeError("A3 deployment validation failed: full modules_to_save projector is required")
+        if mode and (summary["projector_lora"] or summary["modules_to_save"] <= 0):
+            raise RuntimeError("A1/A3 deployment validation failed: full projector mode requires modules_to_save")
     if smoke_inputs is not None:
         with torch.no_grad():
             outputs = model(**smoke_inputs)
@@ -528,6 +528,7 @@ def validate_high_fidelity_deployment(model: Any, config: Any = None, *, smoke_i
     print(f"MLP LoRA tensor count: {summary['mlp_lora']}")
     print(f"projector LoRA tensor count: {summary['projector_lora']}")
     print(f"modules_to_save tensor count: {summary['modules_to_save']}")
+    print(f"projector_mode={'base' if not mode and not use_projector_lora else ('projector_lora' if use_projector_lora else 'modules_to_save')}")
     print(f"Attention LoRA dtype summary: {summary['attention_dtypes']}")
     print(f"MLP LoRA dtype summary: {summary['mlp_dtypes']}")
     print(f"Modules-to-save projector dtype summary: {summary['modules_to_save_projector_dtypes']}")
@@ -610,6 +611,8 @@ def load_high_fidelity_adapter_deployment(
     ))
     validate_high_fidelity_deployment(model, validation_config)
     print(f"prediction_model_source={metadata.get('artifact_mode')}")
+    if metadata.get("experiment"):
+        print(f"experiment={metadata['experiment']}")
     print(f"experiment_mode={metadata.get('experiment_mode', '<unspecified>')}")
     print("adapter_merged=false")
     print(f"language_model_quantization={metadata.get('quantization', '4bit_nf4')}")

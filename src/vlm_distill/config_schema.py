@@ -366,11 +366,11 @@ def _build_student_config(raw: dict[str, Any]) -> StudentConfig:
     artifact_mode = str(values.get("merged_artifact_mode", "bf16_standalone"))
     if artifact_mode not in {
         "mixed_4bit_bf16", "bf16_standalone", "adapter_plus_projector",
-        "4bit_base_bf16_adapter",
+        "4bit_base_bf16_adapter", "post_merge_bnb4",
     }:
         raise ValueError(
             "student.merged_artifact_mode must be one of: mixed_4bit_bf16, "
-            "bf16_standalone, adapter_plus_projector, 4bit_base_bf16_adapter."
+            "bf16_standalone, adapter_plus_projector, 4bit_base_bf16_adapter, post_merge_bnb4."
         )
     values["merged_artifact_mode"] = artifact_mode
     if artifact_mode == "4bit_base_bf16_adapter":
