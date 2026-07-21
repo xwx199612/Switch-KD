@@ -1,0 +1,16 @@
+extends: ../stage1_a4_r32_attn_mlp_projector.yaml
+
+student:
+  inference_model_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/adapter_merger/bnb4
+  deployment_artifact_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/adapter_merger/bnb4
+  inference_adapter_path:
+  load_adapter: false
+  merge_adapter: false
+  quantization: 4bit
+  merged_artifact_mode: post_merge_bnb4
+
+data:
+  prediction_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/post_merge_bnb4_predictions/student_predictions.jsonl
+
+evaluation:
+  output_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/post_merge_bnb4_predictions/eval_report.json

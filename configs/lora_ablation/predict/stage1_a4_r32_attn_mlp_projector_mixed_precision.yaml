@@ -1,0 +1,14 @@
+extends: ../deploy/stage1_a4_r32_4bit_base_bf16_adapter.yaml
+
+student:
+  inference_model_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/deploy_4bit_bf16_adapter
+  inference_adapter_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/adapter
+  deployment_artifact_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/deploy_4bit_bf16_adapter
+  load_adapter: false
+  merge_adapter: false
+
+data:
+  prediction_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/mixed_precision_predictions/student_predictions.jsonl
+
+evaluation:
+  output_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/mixed_precision_predictions/eval_report.json
