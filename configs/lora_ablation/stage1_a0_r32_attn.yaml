@@ -1,20 +1,23 @@
 extends: stage1_a2_r32_attn_projector_lora.yaml
 
 student:
-  output_dir: outputs/lora_ablation/stage1_a0_r32_attn_only
-  adapter_dir: outputs/lora_ablation/stage1_a0_r32_attn_only/adapter
-  merged_model_path: outputs/lora_ablation/stage1_a0_r32_attn_only/merged_bf16
-  inference_model_path: outputs/lora_ablation/stage1_a0_r32_attn_only/deploy_4bit_bf16_adapter
-  inference_adapter_path: outputs/lora_ablation/stage1_a0_r32_attn_only/adapter
-  deployment_artifact_path: outputs/lora_ablation/stage1_a0_r32_attn_only/deploy_4bit_bf16_adapter
+  output_dir: outputs/lora_ablation/stage1_a0_r32_attn
+  adapter_dir: outputs/lora_ablation/stage1_a0_r32_attn/adapter
+  merged_model_path: outputs/lora_ablation/stage1_a0_r32_attn/merged_bf16
+  inference_model_path: outputs/lora_ablation/stage1_a0_r32_attn/deploy_4bit_bf16_adapter
+  inference_adapter_path: outputs/lora_ablation/stage1_a0_r32_attn/adapter
+  deployment_artifact_path: outputs/lora_ablation/stage1_a0_r32_attn/deploy_4bit_bf16_adapter
+  lora_rank: 32
+  lora_alpha: 64
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
   train_multimodal_projector: false
   use_projector_lora: false
   merged_artifact_mode: bf16_standalone
 
 data:
-  distill_path: outputs/lora_ablation/stage1_a0_r32_attn_only/{task_name}_online_dbild_{response_profile}.jsonl
-  eval_path: outputs/lora_ablation/stage1_a0_r32_attn_only/{task_name}_online_dbild_{response_profile}.jsonl
-  prediction_path: outputs/lora_ablation/stage1_a0_r32_attn_only/{task_name}_online_dbild_{response_profile}/student_predictions.jsonl
+  distill_path: outputs/lora_ablation/stage1_a0_r32_attn/{task_name}_online_dbild_{response_profile}.jsonl
+  eval_path: outputs/lora_ablation/stage1_a0_r32_attn/{task_name}_online_dbild_{response_profile}.jsonl
+  prediction_path: outputs/lora_ablation/stage1_a0_r32_attn/{task_name}_online_dbild_{response_profile}/student_predictions.jsonl
 
 evaluation:
-  output_path: outputs/lora_ablation/stage1_a0_r32_attn_only/{task_name}_online_dbild_{response_profile}/eval_report.json
+  output_path: outputs/lora_ablation/stage1_a0_r32_attn/{task_name}_online_dbild_{response_profile}/eval_report.json

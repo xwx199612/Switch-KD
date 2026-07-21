@@ -24,10 +24,11 @@ from .stage_package_adapter_deployment import package_high_fidelity_adapter_depl
 from .stage_prediction_evaluation import evaluate_predictions
 from .stage_student_prediction import create_student_predictions
 from .stage_teacher_precompute import create_teacher_precompute_dataset
-from .train_online_align_dbild import _validate_smoke_adapter_checkpoint, run_training
+from .train_online_align_dbild import run_training, validate_adapter_checkpoint
 from .stage_visual_switch_logits import create_visual_switch_dataset
 from .switch_logits_validation import validate_switch_logits_file
 from .teacher_label_stats import format_teacher_label_summary, summarize_teacher_label_file
+from .visualize_predictions import run_visualization, run_from_config
 
 
 def main() -> None:
@@ -105,8 +106,25 @@ def main() -> None:
         "validate-adapter",
         help="Validate a saved PEFT adapter checkpoint without running training.",
     )
-    validate_adapter_parser.add_argument("--adapter-path", type=Path, required=True)
-    validate_adapter_parser.add_argument("--projector-path", default="model.visual.merger")
+    validate_adapter_parser.add_argument("--config", type=Path, required=True)
+    validate_adapter_parser.add_argument("--adapter-path", type=Path)
+    validate_adapter_parser.add_argument("--projector-path")
+    annotate_parser = subparsers.add_parser(
+        "annotate-predictions", help="Draw predicted UI element boxes on image copies."
+    )
+    source = annotate_parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--predictions", type=Path)
+    source.add_argument("--config", type=Path)
+    annotate_parser.add_argument("--output-dir", type=Path, required=True)
+    annotate_parser.add_argument("--image-root", type=Path, default=Path("."))
+    annotate_parser.add_argument("--overwrite", action="store_true")
+    annotate_parser.add_argument("--max-samples", type=int)
+    annotate_parser.add_argument("--line-width", type=int, default=3)
+    annotate_parser.add_argument("--font-size", type=int, default=18)
+    annotate_parser.add_argument("--show-text", action=argparse.BooleanOptionalAction, default=True)
+    annotate_parser.add_argument("--show-type", action=argparse.BooleanOptionalAction, default=True)
+    annotate_parser.add_argument("--show-focused", action=argparse.BooleanOptionalAction, default=True)
+    annotate_parser.add_argument("--write-sidecar", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
 
     if args.command == "create-manifest":
@@ -138,8 +156,26 @@ def main() -> None:
         )
         return
 
+    if args.command == "annotate-predictions":
+        options = dict(
+            overwrite=args.overwrite, max_samples=args.max_samples,
+            line_width=args.line_width, font_size=args.font_size,
+            show_text=args.show_text, show_type=args.show_type,
+            show_focused=args.show_focused, write_sidecar=args.write_sidecar,
+        )
+        summary = (
+            run_from_config(args.config, args.output_dir, **options)
+            if args.config is not None
+            else run_visualization(args.predictions, args.output_dir, image_root=args.image_root, **options)
+        )
+        print("Prediction visualization completed")
+        print(" ".join(f"{key}={value}" for key, value in summary.items()))
+        return
+
     if args.command == "validate-adapter":
-        _validate_smoke_adapter_checkpoint(args.adapter_path, args.projector_path)
+        config = load_config(args.config)
+        adapter_path = args.adapter_path or config.student.adapter_dir
+        validate_adapter_checkpoint(adapter_path, config, args.projector_path)
         return
 
     config = load_config(args.config)

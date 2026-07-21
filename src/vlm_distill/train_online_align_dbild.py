@@ -1558,6 +1558,95 @@ def _validate_smoke_adapter_checkpoint(
     print(f"Smoke adapter checkpoint validation passed: path={adapter_dir}")
 
 
+def validate_adapter_checkpoint(adapter_dir: Path, config, projector_path: str | None = None) -> None:
+    """Validate an adapter against the A0/A1/A2/A3 contract in *config*.
+
+    The one-step smoke checkpoint is deliberately A3-shaped, but a normal
+    ``validate-adapter`` invocation must validate the experiment selected by
+    the supplied pipeline config.
+    """
+    adapter_dir = Path(adapter_dir)
+    config_path = adapter_dir / "adapter_config.json"
+    weights_path = adapter_dir / "adapter_model.safetensors"
+    if not config_path.is_file() or not weights_path.is_file():
+        raise RuntimeError(f"Adapter is incomplete: expected {config_path} and {weights_path}.")
+
+    student = config.student
+    projector_path = projector_path or student.multimodal_projector_path
+    adapter_config = json.loads(config_path.read_text(encoding="utf-8"))
+    configured_lm_targets = set(student.target_modules or [])
+    expected_projector_targets = (
+        {f"{projector_path}.linear_fc1", f"{projector_path}.linear_fc2"}
+        if student.use_projector_lora else set()
+    )
+    expected_targets = configured_lm_targets | expected_projector_targets
+    actual_targets = set(adapter_config.get("target_modules", []))
+    if actual_targets != expected_targets:
+        missing = sorted(expected_targets - actual_targets)
+        unexpected = sorted(actual_targets - expected_targets)
+        raise RuntimeError(
+            "Adapter target_modules do not match config contract: "
+            f"missing={missing!r}, unexpected={unexpected!r}, "
+            f"adapter={sorted(actual_targets)!r}, expected={sorted(expected_targets)!r}"
+        )
+
+    modules_to_save = adapter_config.get("modules_to_save") or []
+    if isinstance(modules_to_save, str):
+        modules_to_save = [modules_to_save]
+    normalized_modules = {_normalize_peft_module_path(value) for value in modules_to_save}
+    normalized_projector = _normalize_peft_module_path(projector_path)
+    wants_full_projector = bool(student.train_multimodal_projector)
+    if wants_full_projector and normalized_projector not in normalized_modules:
+        raise RuntimeError(
+            f"A1/A3 validation failed: modules_to_save must contain {projector_path!r}."
+        )
+    if not wants_full_projector and normalized_projector in normalized_modules:
+        raise RuntimeError("A0/A2 validation failed: modules_to_save projector is not allowed")
+
+    from safetensors.torch import load_file
+    keys = list(load_file(str(weights_path), device="cpu"))
+    projector_lora_keys = [
+        key for key in keys
+        if _is_key_under_module(key, projector_path)
+        and ("lora_a" in key.lower() or "lora_b" in key.lower())
+    ]
+    if student.use_projector_lora:
+        if not projector_lora_keys:
+            raise RuntimeError("A2 validation failed: projector LoRA is missing")
+        allowed = {f"{normalized_projector}.linear_fc1", f"{normalized_projector}.linear_fc2"}
+        if any(
+            not any(_normalize_peft_module_path(key).startswith(f"{path}.") for path in allowed)
+            for key in projector_lora_keys
+        ):
+            raise RuntimeError("A2 validation failed: projector LoRA targets must be the two main merger linears")
+    elif projector_lora_keys:
+        mode = "A1" if wants_full_projector else "A0"
+        raise RuntimeError(f"{mode} validation failed: projector LoRA is not allowed")
+
+    if wants_full_projector:
+        saved_projector_suffixes = {
+            _normalize_peft_module_path(key).split(f"{normalized_projector}.", 1)[1]
+            for key in keys if is_saved_full_projector_key(key, projector_path)
+        }
+        missing = sorted(_REQUIRED_FULL_PROJECTOR_TENSOR_SUFFIXES - saved_projector_suffixes)
+        if missing:
+            raise RuntimeError(f"A1/A3 validation failed: missing full projector tensors={missing!r}")
+    elif normalized_modules:
+        raise RuntimeError(f"A0/A2 validation failed: unexpected modules_to_save={sorted(normalized_modules)!r}")
+
+    if not set(QWEN3_VL_MLP_TARGETS) & configured_lm_targets:
+        illegal_mlp_keys = [
+            key for key in keys
+            if any(target in key.split(".") for target in QWEN3_VL_MLP_TARGETS)
+            and ("lora_a" in key.lower() or "lora_b" in key.lower())
+        ]
+        if illegal_mlp_keys:
+            raise RuntimeError(f"A0/A1/A2 validation failed: unexpected LM MLP LoRA keys={sorted(illegal_mlp_keys)!r}")
+    if any("deepstack_merger" in key for key in keys):
+        raise RuntimeError("Adapter validation failed: deepstack merger LoRA is not allowed")
+    print(f"Adapter validation passed: path={adapter_dir}")
+
+
 def _check_no_quantized_cpu_offload(
     model,
     *,

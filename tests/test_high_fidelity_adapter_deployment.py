@@ -9,19 +9,33 @@ from vlm_distill.deployment_loader import _processor_is_loadable
 
 
 def _config(tmp_path: Path, **student_overrides):
+    student_overrides = dict(student_overrides)
+    lm_targets = student_overrides.get("target_modules", ["q_proj", "k_proj", "v_proj", "o_proj"])
+    student_overrides.pop("target_modules", None)
     base = tmp_path / "base"
     base.mkdir()
     (base / "config.json").write_text("{}", encoding="utf-8")
     (base / "tokenizer_config.json").write_text("{}", encoding="utf-8")
     adapter = tmp_path / "adapter"
     adapter.mkdir()
-    (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
+    adapter_targets = list(lm_targets)
+    if student_overrides.get("use_projector_lora", False):
+        adapter_targets += [
+            "model.visual.merger.linear_fc1", "model.visual.merger.linear_fc2"
+        ]
+    adapter_config = {"target_modules": adapter_targets}
+    if student_overrides.get("train_multimodal_projector", False):
+        adapter_config["modules_to_save"] = ["model.visual.merger"]
+    (adapter / "adapter_config.json").write_text(
+        __import__("json").dumps(adapter_config), encoding="utf-8"
+    )
     (adapter / "adapter_model.safetensors").write_bytes(b"adapter")
     student = StudentConfig(
         model_name=str(base), output_dir=tmp_path / "out", adapter_dir=adapter,
         inference_adapter_path=adapter, quantization="4bit", use_lora=True,
         merged_artifact_mode="4bit_base_bf16_adapter",
         deployment_artifact_path=tmp_path / "deploy",
+        target_modules=list(lm_targets),
         **student_overrides,
     )
     return PipelineConfig(
@@ -116,3 +130,57 @@ def test_a0_a1_a2_metadata(tmp_path, projector_mode, expected):
     assert metadata["projector_mode"] == expected
     assert metadata["adapter_merged"] is False
     assert metadata["base_model_copied"] is False
+
+
+def test_a3_qkvo_mlp_with_modules_to_save_projector_packages(tmp_path):
+    bundle = package_high_fidelity_adapter_deployment(
+        _config(tmp_path, target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                                          "gate_proj", "up_proj", "down_proj"],
+                train_multimodal_projector=True)
+    )
+    assert bundle.exists()
+
+
+def test_a2_missing_projector_target_is_rejected(tmp_path):
+    config = _config(tmp_path, use_projector_lora=True)
+    (config.student.adapter_dir / "adapter_config.json").write_text(
+        __import__("json").dumps({"target_modules": ["q_proj", "k_proj", "v_proj", "o_proj",
+                                                        "model.visual.merger.linear_fc1"]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="missing=.*linear_fc2.*unexpected=.*adapter=.*expected"):
+        package_high_fidelity_adapter_deployment(config)
+
+
+@pytest.mark.parametrize("extra", [
+    "model.visual.deepstack_merger_list.0.linear_fc1",
+    "model.visual.merger.mlp",
+])
+def test_a2_rejects_non_main_merger_projector_targets(tmp_path, extra):
+    config = _config(tmp_path, use_projector_lora=True)
+    targets = ["q_proj", "k_proj", "v_proj", "o_proj",
+               "model.visual.merger.linear_fc1", "model.visual.merger.linear_fc2", extra]
+    (config.student.adapter_dir / "adapter_config.json").write_text(
+        __import__("json").dumps({"target_modules": targets}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="missing=.*unexpected=.*adapter=.*expected"):
+        package_high_fidelity_adapter_deployment(config)
+
+
+def test_a1_rejects_projector_lora_targets(tmp_path):
+    config = _config(tmp_path)
+    (config.student.adapter_dir / "adapter_config.json").write_text(
+        __import__("json").dumps({"target_modules": ["q_proj", "k_proj", "v_proj", "o_proj",
+                                                        "model.visual.merger.linear_fc1",
+                                                        "model.visual.merger.linear_fc2"]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="missing=.*unexpected=.*adapter=.*expected"):
+        package_high_fidelity_adapter_deployment(config)
+
+
+def test_adapter_target_order_does_not_affect_packaging(tmp_path):
+    config = _config(tmp_path, use_projector_lora=True,
+                     target_modules=["o_proj", "v_proj", "k_proj", "q_proj"])
+    bundle = package_high_fidelity_adapter_deployment(config)
+    assert bundle.exists()

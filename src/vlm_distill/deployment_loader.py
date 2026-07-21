@@ -379,11 +379,27 @@ def validate_high_fidelity_deployment(model: Any, config: Any = None, *, smoke_i
     require_bf16_merger = getattr(getattr(config, "student", config), "main_merger_bf16", True) if config else True
     for child in ("linear_fc1", "linear_fc2"):
         layer = getattr(merger, child, None)
-        if require_bf16_merger and (type(layer) is not torch.nn.Linear or layer.weight.dtype != torch.bfloat16):
-            raise RuntimeError(f"main merger {child} must be torch.nn.Linear with BF16 weights")
+
+        # A2 wraps the projector Linear with a PEFT LoRA layer.
+        base_layer = getattr(layer, "base_layer", layer)
+
+        if require_bf16_merger and (
+            type(base_layer) is not torch.nn.Linear
+            or base_layer.weight.dtype != torch.bfloat16
+        ):
+            raise RuntimeError(
+                f"main merger {child} base layer must be "
+                "torch.nn.Linear with BF16 weights; "
+                f"runtime_type={type(layer)!r}, "
+                f"base_type={type(base_layer)!r}, "
+                f"dtype={getattr(getattr(base_layer, 'weight', None), 'dtype', None)}"
+            )
     norm = getattr(merger, "norm", None)
-    if require_bf16_merger and norm is not None and any(parameter.dtype != torch.float32 for parameter in norm.parameters()):
-        raise RuntimeError("deployment validation failed: merger.norm must be torch.float32")
+    if require_bf16_merger and norm is not None and any(parameter.dtype != torch.bfloat16 for parameter in norm.parameters()):
+        raise RuntimeError(
+            "deployment validation failed: active merger.norm "
+            "must be torch.bfloat16 for inference"
+        )
     summary = _summary(model)
     print(f"runtime LoRA parameter count: {summary['runtime_lora_parameter_count']}")
     print(f"runtime LoRA parameter examples: {summary['runtime_lora_parameter_examples']}")
@@ -446,8 +462,23 @@ def validate_high_fidelity_deployment(model: Any, config: Any = None, *, smoke_i
             raise RuntimeError("A2 validation failed: projector LoRA tensors must remain floating point")
         if summary["projector_lora"] <= 0:
             raise RuntimeError("A2 validation failed: projector LoRA is missing")
-        if any("deepstack_merger" in n or ("mlp" in n.lower() and "lora" in n.lower()) for n, _ in model.named_modules()):
-            raise RuntimeError("A2 validation failed: deepstack merger or LLM MLP LoRA is not allowed")
+        deepstack_lora_names = [
+            name
+            for name, _ in model.named_parameters()
+            if "deepstack_merger" in name.lower()
+            and _is_lora(name)
+        ]
+        if deepstack_lora_names:
+            raise RuntimeError(
+                "A2 validation failed: deepstack merger LoRA is not allowed; "
+                f"found={deepstack_lora_names[:20]!r}"
+            )
+
+        if summary["mlp_lora"] > 0:
+            raise RuntimeError(
+                "A2 validation failed: LLM MLP LoRA is not allowed; "
+                f"found={summary['mlp_lora_names'][:20]!r}"
+            )
         if any(not ("model.visual.merger.linear_fc1" in n or "model.visual.merger.linear_fc2" in n)
                for n in summary["projector_lora_names"]):
             raise RuntimeError("A2 validation failed: projector LoRA targets must be the two main merger linears")
@@ -556,6 +587,18 @@ def load_high_fidelity_adapter_deployment(
     from peft import PeftModel
     model = PeftModel.from_pretrained(model, str(adapter_path), local_files_only=True)
     model.eval()
+
+    # Generation runs outside training autocast. Keep the active projector
+    # executable with BF16 visual hidden states.
+    active_merger = _active_merger(model)
+    for child in ("linear_fc1", "linear_fc2"):
+        getattr(active_merger, child).to(dtype=torch.bfloat16)
+    active_merger.norm.to(dtype=torch.bfloat16)
+    print(
+        "deployment_active_merger_norm_dtype_after_peft="
+        f"{next(active_merger.norm.parameters()).dtype}"
+    )
+
     projector_mode = metadata.get("projector_mode")
     validation_config = SimpleNamespace(student=SimpleNamespace(
         train_multimodal_projector=projector_mode == "modules_to_save",

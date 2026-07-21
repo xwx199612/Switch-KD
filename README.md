@@ -889,3 +889,29 @@ Increasing `--max-new-tokens` is still preferred to avoid truncation. Recovery
 is a fallback, not a replacement for sufficient generation length.
 
 `compare_vlm_bbox_grounding.py` is intended for side-by-side three-model comparison. `vlm_bbox_grounding.py` is intended for testing one selected model without unnecessarily loading the teacher and base student.
+
+## Annotate student predictions
+
+Render the parsed UI elements in a prediction JSONL onto independent PNG copies:
+
+```bash
+vlm-distill annotate-predictions \
+  --predictions outputs/lora_ablation/stage1_a0_r16_attn/parsing_online_dbild_1080p_4bit_student_4bit/student_predictions.jsonl \
+  --output-dir outputs/lora_ablation/visualizations/a0_r16
+```
+
+The config form resolves `data.prediction_path` and `data.image_root` through the existing config resolver:
+
+```bash
+vlm-distill annotate-predictions \
+  --config configs/lora_ablation/stage1_a1_r16_attn_projector.yaml \
+  --output-dir outputs/lora_ablation/visualizations/a1_r16
+```
+
+All six Experiment A variants can be processed with:
+
+```bash
+bash scripts/visualize_experiment_a.sh
+```
+
+Each output folder contains `{sample_id}__{image_stem}__annotated.png` and a JSON sidecar. The sidecar records normalized and pixel bboxes, including skipped elements. `bbox_norm` uses normalized 0--1000 coordinates; conversion is `round(x / 1000 * image_width)` and `round(y / 1000 * image_height)`, followed by clamping and ordering. The source image is opened with `convert("RGB").copy()` and is never saved or modified; output is always a PNG below `--output-dir`. Malformed rows are recorded in `visualization_errors.jsonl` and do not stop later rows.

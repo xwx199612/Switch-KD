@@ -25,16 +25,38 @@ def package_high_fidelity_adapter_deployment(config: PipelineConfig) -> Path:
     if not (adapter / "adapter_config.json").exists():
         raise FileNotFoundError(f"PEFT adapter is missing adapter_config.json: {adapter}")
     adapter_config = json.loads((adapter / "adapter_config.json").read_text(encoding="utf-8"))
-    adapter_targets = adapter_config.get("target_modules", [])
-    configured_targets = list(student.target_modules or adapter_targets)
-    if set(adapter_targets) and set(adapter_targets) != set(configured_targets):
+    adapter_targets = set(adapter_config.get("target_modules", []))
+    configured_lm_targets = set(student.target_modules or [])
+
+    expected_projector_targets = (
+        set(MAIN_MERGER_PATHS)
+        if student.use_projector_lora
+        else set()
+    )
+    expected_adapter_targets = configured_lm_targets | expected_projector_targets
+
+    if adapter_targets != expected_adapter_targets:
+        missing = sorted(expected_adapter_targets - adapter_targets)
+        unexpected = sorted(adapter_targets - expected_adapter_targets)
         raise ValueError(
-            "Adapter target_modules do not match pipeline config: "
-            f"adapter={sorted(adapter_targets)!r}, config={sorted(configured_targets)!r}"
+            "Adapter target_modules do not match pipeline experiment mode: "
+            f"missing={missing!r}, unexpected={unexpected!r}, "
+            f"adapter={sorted(adapter_targets)!r}, "
+            f"expected={sorted(expected_adapter_targets)!r}"
         )
-    unknown = set(configured_targets) - set(QWEN3_VL_ATTENTION_TARGETS) - set(QWEN3_VL_MLP_TARGETS)
-    if unknown:
-        raise ValueError(f"Unsupported deployment LoRA targets: {sorted(unknown)}")
+
+    unknown_lm_targets = (
+        configured_lm_targets
+        - set(QWEN3_VL_ATTENTION_TARGETS)
+        - set(QWEN3_VL_MLP_TARGETS)
+    )
+    if unknown_lm_targets:
+        raise ValueError(
+            "Unsupported deployment LM LoRA targets: "
+            f"{sorted(unknown_lm_targets)!r}"
+        )
+
+    configured_targets = list(configured_lm_targets)
     output = (student.deployment_artifact_path or student.merged_model_path or student.output_dir / "deploy_4bit_bf16_adapter").resolve()
     if output == base_model:
         raise ValueError("Refusing to package into the base model directory")
