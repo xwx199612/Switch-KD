@@ -10,3 +10,10 @@ transformers>=4.45.0
 [dev]
 pytest>=8.2.0
 ruff>=0.4.0
+
+[serve]
+fastapi
+uvicorn[standard]
+python-multipart
+bitsandbytes
+qwen-vl-utils

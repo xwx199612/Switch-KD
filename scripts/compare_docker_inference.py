@@ -30,14 +30,27 @@ def compare(local: Path, docker: Path) -> dict[str, int]:
             counts["parse_mismatch"] += 1
             continue
         differences = False
-        if _usable(a) != _usable(b): counts["parse_mismatch"] += 1; differences = True
+        if _usable(a) != _usable(b):
+            counts["parse_mismatch"] += 1
+            differences = True
         ae, be = a.get("elements", []), b.get("elements", [])
-        if len(ae) != len(be): counts["element_count_mismatch"] += 1; differences = True
-        if [x.get("text") for x in ae] != [x.get("text") for x in be]: counts["text_mismatch"] += 1; differences = True
-        if [x.get("bbox_norm") for x in ae] != [x.get("bbox_norm") for x in be]: counts["bbox_mismatch"] += 1; differences = True
-        if [x.get("focused") for x in ae] != [x.get("focused") for x in be]: counts["focused_mismatch"] += 1; differences = True
-        if a.get("coordinate_system") != b.get("coordinate_system"): counts["parse_mismatch"] += 1; differences = True
-        if not differences: counts["exact_match"] += 1
+        if len(ae) != len(be):
+            counts["element_count_mismatch"] += 1
+            differences = True
+        if [x.get("text") for x in ae] != [x.get("text") for x in be]:
+            counts["text_mismatch"] += 1
+            differences = True
+        if [x.get("bbox_norm") for x in ae] != [x.get("bbox_norm") for x in be]:
+            counts["bbox_mismatch"] += 1
+            differences = True
+        if [x.get("focused") for x in ae] != [x.get("focused") for x in be]:
+            counts["focused_mismatch"] += 1
+            differences = True
+        if a.get("coordinate_system") != b.get("coordinate_system"):
+            counts["parse_mismatch"] += 1
+            differences = True
+        if not differences:
+            counts["exact_match"] += 1
     return counts
 
 

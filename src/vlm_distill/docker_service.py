@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import os
 import tempfile
 import threading
@@ -82,9 +81,12 @@ def _infer_sync(image_bytes: bytes, query: str) -> dict[str, Any]:
     with inference_lock:
         raw_output = engine.generate_raw(image, prompt, config.teacher.max_new_tokens)
     parsed = parse_parsing_answer(raw_output)
-    return {"raw_output": raw_output, "usable": bool(parsed.get("usable")),
+    result = {"raw_output": raw_output, "usable": bool(parsed.get("usable")),
             "parse_error": parsed.get("parse_error"), "elements": parsed.get("elements", []),
             "coordinate_system": COORDINATE_SYSTEM_NORMALIZED_0_1000}
+    if getattr(engine, "debug_inference_parity", False):
+        result["inference_debug"] = dict(engine.last_debug)
+    return result
 
 
 @app.post("/infer")

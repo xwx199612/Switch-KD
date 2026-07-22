@@ -12,6 +12,12 @@ Requires-Dist: pillow>=10.0.0
 Requires-Dist: pyyaml>=6.0.1
 Requires-Dist: torch>=2.2.0
 Requires-Dist: transformers>=4.45.0
+Provides-Extra: serve
+Requires-Dist: fastapi; extra == "serve"
+Requires-Dist: uvicorn[standard]; extra == "serve"
+Requires-Dist: python-multipart; extra == "serve"
+Requires-Dist: bitsandbytes; extra == "serve"
+Requires-Dist: qwen-vl-utils; extra == "serve"
 Provides-Extra: dev
 Requires-Dist: pytest>=8.2.0; extra == "dev"
 Requires-Dist: ruff>=0.4.0; extra == "dev"
@@ -62,6 +68,37 @@ Verify CLI:
 
 ```powershell
 vlm-distill --help
+```
+
+## Adapter deployment modes
+
+`bf16_standalone` is a BF16 base plus merged adapter (highest precision, largest).
+`mixed_4bit_bf16` is a 4-bit language model plus BF16 merger with an already merged adapter;
+the adapter delta may be affected by quantization. `4bit_base_bf16_adapter` is a composition
+artifact: a 4-bit NF4 language model, BF16 main merger, and floating BF16 PEFT adapter. The
+adapter is never merged, providing high-fidelity low-volume deployment. It is not a single
+merged checkpoint; `deployment_loader` must load the referenced base and attach the adapter.
+
+Stage A modes are:
+
+```text
+A0 = Attention LoRA only
+A1 = Attention LoRA + Full Projector
+A2 = Attention LoRA + Projector LoRA
+A3 = Attention LoRA + MLP LoRA + Full Projector
+```
+
+A3 tests whether adding the language-model MLP nonlinear feature transformation to distillation,
+in addition to attention routing, improves Android TV full-screen parsing, text recognition, and
+bbox grounding. Its high-fidelity deployment is a 4-bit NF4 LM base plus floating attention and
+MLP LoRA plus a BF16 full-trained projector; the adapter remains active and is never merged.
+
+Package and use the A3 deployment config (the A0/A1/A2 configs remain available):
+
+```bash
+vlm-distill package-adapter --config configs/lora_ablation/deploy/stage1_a3_4bit_base_bf16_adapter.yaml
+vlm-distill predict --config configs/lora_ablation/deploy/stage1_a3_4bit_base_bf16_adapter.yaml
+vlm-distill evaluate-predictions --config configs/lora_ablation/deploy/stage1_a3_4bit_base_bf16_adapter.yaml
 ```
 
 ---
@@ -133,13 +170,6 @@ vlm-distill create-manifest \
   --config configs/parsing_labeling.yaml \
 ```
 
-or
-
-```powershell
-vlm-distill create-manifest \
-  --config configs/grounding_test.yaml \
-```
-
 ---
 
 ## Validate Manifest
@@ -161,17 +191,10 @@ vlm-distill validate-teacher \
 This reads the canonical teacher output at `data.label_path` and reports:
 
 - `total_rows`
-- `valid_json_rows`
-- `schema_valid_rows`
-- `string_list_rows`
+- `valid_rows`
+- `invalid_rows`
 - `answer_token_match_rows`
 - `answer_token_mismatch_rows`
-- `rows_with_teacher_logits` when `distillation.teacher_logits: true`
-- `valid_teacher_logits_rows`
-- `logits_length_match_rows`
-- `logits_length_mismatch_rows`
-- `full_sequence_logits_rows`
-- `vocab_mismatch_rows`
 
 ---
 
@@ -183,11 +206,10 @@ vlm-distill label \
 ```
 
 `label` now runs unified teacher precompute. By default
-`distillation.teacher_logits: true`, so Switch-KD configs write
-`teacher_answer`, `teacher_tokens`, and answer-only `teacher_logits` from the
-same final normalized answer to `data.label_path`. `data.label_path` is the
-canonical teacher precompute output. `data.teacher_logits_path` is deprecated
-and is not used by the main Switch-KD workflow.
+teacher precompute writes only `serialized parsing target`, `cached answer token ids`, and
+`teacher_element_count` to `data.label_path`. This project no longer stores
+offline teacher logits. Online DBiLD computes teacher/student logits on the
+fly during training.
 
 Use `vlm-distill teacher-precompute --config ...` for the same stage with an
 explicit name.
@@ -218,8 +240,31 @@ vlm-distill switch-logits \
 
 ```powershell
 vlm-distill train \
-  --config configs/switch_kd_4060ti.yaml
+  --config configs/qwen3vl8b_r32_attn_mlp.yaml
 ```
+
+The official `train` command executes `src/vlm_distill/train_online_align_dbild.py`
+through `run_training(config)` and is named **Online Align DBiLD**. The equivalent
+module invocation is:
+
+```bash
+python -m vlm_distill.cli train \
+  --config configs/qwen3vl8b_r32_attn_mlp.yaml
+```
+
+Its implemented objective is:
+
+```text
+L = lambda_lm * L_LM + lambda_align * L_DBiLD
+```
+
+Teacher logits and student logits are produced online on every training step for
+the same answer span; offline teacher logits are not read. Startup validation
+checks teacher-token identity, teacher/student tokenizer identity, and strict
+teacher/student answer-position logit alignment. Dynamic Top-K / Kneedle DBiLD
+is used. The student vision encoder is frozen, and VSD is disabled because this
+experiment assumes teacher and student share the same vision backbone. The
+configured LoRA targets include both attention and MLP modules.
 
 Single-process single-GPU training with model sharding:
 
@@ -376,44 +421,32 @@ No manual target label selection is required.
 data:
   output_dir: D:/TV_data/teacher_parsing
 
-  manifest_path: D:/TV_data/teacher_parsing/grounding_manifest.jsonl
+  manifest_path: D:/TV_data/teacher_parsing/parsing_manifest.jsonl
 
-  distill_path: D:/TV_data/teacher_parsing/grounding_teacher_labels.jsonl
+  distill_path: D:/TV_data/teacher_parsing/parsing_teacher_labels.jsonl
 
-  eval_path: D:/TV_data/teacher_parsing/grounding_teacher_labels.jsonl
+  eval_path: D:/TV_data/teacher_parsing/parsing_teacher_labels.jsonl
 ```
 
 ---
 
 ## Step 1
 
-Generate grounding manifest:
+Generate parsing manifest:
 
 ```powershell
 vlm-distill create-manifest \
-  --config configs/grounding_test.yaml \
+  --config configs/parsing_labeling.yaml \
 ```
 
-This automatically reads:
-
-```text
-parsing_teacher_labels.jsonl
-```
-
-and expands:
+Example manifest row:
 
 ```json
 {
-  "label":"YouTube"
-}
-```
-
-into:
-
-```json
-{
-  "target_label":"YouTube",
-  "target_type":"object"
+  "id":"parsing-000001",
+  "image":"...",
+  "task":"parsing",
+  "query":"List all visible interactive UI elements on this screen."
 }
 ```
 
@@ -421,34 +454,31 @@ into:
 
 ## Step 2
 
-Generate grounding teacher labels:
+Generate parsing teacher labels:
 
 ```powershell
-vlm-distill label \
-  --config configs/grounding_test.yaml
+vlm-distill teacher-precompute \
+  --config configs/parsing_labeling.yaml
 ```
 
 Expected output:
 
-```json
-{
-  "label":"YouTube",
-  "bbox":[100,200,300,400],
-  "confidence":0.93
-}
+```text
+Picture | 145,238,276,292 | false
+General | 145,348,276,404 | true
 ```
 
 Output:
 
 ```text
-D:\TV_data\teacher_parsing\grounding_teacher_labels.jsonl
+D:\TV_data\teacher_parsing\parsing_teacher_labels.jsonl
 ```
 
 Validate generated labels:
 
 ```powershell
   vlm-distill validate-teacher \
-  --config configs/grounding_test.yaml
+  --config configs/parsing_labeling.yaml
 ```
 
 ---
@@ -515,7 +545,7 @@ Example teacher row:
   "image": "D:/TV_data/test_data/example.png",
   "task": "parsing",
   "query": "List all visible interactive UI elements on this screen.",
-  "teacher_answer": "{\"elements\": [\"YouTube\", \"Search\"]}",
+  "serialized parsing target": "{\"elements\": [\"YouTube\", \"Search\"]}",
   "teacher_confidence": 1.0
 }
 ```
@@ -620,11 +650,11 @@ outputs/parsing_response_1080p_8bit/eval_report.json
 What this does:
 
 ```text
-teacher_answer JSONL
+serialized parsing target JSONL
         ->
 multimodal prompt + image
         ->
-training target = teacher_answer
+training target = serialized parsing target
         ->
 LoRA fine-tuning on the student VLM
 ```
@@ -784,56 +814,35 @@ evaluation against reference labels
 
 Notes for Qwen2.5-VL:
 
-* `teacher_answer` is the supervision target used during training.
+* `serialized parsing target` is the supervision target used during training.
 * `training.image_resize` controls how the student-side training image is resized before encoding. In the generic response config, it follows `{quality}` by default.`r`n* 1080p images can expand into a large number of image tokens, so `max_length: 4096` is a safer starting point than `512`.
 * If you compare multiple teacher label files first, keep the original teacher label JSONL for training; the compare JSONL is for analysis, not for student training.
 * The response distillation training path in this repo expects the original teacher label JSONL, not the row-wise compare JSONL.
 * If you want to measure the gap between the distilled 3B student and the 7B teacher, keep the teacher label JSONL as the evaluation reference and run `vlm-distill evaluate` after training.
 
 ---
-# Switch-KD Workflow
+# Online Align DBiLD Workflow
 
-Switch-KD training pipeline:
+Teacher-label generation plus online DBiLD training:
 
 ```bash
 python -m vlm_distill.cli teacher-precompute --config configs/parsing_switch_kd.yaml
 python -m vlm_distill.cli validate-teacher --config configs/parsing_switch_kd.yaml
-python -m vlm_distill.cli switch-logits --config configs/parsing_switch_kd.yaml
-python -m vlm_distill.cli train --config configs/parsing_switch_kd.yaml
+python -m vlm_distill.cli train --config configs/qwen3vl8b_r32_attn_mlp.yaml
 ```
 
-For Switch-KD, use `teacher-precompute`, followed by `validate-teacher`,
-`switch-logits`, and `train`. `distillation.teacher_logits: true` means teacher
-logits are generated during `teacher-precompute` into `data.label_path`, the
-canonical unified teacher output.
-
-4-GPU precompute:
-
-```bash
-bash scripts/run_parallel_switch_kd_precompute_4gpu.sh --clean-outputs teacher-precompute
-python -m vlm_distill.cli validate-teacher --config configs/parsing_switch_kd.yaml
-bash scripts/run_parallel_switch_kd_precompute_4gpu.sh --clean-outputs switch-logits
-```
-
-Or:
-
-```bash
-bash scripts/run_parallel_switch_kd_precompute_4gpu.sh --clean-outputs all
-```
-
-Here `all` means `teacher-precompute` then `switch-logits`.
+This project no longer stores offline teacher logits. Online DBiLD computes
+teacher/student logits on the fly during training.
 
 Training objective:
 
 ```text
-L_total
-=
-LM Loss
-+
-DBiLD Loss
-+
-VSD Loss
+L = lambda_lm * L_LM + lambda_align * L_DBiLD
 ```
+
+This is the online Align DBiLD experiment, not the complete original-paper
+Switch-KD implementation with VSD enabled. `training.batch_size` is intentionally
+limited to `1` so answer logits remain densely and strictly aligned.
 
 ---
 
@@ -860,14 +869,8 @@ Screen Parsing + Grounding:
 vlm-distill create-manifest \
   --config configs/parsing_labeling.yaml \
 
-vlm-distill label \
+vlm-distill teacher-precompute \
   --config configs/parsing_labeling.yaml
-
-vlm-distill create-manifest \
-  --config configs/grounding_test.yaml \
-
-vlm-distill label \
-  --config configs/grounding_test.yaml
 ```
 
 ---
@@ -882,3 +885,57 @@ vlm-distill label \
 * RTX 4060Ti 16GB can run Qwen2.5-VL-7B-Instruct with 4bit quantization comfortably.
 * Student/training sections remain in YAML because the project currently uses a unified configuration schema.
 * Screen Parsing is currently the most mature workflow in this repository.
+
+## Single-Model Bbox Grounding
+
+Run grounding against one standalone Hugging Face-compatible VLM without loading the teacher and base student:
+
+```bash
+python scripts/vlm_bbox_grounding.py \
+  --image-dir /mnt/nvme0/vlm_distill/validation_data \
+  --output-dir outputs/r32_attn_mlp_bbox_grounding \
+  --model /mnt/nvme0/vlm_distill/models/r32_attn_mlp \
+  --quantization 4bit \
+  --torch-dtype bfloat16 \
+  --max-new-tokens 1280 \
+  --coord-system normalized_1000
+```
+
+`vlm_bbox_grounding.py` uses the same JSON prompt and `bbox_norm` schema as
+`configs/qwen3vl8b_r32_attn_mlp.yaml`. Pipe-form evaluation is no longer
+supported by this utility. Strict JSON parsing is attempted first. If a model
+response is truncated after the `elements` array has started, the utility may
+conservatively recover fully completed element objects; an incomplete trailing
+element is discarded. Recovered results are marked with
+`"parse_recovered": true`, and the final summary reports `recovered=N`.
+
+Increasing `--max-new-tokens` is still preferred to avoid truncation. Recovery
+is a fallback, not a replacement for sufficient generation length.
+
+`compare_vlm_bbox_grounding.py` is intended for side-by-side three-model comparison. `vlm_bbox_grounding.py` is intended for testing one selected model without unnecessarily loading the teacher and base student.
+
+## Annotate student predictions
+
+Render the parsed UI elements in a prediction JSONL onto independent PNG copies:
+
+```bash
+vlm-distill annotate-predictions \
+  --predictions outputs/lora_ablation/stage1_a0_r16_attn/parsing_online_dbild_1080p_4bit_student_4bit/student_predictions.jsonl \
+  --output-dir outputs/lora_ablation/visualizations/a0_r16
+```
+
+The config form resolves `data.prediction_path` and `data.image_root` through the existing config resolver:
+
+```bash
+vlm-distill annotate-predictions \
+  --config configs/lora_ablation/stage1_a1_r16_attn_projector.yaml \
+  --output-dir outputs/lora_ablation/visualizations/a1_r16
+```
+
+All six Experiment A variants can be processed with:
+
+```bash
+bash scripts/visualize_experiment_a.sh
+```
+
+Each output folder contains `{sample_id}__{image_stem}__annotated.png` and a JSON sidecar. The sidecar records normalized and pixel bboxes, including skipped elements. `bbox_norm` uses normalized 0--1000 coordinates; conversion is `round(x / 1000 * image_width)` and `round(y / 1000 * image_height)`, followed by clamping and ordering. The source image is opened with `convert("RGB").copy()` and is never saved or modified; output is always a PNG below `--output-dir`. Malformed rows are recorded in `visualization_errors.jsonl` and do not stop later rows.

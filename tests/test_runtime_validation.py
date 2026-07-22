@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 
 import pytest
-import torch
 from torch import nn
 
 from vlm_distill.runtime_validation import summarize_model_precision, validate_loaded_precision

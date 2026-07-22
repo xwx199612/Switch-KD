@@ -9,7 +9,7 @@ from PIL import Image
 
 fastapi = pytest.importorskip("fastapi")
 
-from vlm_distill import docker_service
+from vlm_distill import docker_service  # noqa: E402
 
 
 def _png() -> bytes:

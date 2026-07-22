@@ -1,0 +1,21 @@
+# Container-path equivalent of the validated A4 r32 mixed-precision config.
+# Host model/artifact paths are supplied only through Docker volume mounts.
+extends: ../lora_ablation/predict/stage1_a4_r32_attn_mlp_projector_mixed_precision.yaml
+
+data:
+  manifest_path: /config/inference_manifest.jsonl
+  image_root: /config/images
+  distill_path: /config/unused_distill.jsonl
+
+student:
+  model_name: /models/Qwen3-VL-8B-Instruct
+  adapter_dir: /adapters/a4
+  inference_model_path: /deployment/a4
+  inference_adapter_path: /adapters/a4
+  deployment_artifact_path: /deployment/a4
+  output_dir: /config/unused-output
+  load_adapter: false
+  merge_adapter: false
+
+prediction:
+  debug_inference_parity: true
