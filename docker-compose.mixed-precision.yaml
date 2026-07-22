@@ -1,0 +1,23 @@
+services:
+  vlm:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.mixed-precision
+    ports:
+      - "8000:8000"
+    environment:
+      VLM_CONFIG_PATH: /config/a4.yaml
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_OFFLINE: "1"
+    volumes:
+      - /host/path/to/config:/config:ro
+      - /host/path/to/models:/models:ro
+      - /host/path/to/adapters:/adapters:ro
+      - /host/path/to/deployment:/deployment:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

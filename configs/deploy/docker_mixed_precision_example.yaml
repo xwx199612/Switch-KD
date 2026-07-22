@@ -1,0 +1,28 @@
+seed: 42
+
+data:
+  manifest_path: /config/inference_manifest.jsonl
+  distill_path: /config/unused_distill.jsonl
+  image_root: /config/images
+
+teacher:
+  backend: mock
+  model_name: unused-teacher-config-placeholder
+  max_new_tokens: 2048
+
+student:
+  model_name: /models/Qwen3-VL-8B-Instruct
+  output_dir: /config/unused-output
+  adapter_dir: /adapters/a4
+  inference_model_path: /deployment/a4
+  deployment_artifact_path: /deployment/a4
+  quantization: 4bit
+  merged_artifact_mode: 4bit_base_bf16_adapter
+  load_adapter: false
+  merge_adapter: false
+
+training:
+  image_resize: original
+
+distillation:
+  prompt_template: "{query}"

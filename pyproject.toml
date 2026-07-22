@@ -20,6 +20,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+serve = [
+  "fastapi",
+  "uvicorn[standard]",
+  "python-multipart",
+  "bitsandbytes",
+  "qwen-vl-utils",
+]
 dev = [
   "pytest>=8.2.0",
   "ruff>=0.4.0",
