@@ -1,0 +1,10 @@
+extends: ../predict/stage1_a4_r32_attn_mlp_projector_mixed_precision.yaml
+
+teacher:
+  max_new_tokens: 2048
+
+data:
+  prediction_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/mixed_precision_predictions_2048/student_predictions.jsonl
+
+evaluation:
+  output_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/mixed_precision_predictions_2048/eval_report.json

@@ -1,0 +1,13 @@
+extends: ../predict_bnb4_merged/stage1_a3_r32_bnb4_merged.yaml
+
+teacher:
+  max_new_tokens: 2048
+
+student:
+  inference_adapter_path:
+
+data:
+  prediction_path: outputs/lora_ablation/stage1_a3_r32_attn_mlp/post_merge_bnb4_predictions_2048/student_predictions.jsonl
+
+evaluation:
+  output_path: outputs/lora_ablation/stage1_a3_r32_attn_mlp/post_merge_bnb4_predictions_2048/eval_report.json

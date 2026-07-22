@@ -1,18 +1,38 @@
 extends: ../../parsing_sft_debug.yaml
 
+seed: 42
+
+options:
+  task_name: parsing
+  quality: 1080p
+  teacher_quantization: 4bit
+  student_quantization: 4bit
+
 data:
   training_manifest_path: outputs/lora_ablation/parsing_inference_manifest.jsonl
   inference_manifest_path: outputs/lora_ablation/parsing_inference_manifest.jsonl
-  distill_path: outputs/baselines/qwen3_vl_8b_student_4bit_json_prompt/distill.jsonl
-  eval_path: outputs/baselines/qwen3_vl_8b_student_4bit_json_prompt/eval.json
-  prediction_path: outputs/baselines/qwen3_vl_8b_student_4bit_json_prompt/student_predictions.jsonl
+  distill_path: outputs/baselines/qwen3_vl_8b_student_4bit_json_prompt_1280/distill.jsonl
+  eval_path:
+  prediction_path: outputs/baselines/qwen3_vl_8b_student_4bit_json_prompt_1280/student_predictions.jsonl
+  inference_image_dir: /mnt/nvme0/vlm_distill/validation_data
   image_root: .
   max_samples:
 
+teacher:
+  backend: hf
+  model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-32B-Instruct
+  device_map: auto
+  torch_dtype: bfloat16
+  quantization: 4bit
+  attn_implementation: sdpa
+  temperature: 0.0
+  max_new_tokens: 1280
+  image_resize: 1080p
+
 student:
   model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-8B-Instruct
-  output_dir: outputs/baselines/qwen3_vl_8b_student_4bit_json_prompt
-  adapter_dir: outputs/baselines/qwen3_vl_8b_student_4bit_json_prompt/adapter
+  output_dir: outputs/baselines/qwen3_vl_8b_student_4bit_json_prompt_1280
+  adapter_dir: outputs/baselines/qwen3_vl_8b_student_4bit_json_prompt_1280/adapter
   merged_model_path:
   inference_model_path:
   inference_adapter_path:
@@ -20,6 +40,15 @@ student:
   merge_adapter: false
   use_lora: false
   quantization: 4bit
+  device_map: auto
+  attn_implementation: sdpa
+
+training:
+  image_resize: 1080p
+
+evaluation:
+  output_path: outputs/baselines/qwen3_vl_8b_student_4bit_json_prompt_1280/evaluation.json
+  metrics: [exact_match, token_f1]
 
 distillation:
   prompt_template: |

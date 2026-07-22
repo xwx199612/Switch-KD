@@ -1,0 +1,17 @@
+extends: ../deploy/stage1_a0_r16_4bit_base_bf16_adapter.yaml
+
+teacher:
+  max_new_tokens: 2048
+
+student:
+  inference_adapter_path: outputs/lora_ablation/stage1_a0_r16_attn/adapter
+  inference_model_path: outputs/lora_ablation/stage1_a0_r16_attn/deploy_4bit_bf16_adapter
+  deployment_artifact_path: outputs/lora_ablation/stage1_a0_r16_attn/deploy_4bit_bf16_adapter
+  load_adapter: false
+  merge_adapter: false
+
+data:
+  prediction_path: outputs/lora_ablation/stage1_a0_r16_attn/mixed_precision_predictions_2048/student_predictions.jsonl
+
+evaluation:
+  output_path: outputs/lora_ablation/stage1_a0_r16_attn/mixed_precision_predictions_2048/eval_report.json
