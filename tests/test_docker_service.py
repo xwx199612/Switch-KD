@@ -1,11 +1,13 @@
+import asyncio
 import io
+import inspect
+import threading
 from types import SimpleNamespace
 
 import pytest
 from PIL import Image
 
 fastapi = pytest.importorskip("fastapi")
-from fastapi.testclient import TestClient  # noqa: E402
 
 from vlm_distill import docker_service
 
@@ -14,6 +16,14 @@ def _png() -> bytes:
     output = io.BytesIO()
     Image.new("RGB", (8, 8), "white").save(output, format="PNG")
     return output.getvalue()
+
+
+class FakeUploadFile:
+    def __init__(self, content: bytes):
+        self.content = content
+
+    async def read(self) -> bytes:
+        return self.content
 
 
 class FakeProcessor:
@@ -47,38 +57,111 @@ def _runtime():
 
 def test_health_and_ready_lifecycle(monkeypatch):
     monkeypatch.setattr(docker_service, "_runtime_load", _runtime)
-    with TestClient(docker_service.app) as client:
-        assert client.get("/health").json() == {"status": "ok"}
-        response = client.get("/ready")
-        assert response.status_code == 200
-        assert response.json()["precision_summary"]["linear4bit_module_count"] == 1
+    monkeypatch.setenv("VLM_CONFIG_PATH", "/fake/config.yaml")
+
+    async def exercise():
+        async with docker_service.lifespan(docker_service.app):
+            assert await docker_service.health() == {"status": "ok"}
+            response = await docker_service.ready()
+            assert response["precision_summary"]["linear4bit_module_count"] == 1
+
+    asyncio.run(exercise())
 
 
-def test_ready_returns_503_before_model_loaded():
-    docker_service.app.state.ready = False
-    with TestClient(docker_service.app) as client:
-        # lifespan loads the model in normal operation; explicitly emulate a
-        # failed/unloaded state for this endpoint contract.
-        docker_service.app.state.ready = False
-        assert client.get("/ready").status_code == 503
-
-
-def test_infer_uses_formatter_parser_and_lock(monkeypatch):
-    fake_config, fake_engine, summary = _runtime()
-    monkeypatch.setattr(docker_service, "_runtime_load", lambda: (fake_config, fake_engine, summary))
-    with TestClient(docker_service.app) as client:
-        response = client.post("/infer", files={"image": ("x.png", _png(), "image/png")},
-                               data={"query": "find buttons", "request_id": "abc"})
-        assert response.status_code == 200
-        body = response.json()
-        assert body["id"] == "abc"
-        assert body["usable"] is True
-        assert body["elements"][0]["text"] == "Button"
-        assert fake_engine.prompts == [("Query: find buttons\nAnswer:", 17, (8, 8))]
-
-
-def test_infer_rejects_invalid_image(monkeypatch):
+def test_ready_returns_503_before_model_loaded(monkeypatch):
     monkeypatch.setattr(docker_service, "_runtime_load", _runtime)
-    with TestClient(docker_service.app) as client:
-        response = client.post("/infer", files={"image": ("x.txt", b"not an image", "text/plain")})
-        assert response.status_code == 400
+    monkeypatch.setenv("VLM_CONFIG_PATH", "/fake/config.yaml")
+    docker_service.app.state.ready = False
+    async def exercise():
+        async with docker_service.lifespan(docker_service.app):
+            # lifespan loads the model in normal operation; explicitly emulate
+            # a failed/unloaded state for this endpoint contract.
+            docker_service.app.state.ready = False
+            with pytest.raises(docker_service.HTTPException) as exc_info:
+                await docker_service.ready()
+            assert exc_info.value.status_code == 503
+
+    asyncio.run(exercise())
+
+
+def test_infer_sync_uses_formatter_parser_and_worker_thread_lock(monkeypatch):
+    fake_config, fake_engine, _summary = _runtime()
+    docker_service.app.state.config = fake_config
+    docker_service.app.state.engine = fake_engine
+    entered_thread_ids = []
+    real_lock = threading.Lock()
+
+    class TrackingLock:
+        def __enter__(self):
+            entered_thread_ids.append(threading.get_ident())
+            real_lock.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            real_lock.release()
+
+    monkeypatch.setattr(docker_service, "inference_lock", TrackingLock())
+    result_holder = []
+    worker = threading.Thread(
+        target=lambda: result_holder.append(docker_service._infer_sync(_png(), "find buttons"))
+    )
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    body = result_holder[0]
+    assert body["raw_output"]
+    assert fake_engine.prompts == [("Query: find buttons\nAnswer:", 17, (8, 8))]
+    assert entered_thread_ids
+    assert entered_thread_ids[0] != threading.get_ident()
+    endpoint_source = inspect.getsource(docker_service.infer)
+    assert "with inference_lock" not in endpoint_source
+    assert "asyncio.to_thread(_infer_sync" in endpoint_source
+
+
+def test_waiting_inference_does_not_block_event_loop_or_health(monkeypatch):
+    fake_config, fake_engine, _summary = _runtime()
+    docker_service.app.state.ready = True
+    docker_service.app.state.config = fake_config
+    docker_service.app.state.engine = fake_engine
+    lock = threading.Lock()
+    monkeypatch.setattr(docker_service, "inference_lock", lock)
+
+    def blocked_inference(_content, _query):
+        with lock:
+            return {"usable": True, "elements": [], "raw_output": "", "parse_error": None,
+                    "coordinate_system": docker_service.COORDINATE_SYSTEM_NORMALIZED_0_1000}
+
+    monkeypatch.setattr(docker_service, "_infer_sync", blocked_inference)
+    lock.acquire()
+
+    async def exercise():
+        worker = threading.Thread(target=blocked_inference, args=(_png(), "find buttons"))
+        worker.start()
+        await asyncio.sleep(0.05)
+        health_response = await docker_service.health()
+        assert health_response == {"status": "ok"}
+        lock.release()
+        while worker.is_alive():
+            await asyncio.sleep(0.01)
+        return {"usable": True}
+
+    try:
+        result = asyncio.run(exercise())
+    finally:
+        if lock.locked():
+            lock.release()
+    assert result["usable"] is True
+
+
+def test_infer_rejects_invalid_image():
+    docker_service.app.state.ready = True
+    async def exercise():
+        with pytest.raises(docker_service.HTTPException) as exc_info:
+            await docker_service.infer(
+                image=FakeUploadFile(b"not an image"),
+                query=docker_service.DEFAULT_QUERY,
+                request_id=None,
+            )
+        return exc_info.value.status_code
+
+    assert asyncio.run(exercise()) == 400

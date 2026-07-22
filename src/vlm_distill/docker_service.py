@@ -76,7 +76,11 @@ def _infer_sync(image_bytes: bytes, query: str) -> dict[str, Any]:
         image = _load_teacher_image(Path(handle.name), config.training.image_resize)
     sample = VlmSample(id="request", image="", task="parsing", query=query)
     prompt = _format_prompt(config, sample)
-    raw_output = engine.generate_raw(image, prompt, config.teacher.max_new_tokens)
+    # This synchronous lock must be acquired by the worker thread.  Acquiring
+    # it in the async endpoint would block FastAPI's event-loop thread while a
+    # previous GPU inference is still running.
+    with inference_lock:
+        raw_output = engine.generate_raw(image, prompt, config.teacher.max_new_tokens)
     parsed = parse_parsing_answer(raw_output)
     return {"raw_output": raw_output, "usable": bool(parsed.get("usable")),
             "parse_error": parsed.get("parse_error"), "elements": parsed.get("elements", []),
@@ -96,8 +100,7 @@ async def infer(image: UploadFile = File(...), query: str = Form(DEFAULT_QUERY),
     except (UnidentifiedImageError, OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="Invalid image file") from exc
     try:
-        with inference_lock:
-            result = await asyncio.to_thread(_infer_sync, content, query or DEFAULT_QUERY)
+        result = await asyncio.to_thread(_infer_sync, content, query or DEFAULT_QUERY)
     except HTTPException:
         raise
     except Exception as exc:  # no traceback is returned to clients
