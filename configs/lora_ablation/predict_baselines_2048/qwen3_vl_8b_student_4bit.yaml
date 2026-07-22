@@ -1,0 +1,27 @@
+extends: ../predict_baselines/qwen3_vl_8b_student_4bit_json_prompt.yaml
+
+options:
+  teacher_quantization: 4bit
+  student_quantization: 4bit
+
+data:
+  prediction_path: outputs/baselines/qwen3_vl_8b_student_4bit_2048/student_predictions.jsonl
+  eval_path: outputs/lora_ablation/parsing_teacher_labels_1080p_4bit.jsonl
+
+teacher:
+  quantization: 4bit
+  max_new_tokens: 2048
+  temperature: 0.0
+
+student:
+  model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-8B-Instruct
+  inference_model_path:
+  inference_adapter_path:
+  deployment_artifact_path:
+  load_adapter: false
+  merge_adapter: false
+  use_lora: false
+  quantization: 4bit
+
+evaluation:
+  output_path: outputs/baselines/qwen3_vl_8b_student_4bit_2048/eval_report.json
