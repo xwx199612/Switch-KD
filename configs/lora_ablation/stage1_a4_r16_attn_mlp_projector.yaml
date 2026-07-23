@@ -11,8 +11,8 @@ data:
   label_path: outputs/lora_ablation/{task_name}_teacher_labels_{label_profile}.jsonl
   eval_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/{task_name}_online_dbild_{response_profile}.jsonl
   prediction_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/{task_name}_online_dbild_{response_profile}/student_predictions.jsonl
-  training_image_dir: /mnt/nvme0/vlm_distill/TV_data
-  inference_image_dir: /mnt/nvme0/vlm_distill/validation_data
+  training_image_dir: /mnt/nvme0/vlm_distill/TVWorld_eval/graph/image
+  inference_image_dir: /mnt/nvme0/vlm_distill/LG
   image_root: .
   max_samples: null
 teacher:
@@ -23,7 +23,7 @@ teacher:
   quantization: '{teacher_quantization}'
   attn_implementation: sdpa
   temperature: 0.0
-  max_new_tokens: 1280
+  max_new_tokens: 2048
   image_resize: '{quality}'
 student:
   model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-8B-Instruct
@@ -31,7 +31,8 @@ student:
   adapter_dir: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/adapter
   merged_model_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/merged_bf16
   inference_model_path: null
-  inference_adapter_path: null
+  inference_adapter_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/adapter
+  deployment_artifact_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/deploy_4bit_bf16_adapter
   load_adapter: false
   merge_adapter: false
   device_map: auto
@@ -56,7 +57,7 @@ student:
   projector_lora_alpha: 32
   projector_lora_dropout: 0.05
   multimodal_projector_path: model.visual.merger
-  merged_artifact_mode: bf16_standalone
+  merged_artifact_mode: 4bit_base_bf16_adapter
   attn_implementation: sdpa
 training:
   epochs: 3

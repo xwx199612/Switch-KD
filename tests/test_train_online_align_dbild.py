@@ -10,6 +10,9 @@ from vlm_distill.parsing_output_parser import serialize_parsing_label
 from vlm_distill.train_online_align_dbild import (
     OnlineAlignCollator,
     OnlineAlignDataset,
+    _answer_logits_request_from_labels,
+    _answer_only_lm_loss,
+    align_logits_to_supervised_positions,
     _target_text_for_row,
     _validate_rows,
 )
@@ -141,3 +144,76 @@ def test_validate_rows_accepts_parsing_rows_without_teacher_fields(tmp_path: Pat
     rows = _validate_rows(config)
 
     assert len(rows) == 1
+
+
+def test_answer_only_forward_positions_and_lm_loss_match_full_logits_slice():
+    labels = torch.tensor([[-100, -100, 2, 3, 4, -100]], dtype=torch.long)
+    positions, answer_labels = _answer_logits_request_from_labels(labels, label_name="labels")
+
+    assert positions.tolist() == [1, 2, 3]
+    assert answer_labels.tolist() == [[2, 3, 4]]
+
+    torch.manual_seed(7)
+    hidden = torch.randn(1, 6, 5, requires_grad=True)
+    lm_head = torch.nn.Linear(5, 11, bias=False)
+    full_logits = lm_head(hidden)
+    answer_logits = full_logits[:, positions, :]
+
+    expected = torch.nn.functional.cross_entropy(
+        full_logits[:, 1:4, :].reshape(-1, 11),
+        answer_labels.reshape(-1),
+    )
+    actual = _answer_only_lm_loss(answer_logits, answer_labels)
+    assert actual.item() == pytest.approx(expected.item(), rel=1e-6, abs=1e-6)
+
+    actual.backward()
+    assert hidden.grad is not None and torch.count_nonzero(hidden.grad).item() > 0
+    assert lm_head.weight.grad is not None and torch.count_nonzero(lm_head.weight.grad).item() > 0
+
+
+def test_answer_only_model_forward_returns_requested_length_and_teacher_has_no_graph():
+    class TinyCausalModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embedding = torch.nn.Embedding(16, 4)
+            self.lm_head = torch.nn.Linear(4, 16, bias=False)
+            self.requested = None
+
+        def forward(self, input_ids, *, logits_to_keep=0):
+            self.requested = logits_to_keep.detach().clone()
+            hidden = self.embedding(input_ids)
+            return self.lm_head(hidden[:, logits_to_keep, :])
+
+    labels = torch.tensor([[-100, -100, 2, 3, 4, -100]], dtype=torch.long)
+    positions, answer_labels = _answer_logits_request_from_labels(labels, label_name="labels")
+    teacher = TinyCausalModel()
+    student = TinyCausalModel()
+    input_ids = torch.tensor([[5, 6, 2, 3, 4, 0]], dtype=torch.long)
+
+    with torch.no_grad():
+        teacher_logits = teacher(input_ids, logits_to_keep=positions)
+    student_logits = student(input_ids, logits_to_keep=positions)
+    loss = _answer_only_lm_loss(student_logits, answer_labels)
+    loss.backward()
+
+    assert teacher_logits.shape == (1, 3, 16)
+    assert student_logits.shape == (1, 3, 16)
+    assert teacher.requested.tolist() == positions.tolist()
+    assert student.requested.tolist() == positions.tolist()
+    assert not teacher_logits.requires_grad
+    assert all(parameter.grad is None for parameter in teacher.parameters())
+    assert any(parameter.grad is not None for parameter in student.parameters())
+
+
+def test_answer_only_alignment_preserves_compact_logits_and_length():
+    torch.manual_seed(11)
+    teacher_logits = torch.randn(1, 3, 9)
+    student_logits = torch.randn(1, 3, 9, requires_grad=True)
+    answer_labels = torch.tensor([[2, 3, 4]], dtype=torch.long)
+
+    aligned = align_logits_to_supervised_positions(
+        teacher_logits, student_logits, answer_labels, answer_labels
+    )
+    assert aligned[0].shape == (1, 3, 9)
+    assert aligned[1].shape == (1, 3, 9)
+    assert aligned[3:5] == (3, 3)

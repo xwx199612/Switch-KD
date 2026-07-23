@@ -12,7 +12,7 @@ from typing import Any
 from .config_schema import load_config, format_prompt, resolve_label_path
 from .data_manifest import read_jsonl
 from .device_utils import batch_to_device, resolve_requested_device_map, resolve_training_device_map, select_model_input_device
-from .loss_switch_kd import _causal_lm_loss, full_dynamic_bidirectional_logits_difference
+from .loss_switch_kd import full_dynamic_bidirectional_logits_difference
 from .model_loading import apply_attn_implementation, resolve_model_path
 from .mixed_precision import build_mixed_precision_quantization_config
 from .student_trainability import (
@@ -258,6 +258,67 @@ def _validate_answer_logits_alignment(
             f"sample_ids={sample_ids}"
         )
 
+
+def _answer_logits_request_from_labels(labels, *, label_name: str):
+    """Return exact hidden-state positions that predict supervised answer labels.
+
+    Qwen's ``logits_to_keep`` indexes the sequence hidden states, while a causal
+    LM logit at position ``t`` predicts the label at ``t + 1``.  Online DBiLD
+    deliberately supports batch size one so that one exact index tensor can be
+    passed to both model forwards.
+    """
+    import torch
+
+    if not torch.is_tensor(labels) or labels.ndim != 2:
+        raise ValueError(f"{label_name} must have shape [batch, sequence], got {getattr(labels, 'shape', None)}")
+    if labels.shape[0] != 1:
+        raise ValueError(
+            "Online Align DBiLD requires batch_size == 1 for exact answer-position logits; "
+            f"{label_name}.shape={tuple(labels.shape)}"
+        )
+
+    supervised_mask = labels.ne(-100)
+    supervised_positions = supervised_mask[0].nonzero(as_tuple=False).flatten()
+    if supervised_positions.numel() == 0:
+        raise ValueError(f"{label_name} contains no supervised answer tokens.")
+    if int(supervised_positions[0]) <= 0:
+        raise ValueError(
+            f"{label_name} has a supervised token at sequence position 0; "
+            "causal answer logits require a preceding hidden state."
+        )
+    expected = torch.arange(
+        int(supervised_positions[0]),
+        int(supervised_positions[-1]) + 1,
+        device=supervised_positions.device,
+    )
+    if not torch.equal(supervised_positions, expected):
+        raise ValueError(
+            f"{label_name} supervised answer span must be contiguous; "
+            f"positions={supervised_positions.detach().cpu().tolist()}"
+        )
+
+    answer_labels = labels[:, supervised_positions]
+    # These are the hidden-state positions whose logits predict answer_labels.
+    answer_token_indices = (supervised_positions - 1).to(dtype=torch.long)
+    return answer_token_indices, answer_labels
+
+
+def _answer_only_lm_loss(answer_logits, answer_labels):
+    """Causal LM loss over already-extracted answer-position logits."""
+    import torch.nn.functional as F
+
+    if answer_logits.ndim != 3 or answer_labels.ndim != 2:
+        raise ValueError("answer_logits must be [batch, answer_len, vocab] and answer_labels [batch, answer_len].")
+    if tuple(answer_logits.shape[:2]) != tuple(answer_labels.shape):
+        raise ValueError(
+            "Answer logits/labels shape mismatch: "
+            f"logits={tuple(answer_logits.shape)} labels={tuple(answer_labels.shape)}"
+        )
+    return F.cross_entropy(
+        answer_logits.reshape(-1, answer_logits.shape[-1]),
+        answer_labels.reshape(-1),
+        ignore_index=-100,
+    )
 
 @dataclass(frozen=True)
 class TrainableSummary:
@@ -804,13 +865,11 @@ def align_logits_to_supervised_positions(teacher_logits, student_logits, teacher
     teacher_logits_for_align = teacher_logits[..., :shared_vocab]
     student_logits_for_align = student_logits[..., :shared_vocab]
 
-    teacher_shift_logits = teacher_logits_for_align[:, :-1, :]
-    teacher_shift_labels = teacher_labels[:, 1:]
-    student_shift_logits = student_logits_for_align[:, :-1, :]
-    student_shift_labels = student_labels[:, 1:]
-
-    teacher_mask = teacher_shift_labels != -100
-    student_mask = student_shift_labels != -100
+    # The forwards already received logits_to_keep=(supervised label position - 1),
+    # so their sequence dimension is answer-only.  Do not shift or slice a full
+    # sequence here: that would reintroduce the memory problem this path avoids.
+    teacher_mask = teacher_labels != -100
+    student_mask = student_labels != -100
     teacher_count = int(teacher_mask[0].sum().item())
     student_count = int(student_mask[0].sum().item())
 
@@ -825,8 +884,15 @@ def align_logits_to_supervised_positions(teacher_logits, student_logits, teacher
             f"teacher_count={teacher_count}, student_count={student_count}."
         )
 
-    teacher_supervised_ids = teacher_shift_labels[teacher_mask]
-    student_supervised_ids = student_shift_labels[student_mask]
+    if int(teacher_logits_for_align.shape[1]) != teacher_count or int(student_logits_for_align.shape[1]) != student_count:
+        raise ValueError(
+            "Answer-only logits length does not match supervised label count: "
+            f"teacher_logits_len={teacher_logits_for_align.shape[1]} teacher_count={teacher_count} "
+            f"student_logits_len={student_logits_for_align.shape[1]} student_count={student_count}"
+        )
+
+    teacher_supervised_ids = teacher_labels[teacher_mask]
+    student_supervised_ids = student_labels[student_mask]
     if int(teacher_supervised_ids.max().item()) >= teacher_vocab:
         raise ValueError("Teacher supervised label id exceeds teacher vocab size.")
     if int(student_supervised_ids.max().item()) >= student_vocab:
@@ -840,8 +906,8 @@ def align_logits_to_supervised_positions(teacher_logits, student_logits, teacher
             "LM loss remains valid, but DBiLD compares only shared-vocab logits."
         )
 
-    teacher_answer_logits = teacher_shift_logits[teacher_mask].view(1, teacher_count, shared_vocab)
-    student_answer_logits = student_shift_logits[student_mask].view(1, student_count, shared_vocab)
+    teacher_answer_logits = teacher_logits_for_align
+    student_answer_logits = student_logits_for_align
     aligned_attention_mask = torch.ones(
         (1, teacher_count),
         device=student_logits.device,
@@ -1826,6 +1892,7 @@ def run_training(
 
             teacher_inputs, teacher_labels = _build_teacher_inputs(batch, teacher_processor, config)
             teacher_inputs = batch_to_device(teacher_inputs, teacher_input_device)
+            teacher_labels = teacher_labels.to(device=teacher_input_device)
             teacher_forward_inputs = {
                 key: value
                 for key, value in teacher_inputs.items()
@@ -1839,6 +1906,17 @@ def run_training(
             }
             student_batch = batch_to_device(student_batch, student_input_device)
             labels = student_batch["labels"]
+            teacher_answer_token_indices, teacher_answer_labels = _answer_logits_request_from_labels(
+                teacher_labels, label_name="teacher_labels"
+            )
+            student_answer_token_indices, student_answer_labels = _answer_logits_request_from_labels(
+                labels, label_name="student_labels"
+            )
+            if teacher_answer_labels.shape[1] != student_answer_labels.shape[1]:
+                raise ValueError(
+                    "Teacher/student answer length mismatch before forward: "
+                    f"teacher={teacher_answer_labels.shape[1]} student={student_answer_labels.shape[1]}"
+                )
             if validate_every_batch or not token_alignment_batch_validated:
                 validation_batch = dict(student_batch)
                 validation_batch["target_text"] = batch.get("target_text")
@@ -1867,18 +1945,27 @@ def run_training(
             _synchronize_for_timing(teacher_input_device)
             with torch.no_grad():
                 with _autocast_context(config.training.mixed_precision):
-                    teacher_outputs = teacher_model(**teacher_forward_inputs)
+                    teacher_outputs = teacher_model(
+                        **teacher_forward_inputs,
+                        logits_to_keep=teacher_answer_token_indices,
+                    )
                     teacher_logits = teacher_outputs.logits
+                    del teacher_outputs
             _synchronize_for_timing(teacher_input_device)
             teacher_forward_seconds = time.perf_counter() - teacher_forward_started
             teacher_labels = teacher_labels.to(device=teacher_logits.device)
+            teacher_answer_labels = teacher_answer_labels.to(device=teacher_logits.device)
 
             student_forward_started = time.perf_counter()
             _synchronize_for_timing(student_input_device)
             with _autocast_context(config.training.mixed_precision):
-                student_outputs = student_model(**student_forward_inputs)
+                student_outputs = student_model(
+                    **student_forward_inputs,
+                    logits_to_keep=student_answer_token_indices,
+                )
                 student_logits = student_outputs.logits
-                lm_loss = _causal_lm_loss(student_logits, labels)
+                lm_loss = _answer_only_lm_loss(student_logits, student_answer_labels)
+                del student_outputs
             _synchronize_for_timing(student_input_device)
             student_forward_seconds = time.perf_counter() - student_forward_started
 
@@ -1893,7 +1980,12 @@ def run_training(
                     student_supervised_count,
                     shared_vocab_size,
                     vocab_prefix_alignment_used,
-                ) = align_logits_to_supervised_positions(teacher_logits, student_logits, teacher_labels, labels)
+                ) = align_logits_to_supervised_positions(
+                    teacher_logits,
+                    student_logits,
+                    teacher_answer_labels,
+                    student_answer_labels,
+                )
                 dbild_device = aligned_student_logits.device
                 if aligned_teacher_logits.device != dbild_device:
                     aligned_teacher_logits = aligned_teacher_logits.to(dbild_device)
@@ -1918,7 +2010,7 @@ def run_training(
                     kl_mode=config.distillation.dbild_kl_mode,
                 )
                 # VSD is intentionally disabled because teacher and student share the same vision backbone.
-                # This script targets online full-logits DBiLD L_Align reproduction, not full Switch-KD with VSD.
+                # This script targets online answer-only DBiLD L_Align, not full Switch-KD with VSD.
                 total_loss = _weighted_online_align_loss(
                     lm_loss,
                     align_loss,
@@ -1941,6 +2033,15 @@ def run_training(
                 f"vsd_loss={vsd_loss.detach().float().item():.6f} "
                 f"total_loss={total_loss.detach().float().item():.6f}"
             )
+            if not first_batch_debug_printed:
+                print("teacher_forward_logits_scope=answer_only")
+                print("student_forward_logits_scope=answer_only")
+                print(f"requested_logit_position_count={int(student_answer_token_indices.numel())}")
+                print(f"full_sequence_length={int(labels.shape[1])}")
+                print(
+                    "avoided_full_logit_positions="
+                    f"{int(labels.shape[1]) - int(student_answer_token_indices.numel())}"
+                )
             last_step_log_values = {
                 "lm_loss": float(lm_loss.detach().float().item()),
                 "align_loss": float(align_loss.detach().float().item()),
@@ -1956,8 +2057,8 @@ def run_training(
                 print(f"student_logits.shape={tuple(student_logits.shape)}")
                 print(f"teacher_labels.shape={tuple(teacher_labels.shape)}")
                 print(f"student_labels.shape={tuple(labels.shape)}")
-                print(f"teacher_shift_seq_len={int(teacher_logits.shape[1] - 1)}")
-                print(f"student_shift_seq_len={int(student_logits.shape[1] - 1)}")
+                print("teacher_logits_scope=answer_only")
+                print("student_logits_scope=answer_only")
                 print(f"teacher_supervised_count={teacher_supervised_count}")
                 print(f"student_supervised_count={student_supervised_count}")
                 print(f"aligned_teacher_logits.shape={tuple(aligned_teacher_logits.shape)}")
