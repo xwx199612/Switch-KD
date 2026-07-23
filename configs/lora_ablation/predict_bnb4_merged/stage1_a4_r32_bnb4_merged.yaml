@@ -1,16 +1,142 @@
-extends: ../stage1_a4_r32_attn_mlp_projector.yaml
-
+seed: 42
+options:
+  task_name: parsing
+  quality: 1080p
+  teacher_quantization: 4bit
+  student_quantization: 4bit
+data:
+  training_manifest_path: outputs/lora_ablation/{task_name}_training_manifest.jsonl
+  inference_manifest_path: outputs/lora_ablation/{task_name}_inference_manifest.jsonl
+  distill_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/{task_name}_online_dbild_{response_profile}.jsonl
+  label_path: outputs/lora_ablation/{task_name}_teacher_labels_{label_profile}.jsonl
+  eval_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/{task_name}_online_dbild_{response_profile}.jsonl
+  prediction_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/post_merge_bnb4_predictions/student_predictions.jsonl
+  training_image_dir: /mnt/nvme0/vlm_distill/TV_data
+  inference_image_dir: /mnt/nvme0/vlm_distill/validation_data
+  image_root: .
+  max_samples: null
+teacher:
+  backend: hf
+  model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-32B-Instruct
+  device_map: auto
+  torch_dtype: bfloat16
+  quantization: '{teacher_quantization}'
+  attn_implementation: sdpa
+  temperature: 0.0
+  max_new_tokens: 1280
+  image_resize: '{quality}'
 student:
+  model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-8B-Instruct
+  output_dir: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector
+  adapter_dir: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/adapter
+  merged_model_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/merged_bf16
   inference_model_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/adapter_merger/bnb4
+  inference_adapter_path: null
   deployment_artifact_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/adapter_merger/bnb4
-  inference_adapter_path:
   load_adapter: false
   merge_adapter: false
+  device_map: auto
+  use_lora: true
+  lora_rank: 32
+  lora_alpha: 64
+  lora_layers_to_transform: null
+  lora_layers_pattern: null
+  lora_dropout: 0.05
+  target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
   quantization: 4bit
+  train_multimodal_projector: true
+  use_projector_lora: false
+  projector_lora_rank: 32
+  projector_lora_alpha: 64
+  projector_lora_dropout: 0.05
+  multimodal_projector_path: model.visual.merger
   merged_artifact_mode: post_merge_bnb4
+  attn_implementation: sdpa
+training:
+  epochs: 3
+  batch_size: 1
+  gradient_accumulation_steps: 8
+  learning_rate: 0.0001
+  warmup_ratio: 0.03
+  max_steps: null
+  log_every: 50
+  save_every: 1000
+  mixed_precision: bf16
+  gradient_checkpointing: true
+  image_resize: '{quality}'
+  max_length: 4096
+  freeze_vision_tower: true
+  mask_prompt_labels: true
+distillation:
+  method: online_align_dbild
+  lm_loss_weight: 1.0
+  dbild_loss_weight: 1.0
+  vsd_loss_weight: 0.0
+  confidence_weighting: true
+  min_teacher_confidence: 0.35
+  prompt_template: |
+    You are labeling Android TV screenshots for UI grounding.
 
-data:
-  prediction_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/post_merge_bnb4_predictions/student_predictions.jsonl
+    Task:
+    {query}
 
+    Find all visible interactive UI elements.
+
+    Return valid JSON only.
+    Use ASCII double quotes only: "
+    Do not use smart quotes: “ ”
+    Do not use markdown.
+    Do not explain.
+
+    Use this exact schema:
+    {{
+      "elements": [
+        {{
+          "text": "visible UI element name",
+          "bbox_norm": [80, 120, 140, 180],
+          "focused": false
+        }}
+      ],
+      "coordinate_system": "normalized_0_1000"
+    }}
+
+    Rules:
+    - Every element must use exactly these keys: "text", "bbox_norm", "focused".
+    - Do not include type.
+    - Do not use alternative bbox key names: bbox, box_norm, bx_norm, bbox norm, bboxNorm, boxed_norm.
+    - bbox_norm must be an array of exactly four integers, e.g. [80, 120, 140, 180].
+    - Do not write bbox_norm as comma-separated text.
+    - Use normalized 0-1000 coordinates, not pixel coordinates.
+    - text must be the visible UI label or a short visual name of the element.
+    - Do not use schema words such as text, button, tab, app_icon, menu_item, icon, bbox_norm, coordinate_system, or elements as text unless that exact word is visibly displayed on screen.
+    - focused must be exactly true or false.
+    - If focused is not visually clear, use false.
+    - Include "coordinate_system": "normalized_0_1000".
+    - Prioritize valid JSON over recall.
+    - If unsure about an element bbox, omit that element.
+    - Keep text short. If visible text is very long, summarize it into a short label.
+
+    Important:
+    Because Python .format() is used on prompt_template:
+    - Keep placeholders as single braces: {query}, {question}, {task}
+    - Escape literal JSON braces as double braces: {{ and }}
+    - Do not use unescaped JSON braces in YAML.
+  kd_temperature: 2.0
+  dbild_top_k: 64
+  dbild_top_k_mode: kneedle
+  dbild_kneedle_candidate_k: 256
+  dbild_min_top_k: 4
+  dbild_max_top_k: 128
+  dbild_kl_mode: reverse
 evaluation:
   output_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/post_merge_bnb4_predictions/eval_report.json
+  metrics:
+  - exact_match
+  - token_f1
