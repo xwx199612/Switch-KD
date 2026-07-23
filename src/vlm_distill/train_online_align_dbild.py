@@ -1912,6 +1912,18 @@ def run_training(
             student_answer_token_indices, student_answer_labels = _answer_logits_request_from_labels(
                 labels, label_name="student_labels"
             )
+            teacher_answer_token_indices = teacher_answer_token_indices.to(
+                device="cpu",
+                dtype=torch.long,
+            )
+            student_answer_token_indices = student_answer_token_indices.to(
+                device="cpu",
+                dtype=torch.long,
+            )
+            assert teacher_answer_token_indices.device.type == "cpu"
+            assert student_answer_token_indices.device.type == "cpu"
+            assert teacher_answer_token_indices.dtype == torch.long
+            assert student_answer_token_indices.dtype == torch.long
             if teacher_answer_labels.shape[1] != student_answer_labels.shape[1]:
                 raise ValueError(
                     "Teacher/student answer length mismatch before forward: "

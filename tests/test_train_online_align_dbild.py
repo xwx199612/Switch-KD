@@ -171,6 +171,64 @@ def test_answer_only_forward_positions_and_lm_loss_match_full_logits_slice():
     assert lm_head.weight.grad is not None and torch.count_nonzero(lm_head.weight.grad).item() > 0
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for device placement coverage")
+def test_cuda_labels_are_converted_to_cpu_long_logits_indices():
+    labels = torch.tensor([[-100, -100, 2, 3, 4, -100]], dtype=torch.long, device="cuda")
+    positions, _ = _answer_logits_request_from_labels(labels, label_name="labels")
+
+    assert positions.device.type == "cuda"
+    positions = positions.to(device="cpu", dtype=torch.long)
+
+    assert positions.device.type == "cpu"
+    assert positions.dtype == torch.long
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for device placement coverage")
+def test_cpu_long_logits_indices_can_index_cuda_hidden_states():
+    hidden_states = torch.randn(1, 6, 4, device="cuda")
+    indices = torch.tensor([1, 2, 3], device="cpu", dtype=torch.long)
+
+    selected = hidden_states[:, indices, :]
+
+    assert selected.shape == (1, 3, 4)
+    assert torch.equal(selected, hidden_states[:, [1, 2, 3], :])
+
+
+def test_answer_only_logits_equal_full_logits_slice():
+    torch.manual_seed(19)
+    hidden_states = torch.randn(1, 6, 4)
+    lm_head = torch.nn.Linear(4, 13, bias=True)
+    indices = torch.tensor([1, 2, 3], device="cpu", dtype=torch.long)
+
+    full_logits = lm_head(hidden_states)
+    answer_only_logits = lm_head(hidden_states[:, indices, :])
+
+    assert torch.equal(answer_only_logits, full_logits[:, indices, :])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for device placement coverage")
+def test_cpu_logits_indices_work_when_input_and_lm_head_devices_differ():
+    class SplitDeviceCausalModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embedding = torch.nn.Embedding(16, 4, device="cuda")
+            self.lm_head = torch.nn.Linear(4, 16, bias=False, device="cpu")
+
+        def forward(self, input_ids, *, logits_to_keep):
+            hidden_states = self.embedding(input_ids)
+            selected = hidden_states[:, logits_to_keep, :]
+            return self.lm_head(selected.to(self.lm_head.weight.device))
+
+    model = SplitDeviceCausalModel()
+    input_ids = torch.tensor([[5, 6, 2, 3, 4, 0]], dtype=torch.long, device="cuda")
+    indices = torch.tensor([1, 2, 3], device="cpu", dtype=torch.long)
+
+    logits = model(input_ids, logits_to_keep=indices)
+
+    assert logits.shape == (1, 3, 16)
+    assert logits.device.type == "cpu"
+
+
 def test_answer_only_model_forward_returns_requested_length_and_teacher_has_no_graph():
     class TinyCausalModel(torch.nn.Module):
         def __init__(self):
