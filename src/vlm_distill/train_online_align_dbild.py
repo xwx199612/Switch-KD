@@ -942,8 +942,8 @@ def align_logits_to_supervised_positions(teacher_logits, student_logits, teacher
     )
 
 
-def _validate_rows(config) -> list[dict[str, Any]]:
-    path = resolve_label_path(config.data)
+def _validate_rows(config, *, path: Path | None = None) -> list[dict[str, Any]]:
+    path = path or resolve_label_path(config.data)
     rows = read_jsonl(path, max_samples=config.data.max_samples)
     validated: list[dict[str, Any]] = []
     offline_fields = (
@@ -1340,6 +1340,173 @@ def _dataloader(dataset, processor, batch_size: int):
         shuffle=False,
         collate_fn=OnlineAlignCollator(processor),
     )
+
+
+def _distributed_state() -> tuple[bool, int, int]:
+    import torch.distributed as dist
+    if not dist.is_available() or not dist.is_initialized():
+        return False, 0, 1
+    return True, dist.get_rank(), dist.get_world_size()
+
+
+def _reduce_validation_totals(total: Any, count: int) -> tuple[float, int]:
+    """Reduce loss sum/count, making uneven validation shards mathematically correct."""
+    import torch
+    import torch.distributed as dist
+    active, _rank, _world = _distributed_state()
+    device = torch.device("cuda", torch.cuda.current_device()) if active and dist.get_backend() == "nccl" else torch.device("cpu")
+    values = torch.tensor([float(total), float(count)], dtype=torch.float64, device=device)
+    if active:
+        dist.all_reduce(values, op=dist.ReduceOp.SUM)
+    return float(values[0].item()), int(values[1].item())
+
+
+def _broadcast_early_stop(flag: bool) -> bool:
+    import torch
+    import torch.distributed as dist
+    active, rank, _world = _distributed_state()
+    if not active:
+        return bool(flag)
+    value = torch.tensor([int(flag) if rank == 0 else 0], dtype=torch.int64)
+    dist.broadcast(value, src=0)
+    return bool(value.item())
+
+
+def _early_stopping_update(current_val_loss: float, best_val_loss: float,
+                           epochs_without_improvement: int, *, min_delta: float,
+                           patience: int) -> tuple[float, int, bool, bool]:
+    """Pure state transition used by the loop and unit tests."""
+    improved = current_val_loss < best_val_loss - min_delta
+    next_best = current_val_loss if improved else best_val_loss
+    next_bad = 0 if improved else epochs_without_improvement + 1
+    return next_best, next_bad, improved, next_bad >= patience
+
+
+def _jsonable_config(config) -> dict[str, Any]:
+    from dataclasses import asdict
+    value = asdict(config)
+    def convert(item):
+        if isinstance(item, Path):
+            return str(item)
+        if isinstance(item, dict):
+            return {key: convert(val) for key, val in item.items()}
+        if isinstance(item, list):
+            return [convert(val) for val in item]
+        return item
+    return convert(value)
+
+
+def _save_best_checkpoint(model, processor, optimizer, scheduler, *, checkpoint_dir: Path,
+                           epoch: int, global_step: int, best_val_loss: float,
+                           epochs_without_improvement: int, config) -> None:
+    import torch
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(checkpoint_dir)
+    processor.save_pretrained(checkpoint_dir)
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+        "epoch": epoch,
+        "global_step": global_step,
+        "best_val_loss": best_val_loss,
+        "epochs_without_improvement": epochs_without_improvement,
+        "resolved_config": _jsonable_config(config),
+    }, checkpoint_dir / "training_state.pt")
+
+
+def _restore_best_checkpoint(model, optimizer, scheduler, checkpoint_dir: Path) -> dict[str, Any]:
+    import torch
+    state = torch.load(checkpoint_dir / "training_state.pt", map_location="cpu", weights_only=False)
+    model.load_state_dict(state["model_state_dict"], strict=False)
+    if optimizer is not None and state.get("optimizer_state_dict") is not None:
+        optimizer.load_state_dict(state["optimizer_state_dict"])
+    if scheduler is not None and state.get("scheduler_state_dict") is not None:
+        scheduler.load_state_dict(state["scheduler_state_dict"])
+    return state
+
+
+def _validate_epoch(*, rows, config, student_model, teacher_model, student_processor,
+                    teacher_processor, student_input_device, teacher_input_device,
+                    batch_size: int, epoch: int, global_step: int,
+                    best_val_loss: float, epochs_without_improvement: int) -> dict[str, Any]:
+    """Evaluate the exact online Align DBiLD objective without touching gradients."""
+    import torch
+    dataset = OnlineAlignDataset(rows, config, student_processor)
+    active, _rank, world_size = _distributed_state()
+    sampler = None
+    if active:
+        import torch.utils.data.distributed
+        sampler = torch.utils.data.distributed.DistributedSampler(
+            dataset, num_replicas=world_size, rank=_rank, shuffle=False, drop_last=False
+        )
+    loader = torch.utils.data.DataLoader(
+        dataset, batch_size=batch_size, sampler=sampler, shuffle=False if sampler is not None else False,
+        collate_fn=OnlineAlignCollator(student_processor),
+    )
+    teacher_was_training = teacher_model.training
+    student_model.eval()
+    teacher_model.eval()
+    sums = {key: 0.0 for key in ("lm", "dbild", "total")}
+    count = 0
+    try:
+        with torch.no_grad():
+            for batch in loader:
+                teacher_inputs, teacher_labels = _build_teacher_inputs(batch, teacher_processor, config)
+                teacher_inputs = batch_to_device(teacher_inputs, teacher_input_device)
+                teacher_labels = teacher_labels.to(device=teacher_input_device)
+                student_batch = batch_to_device(
+                    {key: value for key, value in batch.items()
+                     if key not in {"sample_id", "image_path", "teacher_prompt", "target_text", "prompt_token_len"}},
+                    student_input_device,
+                )
+                labels = student_batch["labels"]
+                t_keep, t_len, t_labels, _ = _answer_logits_request_from_labels(teacher_labels, label_name="teacher_labels")
+                s_keep, s_len, s_labels, _ = _answer_logits_request_from_labels(labels, label_name="student_labels")
+                teacher_inputs_no_labels = {key: value for key, value in teacher_inputs.items() if key != "labels"}
+                student_inputs = {key: value for key, value in student_batch.items() if key != "labels"}
+                with _autocast_context(config.training.mixed_precision):
+                    teacher_logits = teacher_model(**teacher_inputs_no_labels, logits_to_keep=t_keep).logits[:, :t_len, :]
+                    student_logits = student_model(**student_inputs, logits_to_keep=s_keep).logits[:, :s_len, :]
+                    lm_loss = _answer_only_lm_loss(student_logits, s_labels)
+                    (teacher_logits, student_logits, mask, *_rest) = align_logits_to_supervised_positions(
+                        teacher_logits, student_logits, t_labels, s_labels
+                    )
+                    dbild_loss = full_dynamic_bidirectional_logits_difference(
+                        reference_logits=teacher_logits, target_logits=student_logits,
+                        attention_mask=mask, temperature=config.distillation.kd_temperature,
+                        top_k=config.distillation.dbild_top_k, top_k_mode=config.distillation.dbild_top_k_mode,
+                        kneedle_candidate_k=config.distillation.dbild_kneedle_candidate_k,
+                        min_top_k=config.distillation.dbild_min_top_k, max_top_k=config.distillation.dbild_max_top_k,
+                        kl_mode=config.distillation.dbild_kl_mode,
+                    )
+                    total_loss = _weighted_online_align_loss(
+                        lm_loss, dbild_loss, lm_loss_weight=config.distillation.lm_loss_weight,
+                        dbild_loss_weight=config.distillation.dbild_loss_weight,
+                    )
+                sums["lm"] += float(lm_loss.detach().float().item())
+                sums["dbild"] += float(dbild_loss.detach().float().item())
+                sums["total"] += float(total_loss.detach().float().item())
+                count += 1
+    finally:
+        student_model.train()
+        if teacher_was_training:
+            teacher_model.train()
+    reduced = {key: _reduce_validation_totals(value, count) for key, value in sums.items()}
+    denominator = reduced["total"][1]
+    if denominator <= 0:
+        raise ValueError("Validation manifest produced no batches.")
+    values = {f"val_{key}_loss": reduced[key][0] / denominator for key in sums}
+    next_best, next_bad, improved, _should_stop = _early_stopping_update(
+        values["val_total_loss"], best_val_loss, epochs_without_improvement,
+        min_delta=config.training.early_stopping_min_delta,
+        patience=config.training.early_stopping_patience,
+    )
+    return {
+        "epoch": epoch, "global_step": global_step, **values,
+        "best_val_loss": next_best, "epochs_without_improvement": next_bad,
+        "is_best": improved, "early_stopped": False,
+    }
 
 
 def _gpu_mem_stats() -> tuple[int, int]:
@@ -1869,6 +2036,22 @@ def run_training(
     dataset = OnlineAlignDataset(rows, config, student_processor)
     dataloader = _dataloader(dataset, student_processor, effective_batch_size)
     optimizer = _build_optimizer(config, student_model)
+    distributed, rank, world_size = _distributed_state()
+    validation_enabled = bool(config.training.validation_enabled)
+    validation_rows = None
+    validation_history_path = config.student.output_dir / "validation_history.jsonl"
+    best_checkpoint_dir = config.student.output_dir / "best_checkpoint"
+    scheduler = None
+    if validation_enabled:
+        validation_rows = _validate_rows(
+            config, path=config.data.validation_manifest_path,
+        )
+        # A constant scheduler preserves the historical learning-rate behavior while
+        # making the best checkpoint restartable and explicit about scheduler state.
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _step: 1.0)
+        if rank == 0:
+            validation_history_path.parent.mkdir(parents=True, exist_ok=True)
+            validation_history_path.unlink(missing_ok=True)
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
 
@@ -1886,6 +2069,9 @@ def run_training(
         "shared_vocab_size": None,
         "vocab_prefix_alignment_used": 0,
     }
+    best_val_loss = float("inf")
+    epochs_without_improvement = 0
+    early_stop_requested = False
 
     print(f"teacher_model_path={teacher_model_path}")
     print(f"student_model_path={student_model_path}")
@@ -2160,6 +2346,8 @@ def run_training(
 
             if micro_step % grad_accum_steps == 0:
                 optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
                 if smoke_test:
                     _print_gpu_memory_stage("after_optimizer_step")
                 optimizer.zero_grad(set_to_none=True)
@@ -2192,6 +2380,8 @@ def run_training(
                 micro_step=micro_step,
             )
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
             optimizer.zero_grad(set_to_none=True)
             global_step += 1
             step_message = (
@@ -2210,23 +2400,68 @@ def run_training(
             print(step_message)
             print(f"optimizer step {global_step} completed")
 
+        should_validate = validation_enabled and ((epoch + 1) % int(config.training.validation_every_epochs) == 0)
+        if should_validate and validation_rows is not None:
+            summary = _validate_epoch(
+                rows=validation_rows, config=config, student_model=student_model,
+                teacher_model=teacher_model, student_processor=student_processor,
+                teacher_processor=teacher_processor, student_input_device=student_input_device,
+                teacher_input_device=teacher_input_device, batch_size=effective_batch_size,
+                epoch=epoch + 1, global_step=global_step, best_val_loss=best_val_loss,
+                epochs_without_improvement=epochs_without_improvement,
+            )
+            best_val_loss = float(summary["best_val_loss"])
+            epochs_without_improvement = int(summary["epochs_without_improvement"])
+            early_stop_requested = bool(
+                config.training.early_stopping_enabled
+                and epochs_without_improvement >= config.training.early_stopping_patience
+            )
+            summary["early_stopped"] = early_stop_requested
+            if rank == 0:
+                with validation_history_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(summary, ensure_ascii=False) + "\n")
+                print("validation " + json.dumps(summary, ensure_ascii=False, sort_keys=True))
+                if summary["is_best"]:
+                    _save_best_checkpoint(
+                        student_model, student_processor, optimizer, scheduler,
+                        checkpoint_dir=best_checkpoint_dir, epoch=epoch + 1,
+                        global_step=global_step, best_val_loss=best_val_loss,
+                        epochs_without_improvement=epochs_without_improvement, config=config,
+                    )
+            early_stop_requested = _broadcast_early_stop(early_stop_requested)
+            if distributed:
+                import torch.distributed as dist
+                dist.barrier()
+            if early_stop_requested:
+                break
+
     if smoke_test and global_step != 1:
         raise RuntimeError(f"Smoke test expected exactly one optimizer step, got {global_step}.")
-    adapter_dir.mkdir(parents=True, exist_ok=True)
-    student_model.save_pretrained(adapter_dir)
-    student_processor.save_pretrained(adapter_dir)
-    adapter_metadata = {
-        "base_projector_checksum_before_lora": getattr(student_model, "_main_merger_base_checksum", None),
-        "base_projector_dtype_map": getattr(student_model, "_main_merger_dtype_map", None),
-        "mixed_precision_source": getattr(student_model, "_mixed_precision_source", "load_time_exclusion"),
-        "main_merger_quantized_before_peft": False,
-        "merger_norm_dtype": "torch.float32",
-    }
-    (adapter_dir / "adapter_metadata.json").write_text(
-        json.dumps(adapter_metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    if smoke_test:
-        _validate_smoke_adapter_checkpoint(adapter_dir)
+    if validation_enabled and config.training.restore_best_model and best_checkpoint_dir.exists():
+        if distributed:
+            import torch.distributed as dist
+            dist.barrier()
+        _restore_best_checkpoint(student_model, optimizer, scheduler, best_checkpoint_dir)
+        print(f"restored_best_checkpoint={best_checkpoint_dir}")
+    if rank == 0:
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+        student_model.save_pretrained(adapter_dir)
+        student_processor.save_pretrained(adapter_dir)
+        adapter_metadata = {
+            "base_projector_checksum_before_lora": getattr(student_model, "_main_merger_base_checksum", None),
+            "base_projector_dtype_map": getattr(student_model, "_main_merger_dtype_map", None),
+            "mixed_precision_source": getattr(student_model, "_mixed_precision_source", "load_time_exclusion"),
+            "main_merger_quantized_before_peft": False,
+            "merger_norm_dtype": "torch.float32",
+        }
+        (adapter_dir / "adapter_metadata.json").write_text(
+            json.dumps(adapter_metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        if smoke_test:
+            _validate_smoke_adapter_checkpoint(adapter_dir)
+    if distributed:
+        import torch.distributed as dist
+        dist.barrier()
     print(f"peak_vram_allocated_bytes={_gpu_peak_memory_allocated()}")
     print(f"OK online DBiLD training completed: optimizer_steps={global_step}")
     return adapter_dir
