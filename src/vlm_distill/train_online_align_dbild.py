@@ -260,12 +260,11 @@ def _validate_answer_logits_alignment(
 
 
 def _answer_logits_request_from_labels(labels, *, label_name: str):
-    """Return exact hidden-state positions that predict supervised answer labels.
+    """Return the suffix request needed to cover the causal answer logits.
 
-    Qwen's ``logits_to_keep`` indexes the sequence hidden states, while a causal
-    LM logit at position ``t`` predicts the label at ``t + 1``.  Online DBiLD
-    deliberately supports batch size one so that one exact index tensor can be
-    passed to both model forwards.
+    Qwen's integer ``logits_to_keep`` form requests the final N logits.  The
+    requested suffix therefore starts at the logit immediately before the
+    first supervised label and may include masked logits after the answer.
     """
     import torch
 
@@ -281,11 +280,7 @@ def _answer_logits_request_from_labels(labels, *, label_name: str):
     supervised_positions = supervised_mask[0].nonzero(as_tuple=False).flatten()
     if supervised_positions.numel() == 0:
         raise ValueError(f"{label_name} contains no supervised answer tokens.")
-    if int(supervised_positions[0]) <= 0:
-        raise ValueError(
-            f"{label_name} has a supervised token at sequence position 0; "
-            "causal answer logits require a preceding hidden state."
-        )
+
     expected = torch.arange(
         int(supervised_positions[0]),
         int(supervised_positions[-1]) + 1,
@@ -297,10 +292,33 @@ def _answer_logits_request_from_labels(labels, *, label_name: str):
             f"positions={supervised_positions.detach().cpu().tolist()}"
         )
 
-    answer_labels = labels[:, supervised_positions]
-    # These are the hidden-state positions whose logits predict answer_labels.
-    answer_token_indices = (supervised_positions - 1).to(dtype=torch.long)
-    return answer_token_indices, answer_labels
+    first_supervised = int(supervised_positions[0].item())
+    last_supervised = int(supervised_positions[-1].item())
+    if first_supervised <= 0:
+        raise ValueError(
+            f"{label_name} first supervised answer position must be > 0 for causal alignment; "
+            f"first_supervised={first_supervised}"
+        )
+
+    answer_length = int(supervised_positions.numel())
+    sequence_length = int(labels.shape[1])
+    first_required_logit_position = first_supervised - 1
+    logits_to_keep_count = int(sequence_length - first_required_logit_position)
+    trailing_logit_count = int(logits_to_keep_count - answer_length)
+    if first_required_logit_position < 0 or logits_to_keep_count <= 0:
+        raise ValueError(
+            f"{label_name} causal shifted logit range is invalid; "
+            f"first_required_logit_position={first_required_logit_position}, "
+            f"sequence_length={sequence_length}"
+        )
+    if logits_to_keep_count < answer_length or trailing_logit_count < 0:
+        raise ValueError(
+            f"{label_name} causal shifted logit range does not cover the supervised span; "
+            f"logits_to_keep_count={logits_to_keep_count}, answer_length={answer_length}"
+        )
+
+    answer_labels = labels[:, first_supervised:last_supervised + 1]
+    return logits_to_keep_count, answer_length, answer_labels, trailing_logit_count
 
 
 def _answer_only_lm_loss(answer_logits, answer_labels):
@@ -1906,28 +1924,32 @@ def run_training(
             }
             student_batch = batch_to_device(student_batch, student_input_device)
             labels = student_batch["labels"]
-            teacher_answer_token_indices, teacher_answer_labels = _answer_logits_request_from_labels(
+            (
+                teacher_logits_to_keep_count,
+                teacher_answer_length,
+                teacher_answer_labels,
+                teacher_trailing_logit_count,
+            ) = _answer_logits_request_from_labels(
                 teacher_labels, label_name="teacher_labels"
             )
-            student_answer_token_indices, student_answer_labels = _answer_logits_request_from_labels(
+            (
+                student_logits_to_keep_count,
+                student_answer_length,
+                student_answer_labels,
+                student_trailing_logit_count,
+            ) = _answer_logits_request_from_labels(
                 labels, label_name="student_labels"
             )
-            teacher_answer_token_indices = teacher_answer_token_indices.to(
-                device="cpu",
-                dtype=torch.long,
-            )
-            student_answer_token_indices = student_answer_token_indices.to(
-                device="cpu",
-                dtype=torch.long,
-            )
-            assert teacher_answer_token_indices.device.type == "cpu"
-            assert student_answer_token_indices.device.type == "cpu"
-            assert teacher_answer_token_indices.dtype == torch.long
-            assert student_answer_token_indices.dtype == torch.long
-            if teacher_answer_labels.shape[1] != student_answer_labels.shape[1]:
+            assert isinstance(teacher_logits_to_keep_count, int)
+            assert isinstance(student_logits_to_keep_count, int)
+            if teacher_logits_to_keep_count < teacher_answer_length:
+                raise ValueError("Teacher requested suffix is shorter than its answer span.")
+            if student_logits_to_keep_count < student_answer_length:
+                raise ValueError("Student requested suffix is shorter than its answer span.")
+            if teacher_answer_length != student_answer_length:
                 raise ValueError(
                     "Teacher/student answer length mismatch before forward: "
-                    f"teacher={teacher_answer_labels.shape[1]} student={student_answer_labels.shape[1]}"
+                    f"teacher={teacher_answer_length} student={student_answer_length}"
                 )
             if validate_every_batch or not token_alignment_batch_validated:
                 validation_batch = dict(student_batch)
@@ -1959,9 +1981,12 @@ def run_training(
                 with _autocast_context(config.training.mixed_precision):
                     teacher_outputs = teacher_model(
                         **teacher_forward_inputs,
-                        logits_to_keep=teacher_answer_token_indices,
+                        logits_to_keep=teacher_logits_to_keep_count,
                     )
-                    teacher_logits = teacher_outputs.logits
+                    teacher_suffix_logits = teacher_outputs.logits
+                    assert teacher_suffix_logits.shape[1] == teacher_logits_to_keep_count
+                    teacher_logits = teacher_suffix_logits[:, :teacher_answer_length, :]
+                    assert teacher_logits.shape[1] == teacher_answer_labels.shape[1]
                     del teacher_outputs
             _synchronize_for_timing(teacher_input_device)
             teacher_forward_seconds = time.perf_counter() - teacher_forward_started
@@ -1973,9 +1998,12 @@ def run_training(
             with _autocast_context(config.training.mixed_precision):
                 student_outputs = student_model(
                     **student_forward_inputs,
-                    logits_to_keep=student_answer_token_indices,
+                    logits_to_keep=student_logits_to_keep_count,
                 )
-                student_logits = student_outputs.logits
+                student_suffix_logits = student_outputs.logits
+                assert student_suffix_logits.shape[1] == student_logits_to_keep_count
+                student_logits = student_suffix_logits[:, :student_answer_length, :]
+                assert student_logits.shape[1] == student_answer_labels.shape[1]
                 lm_loss = _answer_only_lm_loss(student_logits, student_answer_labels)
                 del student_outputs
             _synchronize_for_timing(student_input_device)
@@ -2048,11 +2076,34 @@ def run_training(
             if not first_batch_debug_printed:
                 print("teacher_forward_logits_scope=answer_only")
                 print("student_forward_logits_scope=answer_only")
-                print(f"requested_logit_position_count={int(student_answer_token_indices.numel())}")
+                print("teacher_logits_to_keep_mode=suffix_covering_answer")
+                print("student_logits_to_keep_mode=suffix_covering_answer")
+                print(
+                    "teacher_first_supervised_label_position="
+                    f"{int(teacher_labels.shape[1]) - teacher_logits_to_keep_count + 1}"
+                )
+                print(
+                    "teacher_first_required_logit_position="
+                    f"{int(teacher_labels.shape[1]) - teacher_logits_to_keep_count}"
+                )
+                print(f"teacher_requested_suffix_logit_count={teacher_logits_to_keep_count}")
+                print(f"teacher_answer_logit_count={teacher_answer_length}")
+                print(f"teacher_trailing_discarded_logit_count={teacher_trailing_logit_count}")
+                print(
+                    "student_first_supervised_label_position="
+                    f"{int(labels.shape[1]) - student_logits_to_keep_count + 1}"
+                )
+                print(
+                    "student_first_required_logit_position="
+                    f"{int(labels.shape[1]) - student_logits_to_keep_count}"
+                )
+                print(f"student_requested_suffix_logit_count={student_logits_to_keep_count}")
+                print(f"student_answer_logit_count={student_answer_length}")
+                print(f"student_trailing_discarded_logit_count={student_trailing_logit_count}")
                 print(f"full_sequence_length={int(labels.shape[1])}")
                 print(
                     "avoided_full_logit_positions="
-                    f"{int(labels.shape[1]) - int(student_answer_token_indices.numel())}"
+                    f"{int(labels.shape[1]) - student_logits_to_keep_count}"
                 )
             last_step_log_values = {
                 "lm_loss": float(lm_loss.detach().float().item()),

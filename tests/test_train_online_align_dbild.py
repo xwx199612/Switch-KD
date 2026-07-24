@@ -147,20 +147,22 @@ def test_validate_rows_accepts_parsing_rows_without_teacher_fields(tmp_path: Pat
 
 
 def test_answer_only_forward_positions_and_lm_loss_match_full_logits_slice():
-    labels = torch.tensor([[-100, -100, 2, 3, 4, -100]], dtype=torch.long)
-    positions, answer_labels = _answer_logits_request_from_labels(labels, label_name="labels")
+    labels = torch.tensor([[-100, -100, -100, 2, 3, 4, -100, -100]], dtype=torch.long)
+    logits_to_keep, answer_length, answer_labels, trailing = _answer_logits_request_from_labels(
+        labels, label_name="labels"
+    )
 
-    assert positions.tolist() == [1, 2, 3]
+    assert (logits_to_keep, answer_length, trailing) == (6, 3, 3)
     assert answer_labels.tolist() == [[2, 3, 4]]
 
     torch.manual_seed(7)
-    hidden = torch.randn(1, 6, 5, requires_grad=True)
+    hidden = torch.randn(1, 8, 5, requires_grad=True)
     lm_head = torch.nn.Linear(5, 11, bias=False)
     full_logits = lm_head(hidden)
-    answer_logits = full_logits[:, positions, :]
+    answer_logits = full_logits[:, 2:5, :]
 
     expected = torch.nn.functional.cross_entropy(
-        full_logits[:, 1:4, :].reshape(-1, 11),
+        full_logits[:, 2:5, :].reshape(-1, 11),
         answer_labels.reshape(-1),
     )
     actual = _answer_only_lm_loss(answer_logits, answer_labels)
@@ -171,62 +173,98 @@ def test_answer_only_forward_positions_and_lm_loss_match_full_logits_slice():
     assert lm_head.weight.grad is not None and torch.count_nonzero(lm_head.weight.grad).item() > 0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for device placement coverage")
-def test_cuda_labels_are_converted_to_cpu_long_logits_indices():
-    labels = torch.tensor([[-100, -100, 2, 3, 4, -100]], dtype=torch.long, device="cuda")
-    positions, _ = _answer_logits_request_from_labels(labels, label_name="labels")
-
-    assert positions.device.type == "cuda"
-    positions = positions.to(device="cpu", dtype=torch.long)
-
-    assert positions.device.type == "cpu"
-    assert positions.dtype == torch.long
+@pytest.mark.parametrize("trailing", [0, 1, 2])
+def test_answer_span_allows_masked_tokens_after_answer(trailing):
+    labels = torch.tensor([[-100, -100, 2, 3, 4] + [-100] * trailing])
+    result = _answer_logits_request_from_labels(labels, label_name="labels")
+    assert result[0] == 4 + trailing
+    assert result[1] == 3
+    assert result[2].tolist() == [[2, 3, 4]]
+    assert result[3] == trailing + 1
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for device placement coverage")
-def test_cpu_long_logits_indices_can_index_cuda_hidden_states():
-    hidden_states = torch.randn(1, 6, 4, device="cuda")
-    indices = torch.tensor([1, 2, 3], device="cpu", dtype=torch.long)
+def test_answer_span_must_be_contiguous():
+    with pytest.raises(ValueError, match="must be contiguous"):
+        _answer_logits_request_from_labels(
+            torch.tensor([[-100, -100, 2, -100, 4, 5]]), label_name="labels"
+        )
 
-    selected = hidden_states[:, indices, :]
 
-    assert selected.shape == (1, 3, 4)
-    assert torch.equal(selected, hidden_states[:, [1, 2, 3], :])
+def test_answer_span_requires_batch_size_one():
+    with pytest.raises(ValueError, match="batch_size == 1"):
+        _answer_logits_request_from_labels(
+            torch.tensor([[-100, 2, 3], [-100, 4, 5]]), label_name="labels"
+        )
+
+
+def test_answer_span_requires_supervision():
+    with pytest.raises(ValueError, match="no supervised"):
+        _answer_logits_request_from_labels(
+            torch.tensor([[-100, -100, -100]]), label_name="labels"
+        )
+
+
+def test_answer_span_rejects_first_supervised_position_zero():
+    with pytest.raises(ValueError, match="position must be > 0"):
+        _answer_logits_request_from_labels(torch.tensor([[2, 3, -100]]), label_name="labels")
 
 
 def test_answer_only_logits_equal_full_logits_slice():
     torch.manual_seed(19)
     hidden_states = torch.randn(1, 6, 4)
     lm_head = torch.nn.Linear(4, 13, bias=True)
-    indices = torch.tensor([1, 2, 3], device="cpu", dtype=torch.long)
+    answer_count = 3
 
     full_logits = lm_head(hidden_states)
-    answer_only_logits = lm_head(hidden_states[:, indices, :])
+    answer_only_logits = lm_head(hidden_states[:, -answer_count:, :])
 
-    assert torch.equal(answer_only_logits, full_logits[:, indices, :])
+    assert torch.equal(answer_only_logits, full_logits[:, -answer_count:, :])
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for device placement coverage")
-def test_cpu_logits_indices_work_when_input_and_lm_head_devices_differ():
-    class SplitDeviceCausalModel(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.embedding = torch.nn.Embedding(16, 4, device="cuda")
-            self.lm_head = torch.nn.Linear(4, 16, bias=False, device="cpu")
+def test_answer_only_logits_equal_causal_shifted_full_logits_slice():
+    torch.manual_seed(23)
+    hidden_states = torch.randn(1, 8, 4)
+    lm_head = torch.nn.Linear(4, 13, bias=True)
+    labels = torch.tensor([[-100, -100, 2, 3, 4, -100, -100, -100]])
+    logits_to_keep, answer_length, answer_labels, trailing = _answer_logits_request_from_labels(
+        labels, label_name="labels"
+    )
+    full_outputs = type("Output", (), {"logits": lm_head(hidden_states)})()
+    suffix_outputs = type(
+        "Output", (), {"logits": full_outputs.logits[:, -logits_to_keep:, :]}
+    )()
 
+    expected = full_outputs.logits[:, 1:4, :]
+    actual = suffix_outputs.logits[:, :answer_length, :]
+    assert trailing == 4
+    assert answer_labels.tolist() == [[2, 3, 4]]
+    assert torch.equal(actual, expected)
+
+
+def test_python_int_logits_to_keep_survives_accelerate_style_hook():
+    class RecordingHook:
+        def pre_forward(self, module, *args, **kwargs):
+            del module
+            assert isinstance(kwargs["logits_to_keep"], int)
+            return args, kwargs
+
+    class TinyCausalModel(torch.nn.Module):
         def forward(self, input_ids, *, logits_to_keep):
-            hidden_states = self.embedding(input_ids)
-            selected = hidden_states[:, logits_to_keep, :]
-            return self.lm_head(selected.to(self.lm_head.weight.device))
+            assert isinstance(logits_to_keep, int)
+            return input_ids[:, -logits_to_keep:]
 
-    model = SplitDeviceCausalModel()
-    input_ids = torch.tensor([[5, 6, 2, 3, 4, 0]], dtype=torch.long, device="cuda")
-    indices = torch.tensor([1, 2, 3], device="cpu", dtype=torch.long)
+    model = TinyCausalModel()
+    hook = RecordingHook()
+    original_forward = model.forward
 
-    logits = model(input_ids, logits_to_keep=indices)
+    def hooked_forward(*args, **kwargs):
+        args, kwargs = hook.pre_forward(model, *args, **kwargs)
+        return original_forward(*args, **kwargs)
 
-    assert logits.shape == (1, 3, 16)
-    assert logits.device.type == "cpu"
+    model.forward = hooked_forward
+    output = model(torch.arange(6).reshape(1, 6), logits_to_keep=3)
+
+    assert output.tolist() == [[3, 4, 5]]
 
 
 def test_answer_only_model_forward_returns_requested_length_and_teacher_has_no_graph():
@@ -238,26 +276,29 @@ def test_answer_only_model_forward_returns_requested_length_and_teacher_has_no_g
             self.requested = None
 
         def forward(self, input_ids, *, logits_to_keep=0):
-            self.requested = logits_to_keep.detach().clone()
+            self.requested = logits_to_keep
             hidden = self.embedding(input_ids)
-            return self.lm_head(hidden[:, logits_to_keep, :])
+            return self.lm_head(hidden[:, -logits_to_keep:, :])
 
-    labels = torch.tensor([[-100, -100, 2, 3, 4, -100]], dtype=torch.long)
-    positions, answer_labels = _answer_logits_request_from_labels(labels, label_name="labels")
+    labels = torch.tensor([[-100, -100, -100, 2, 3, 4]], dtype=torch.long)
+    logits_to_keep, answer_length, answer_labels, _ = _answer_logits_request_from_labels(labels, label_name="labels")
     teacher = TinyCausalModel()
     student = TinyCausalModel()
     input_ids = torch.tensor([[5, 6, 2, 3, 4, 0]], dtype=torch.long)
 
     with torch.no_grad():
-        teacher_logits = teacher(input_ids, logits_to_keep=positions)
-    student_logits = student(input_ids, logits_to_keep=positions)
+        teacher_suffix_logits = teacher(input_ids, logits_to_keep=logits_to_keep)
+        teacher_logits = teacher_suffix_logits[:, :answer_length, :]
+    student_suffix_logits = student(input_ids, logits_to_keep=logits_to_keep)
+    student_logits = student_suffix_logits[:, :answer_length, :]
     loss = _answer_only_lm_loss(student_logits, answer_labels)
     loss.backward()
 
+    assert teacher_suffix_logits.shape == (1, 4, 16)
     assert teacher_logits.shape == (1, 3, 16)
     assert student_logits.shape == (1, 3, 16)
-    assert teacher.requested.tolist() == positions.tolist()
-    assert student.requested.tolist() == positions.tolist()
+    assert teacher.requested == logits_to_keep
+    assert student.requested == logits_to_keep
     assert not teacher_logits.requires_grad
     assert all(parameter.grad is None for parameter in teacher.parameters())
     assert any(parameter.grad is not None for parameter in student.parameters())
