@@ -104,6 +104,8 @@ class TrainingConfig:
     validation_split_mode: str = "copy"
     validation_image_dir: Path | None = None
     validation_label_path: Path | None = None
+    validation_leakage_check_enabled: bool = True
+    validation_leakage_check_hash_images: bool = False
     # Deprecated spelling retained as an alias only; it is never interpreted
     # as a raw manifest by the pipeline.
     validation_manifest_path: Path | None = None
@@ -697,6 +699,14 @@ def format_prompt(
 
 def resolve_label_path(data: DataConfig) -> Path:
     return data.label_path or data.distill_path
+
+
+def resolve_labeled_split_metadata_path(config: PipelineConfig) -> Path:
+    """Return the single canonical metadata path for a labeled train/val split."""
+    validation_path = config.training.validation_label_path
+    if validation_path is None:
+        raise ValueError("A validation label path is required to resolve split metadata.")
+    return validation_path.parent / "labeled_split_metadata.json"
 
 
 def resolve_full_label_path(data: DataConfig) -> Path:

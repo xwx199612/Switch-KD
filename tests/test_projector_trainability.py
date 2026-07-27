@@ -43,6 +43,11 @@ def test_a1_smoke_resolved_config_diff_is_only_explicitly_allowed_fields():
         "training.max_steps",
         "training.log_every",
         "training.save_every",
+        "training.validation_enabled",
+        "training.validation_ratio",
+        "training.validation_split_seed",
+        "training.validation_image_dir",
+        "training.validation_label_path",
     }
 
 

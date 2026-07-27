@@ -14,6 +14,7 @@ from vlm_distill.train_online_align_dbild import (
     _answer_only_lm_loss,
     align_logits_to_supervised_positions,
     _target_text_for_row,
+    _validate_train_validation_isolation,
     _validate_rows,
 )
 from vlm_distill.vlm_batching import EncodedVlmSample
@@ -144,6 +145,58 @@ def test_validate_rows_accepts_parsing_rows_without_teacher_fields(tmp_path: Pat
     rows = _validate_rows(config)
 
     assert len(rows) == 1
+
+
+def _isolation_row(row_id: str, image: Path, source: Path | None = None) -> dict:
+    row = {"id": row_id, "image": str(image)}
+    if source is not None:
+        row["source_image"] = str(source)
+    return row
+
+
+def test_train_validation_isolation_checks_ids_current_paths_and_sources(tmp_path: Path):
+    train_image = tmp_path / "train.png"
+    val_image = tmp_path / "val.png"
+    train_image.write_bytes(b"train")
+    val_image.write_bytes(b"val")
+    counts = _validate_train_validation_isolation(
+        [_isolation_row("train", train_image, tmp_path / "original-train.png")],
+        [_isolation_row("val", val_image, tmp_path / "original-val.png")],
+    )
+    assert counts["id_overlap"] == counts["current_image_overlap"] == counts["source_image_overlap"] == 0
+
+    with pytest.raises(ValueError, match="Dataset leakage detected before training"):
+        _validate_train_validation_isolation(
+            [_isolation_row("same", train_image, tmp_path / "original.png")],
+            [_isolation_row("same", val_image, tmp_path / "original.png")],
+            training_label_path=tmp_path / "train.jsonl",
+            validation_label_path=tmp_path / "val.jsonl",
+        )
+
+
+def test_train_validation_isolation_rejects_duplicates_and_malformed_rows(tmp_path: Path):
+    image = tmp_path / "same.png"
+    image.write_bytes(b"same")
+    with pytest.raises(ValueError, match="Dataset leakage detected before training"):
+        _validate_train_validation_isolation(
+            [_isolation_row("a", image), _isolation_row("a", tmp_path / "other.png")], []
+        )
+    with pytest.raises(ValueError, match="missing non-empty id"):
+        _validate_train_validation_isolation([{"image": str(image)}], [])
+
+
+def test_train_validation_isolation_hashes_in_chunks_only_when_enabled(tmp_path: Path):
+    train_image = tmp_path / "renamed-a.png"
+    val_image = tmp_path / "renamed-b.png"
+    train_image.write_bytes(b"identical")
+    val_image.write_bytes(b"identical")
+    with pytest.raises(ValueError, match="content_hash_overlap=1"):
+        _validate_train_validation_isolation(
+            [_isolation_row("a", train_image)], [_isolation_row("b", val_image)], hash_images=True
+        )
+    assert _validate_train_validation_isolation(
+        [_isolation_row("a", train_image)], [_isolation_row("b", val_image)], hash_images=False
+    )["content_hash_overlap"] == 0
 
 
 def test_answer_only_forward_positions_and_lm_loss_match_full_logits_slice():

@@ -64,6 +64,8 @@ def test_labeled_split_is_deterministic_and_preserves_all_fields(tmp_path: Path)
     assert first[0]["teacher_logits"] == [[0.1]]
     assert Path(first[0]["image"]).is_file()
     assert all(Path(row["image"]).is_file() for row in first)
+    assert all(row["source_image"] == Path(row["source_image"]).resolve().as_posix() for row in _rows(train) + first)
+    assert all(Path(row["source_image"]).is_file() for row in _rows(train) + first)
 
 
 def test_split_order_independent_and_move_rolls_back_on_missing_source(tmp_path: Path):
@@ -76,6 +78,7 @@ def test_split_order_independent_and_move_rolls_back_on_missing_source(tmp_path:
     split_labeled_dataset(**kwargs)
     assert len(_rows(kwargs["training_label_path"])) + len(_rows(kwargs["validation_label_path"])) == 3
     assert not (source / "a.png").exists() or (tmp_path / "validation" / "a.png").exists()
+    assert all("source_image" in row for row in _rows(kwargs["training_label_path"]) + _rows(kwargs["validation_label_path"]))
 
     broken = tmp_path / "broken.jsonl"
     _labeled(broken, source, ["a.png"])

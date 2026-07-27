@@ -57,6 +57,10 @@ def _ids_hash(rows: list[dict[str, Any]]) -> str:
     return hashlib.sha256("\n".join(str(row["id"]) for row in rows).encode()).hexdigest()
 
 
+def _normalized_path(value: str | Path) -> str:
+    return os.path.normcase(Path(str(value)).resolve(strict=False).as_posix())
+
+
 def split_labeled_dataset(
     *, full_label_path: Path, training_label_path: Path, validation_label_path: Path,
     source_image_dir: Path, validation_image_dir: Path, ratio: float, seed: int,
@@ -97,6 +101,13 @@ def split_labeled_dataset(
     validation_rows = ordered[:validation_count]
     training_rows = ordered[validation_count:]
 
+    # Store the source identity in both outputs before changing any validation
+    # image paths. Existing identities are retained, but canonicalized.
+    training_rows = [dict(row) for row in training_rows]
+    for row in training_rows:
+        row["image"] = _normalized_path(row["image"])
+        row["source_image"] = _normalized_path(row.get("source_image") or row["image"])
+
     operations: list[tuple[Path, Path, dict[str, Any]]] = []
     for row in validation_rows:
         source = Path(str(row["image"]))
@@ -106,7 +117,8 @@ def split_labeled_dataset(
             relative = Path(source.name)
         destination = validation_image_dir / relative
         updated = dict(row)  # retain every teacher and metadata field
-        updated["image"] = destination.as_posix()
+        updated["image"] = _normalized_path(destination)
+        updated["source_image"] = _normalized_path(row.get("source_image") or source)
         operations.append((source, destination, updated))
 
     missing = [source for source, _, _ in operations if not source.is_file()]
