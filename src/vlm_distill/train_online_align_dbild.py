@@ -2043,9 +2043,22 @@ def run_training(
     best_checkpoint_dir = config.student.output_dir / "best_checkpoint"
     scheduler = None
     if validation_enabled:
-        validation_rows = _validate_rows(
-            config, path=config.training.validation_manifest_path,
-        )
+        validation_path = getattr(config.training, "validation_label_path", None)
+        if validation_path is None or not validation_path.is_file():
+            raise FileNotFoundError(
+                "Validation labeled dataset does not exist:\n"
+                f"{validation_path}\n\n"
+                "Run teacher precompute first:\n"
+                "python -m vlm_distill.cli label --config <config>"
+            )
+        validation_rows = _validate_rows(config, path=validation_path)
+        train_ids = {str(row["id"]) for row in rows}
+        validation_ids = {str(row["id"]) for row in validation_rows}
+        if train_ids & validation_ids:
+            raise ValueError("Training and validation labeled dataset IDs overlap")
+        for row in validation_rows:
+            if not Path(str(row["image"])).is_file():
+                raise FileNotFoundError(f"Validation image does not exist: {row['image']}")
         # A constant scheduler preserves the historical learning-rate behavior while
         # making the best checkpoint restartable and explicit about scheduler state.
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _step: 1.0)

@@ -10,6 +10,7 @@ from .config_schema import (
     load_config,
     resolve_inference_manifest_path,
     resolve_label_path,
+    resolve_full_label_path,
     resolve_prediction_path,
     resolve_switch_logits_path,
     resolve_training_manifest_path,
@@ -17,6 +18,7 @@ from .config_schema import (
 from .data_manifest import validate_manifest
 from .hf_runtime import configure_hf_offline_mode
 from .manifest_builder import create_manifest_from_config, infer_manifest_task_from_config_path
+from .labeled_split import split_labeled_dataset
 from .model_output_artifacts import refresh_parsing_sidecar_reports
 from .stage_evaluation import evaluate
 from .stage_merge_adapter import merge_student_adapter
@@ -41,10 +43,7 @@ def main() -> None:
     create_manifest_parser = subparsers.add_parser(
         "create-manifest",
         description=(
-            "Create a manifest. Validation splitting is available only for --split training; "
-            "when training.validation_enabled is false the original single-manifest behavior is preserved. "
-            "Validation split settings come from training config. Use --dry-run to inspect "
-            "the deterministic plan. move removes source images; copy retains them."
+            "Create the complete raw manifest. Labeled validation splitting happens after teacher precompute."
         ),
     )
     create_manifest_parser.add_argument("--config", type=Path, required=True)
@@ -103,6 +102,9 @@ def main() -> None:
                 default=None,
                 help="Override config.training.max_steps.",
             )
+        if command in {"label", "teacher-precompute"}:
+            command_parser.add_argument("--dry-run", action="store_true")
+            command_parser.add_argument("--overwrite", action="store_true")
         if command == "validate-manifest":
             command_parser.add_argument(
                 "--split",
@@ -111,6 +113,7 @@ def main() -> None:
             )
     validate_teacher_parser = subparsers.add_parser("validate-teacher")
     validate_teacher_parser.add_argument("--config", type=Path, required=True)
+    validate_teacher_parser.add_argument("--split", choices=("full", "training", "validation"), default="training")
     teacher_stats_parser = subparsers.add_parser("teacher-label-stats")
     teacher_stats_parser.add_argument("--config", type=Path, required=True)
 
@@ -168,17 +171,7 @@ def main() -> None:
     if args.command == "create-manifest":
         config = load_config(args.config)
         print("create-manifest config:")
-        for key, value in {
-            "validation_enabled": config.training.validation_enabled,
-            "validation_ratio": config.training.validation_ratio,
-            "validation_split_seed": (
-                config.seed if config.training.validation_split_seed is None
-                else config.training.validation_split_seed
-            ),
-            "validation_split_mode": config.training.validation_split_mode,
-            "validation_image_dir": config.training.validation_image_dir,
-            "validation_manifest_path": config.training.validation_manifest_path,
-        }.items():
+        for key, value in {"training_manifest": resolve_training_manifest_path(config.data), "validation_enabled": config.training.validation_enabled, "full_label_path": resolve_full_label_path(config.data), "training_label_path": resolve_label_path(config.data), "validation_label_path": config.training.validation_label_path}.items():
             print(f"{key}={value}")
         task = _resolve_create_manifest_task(
             config_path=args.config,
@@ -237,9 +230,7 @@ def main() -> None:
         if args.split == "inference":
             manifest_path = resolve_inference_manifest_path(config.data)
         elif args.split == "validation":
-            if config.training.validation_manifest_path is None:
-                raise ValueError("training.validation_manifest_path is required for --split validation")
-            manifest_path = config.training.validation_manifest_path
+            raise ValueError("Validation is a labeled dataset; use validate-teacher --split validation")
         else:
             manifest_path = resolve_training_manifest_path(config.data)
         image_root = config.data.image_root
@@ -256,8 +247,16 @@ def main() -> None:
 
     if args.command == "validate-teacher":
         decoder = teacher_validation.build_teacher_token_decoder(config)
+        if args.split == "full":
+            teacher_path = resolve_full_label_path(config.data)
+        elif args.split == "validation":
+            teacher_path = config.training.validation_label_path
+            if teacher_path is None:
+                raise ValueError("training.validation_label_path is required for --split validation")
+        else:
+            teacher_path = resolve_label_path(config.data)
         summary = teacher_validation.validate_teacher_output_file(
-            resolve_label_path(config.data),
+            teacher_path,
             max_samples=config.data.max_samples,
             decode_tokens=decoder,
         )
@@ -284,8 +283,27 @@ def main() -> None:
             image_root=config.data.image_root,
             max_samples=config.data.max_samples,
         )
+        if args.dry_run:
+            output_path = resolve_full_label_path(config.data) if config.training.validation_enabled else resolve_label_path(config.data)
+            print(f"label dry-run: samples={len(samples)} output={output_path}")
+            if config.training.validation_enabled:
+                print(f"expected_validation_count={max(1, round(len(samples) * config.training.validation_ratio))}")
+            return
         output_path = create_teacher_precompute_dataset(config, samples)
-        print(f"OK teacher precompute dataset written: {output_path}")
+        if config.training.validation_enabled:
+            split = split_labeled_dataset(
+                full_label_path=resolve_full_label_path(config.data),
+                training_label_path=resolve_label_path(config.data),
+                validation_label_path=config.training.validation_label_path,
+                source_image_dir=config.data.training_image_dir or config.data.image_dir or Path("data/images"),
+                validation_image_dir=config.training.validation_image_dir,
+                ratio=config.training.validation_ratio,
+                seed=config.seed if config.training.validation_split_seed is None else config.training.validation_split_seed,
+                mode=config.training.validation_split_mode, overwrite=args.overwrite,
+            )
+            print(f"OK labeled split: training={split['training_count']} validation={split['validation_count']}")
+        else:
+            print(f"OK teacher precompute dataset written: {output_path}")
         return
 
     if args.command == "teacher-precompute":

@@ -15,6 +15,7 @@ class DataConfig:
     distill_path: Path
     inference_manifest_path: Path | None = None
     label_path: Path | None = None
+    full_label_path: Path | None = None
     prediction_path: Path | None = None
     teacher_logits_path: Path | None = None
     switch_logits_path: Path | None = None
@@ -26,8 +27,6 @@ class DataConfig:
     image_dir: Path | None = None
     output_dir: Path | None = None
     max_samples: int | None = None
-    validation_manifest_path: Path | None = None
-    validation_image_dir: Path | None = None
 
 
 @dataclass
@@ -102,8 +101,11 @@ class TrainingConfig:
     validation_enabled: bool = False
     validation_ratio: float | None = None
     validation_split_seed: int | None = None
-    validation_split_mode: str = "move"
+    validation_split_mode: str = "copy"
     validation_image_dir: Path | None = None
+    validation_label_path: Path | None = None
+    # Deprecated spelling retained as an alias only; it is never interpreted
+    # as a raw manifest by the pipeline.
     validation_manifest_path: Path | None = None
     validation_every_epochs: int = 1
     early_stopping_enabled: bool = False
@@ -244,9 +246,9 @@ def _validate_training_validation_config(config: PipelineConfig) -> None:
             raise ValueError(
                 "training.validation_enabled=true requires training.validation_image_dir"
             )
-        if training.validation_manifest_path is None:
+        if training.validation_label_path is None and training.validation_manifest_path is None:
             raise ValueError(
-                "training.validation_enabled=true requires training.validation_manifest_path"
+                "training.validation_enabled=true requires training.validation_label_path (formerly training.validation_manifest_path)"
             )
 
 
@@ -255,27 +257,22 @@ def _migrate_legacy_validation_config(raw: dict[str, Any]) -> dict[str, Any]:
     migrated = dict(raw)
     data = dict(migrated.get("data", {}))
     training = dict(migrated.get("training", {}))
-    legacy_pairs = (
-        ("validation_manifest_path", "validation_manifest_path"),
-        ("validation_image_dir", "validation_image_dir"),
-    )
-    for legacy_key, training_key in legacy_pairs:
-        legacy_value = data.get(legacy_key)
-        new_value = training.get(training_key)
-        if legacy_value is not None and new_value is not None:
-            if Path(legacy_value) != Path(new_value):
-                raise ValueError(
-                    f"Conflicting validation paths: data.{legacy_key} and "
-                    f"training.{training_key} must match"
-                )
-        elif legacy_value is not None:
-            training[training_key] = legacy_value
-            warnings.warn(
-                f"data.{legacy_key} is deprecated; use training.{training_key}",
-                UserWarning,
-                stacklevel=3,
-            )
-        data.pop(legacy_key, None)
+    legacy_value = data.pop("validation_manifest_path", None)
+    if legacy_value is not None and training.get("validation_manifest_path") is not None and Path(legacy_value) != Path(training["validation_manifest_path"]):
+        raise ValueError("Conflicting validation paths: data.validation_manifest_path and training.validation_manifest_path must match")
+    if legacy_value is not None and training.get("validation_label_path") is None:
+        training["validation_label_path"] = legacy_value
+        training["validation_manifest_path"] = legacy_value
+        warnings.warn("data.validation_manifest_path is deprecated; use training.validation_label_path", UserWarning, stacklevel=3)
+    legacy_training_value = training.get("validation_manifest_path")
+    if legacy_training_value is not None and training.get("validation_label_path") is None:
+        training["validation_label_path"] = legacy_training_value
+        training["validation_manifest_path"] = legacy_training_value
+        warnings.warn("training.validation_manifest_path is deprecated; use training.validation_label_path", UserWarning, stacklevel=3)
+    legacy_value = data.pop("validation_image_dir", None)
+    if legacy_value is not None and training.get("validation_image_dir") is None:
+        training["validation_image_dir"] = legacy_value
+        warnings.warn("data.validation_image_dir is deprecated; use training.validation_image_dir", UserWarning, stacklevel=3)
     migrated["data"] = data
     migrated["training"] = training
     return migrated
@@ -363,8 +360,7 @@ def _build_data_config(raw: dict[str, Any]) -> DataConfig:
         values["training_image_dir"] = values["image_dir"]
     for key in (
         "training_manifest_path",
-        "validation_manifest_path",
-        "validation_image_dir",
+        "full_label_path",
         "manifest_path",
         "distill_path",
         "inference_manifest_path",
@@ -381,12 +377,19 @@ def _build_data_config(raw: dict[str, Any]) -> DataConfig:
     ):
         if values.get(key) is not None:
             values[key] = remap_output_path(Path(values[key]))
+    if values.get("full_label_path") is None and values.get("label_path") is not None:
+        label = Path(values["label_path"])
+        suffix = "".join(label.suffixes) or ".jsonl"
+        stem = label.name[:-len(suffix)] if suffix else label.name
+        values["full_label_path"] = label.with_name(f"{stem}_full{suffix}")
     return DataConfig(**values)
 
 
 def _build_training_config(raw: dict[str, Any]) -> TrainingConfig:
     values = dict(raw)
-    for key in ("validation_image_dir", "validation_manifest_path"):
+    if values.get("validation_manifest_path") is not None and values.get("validation_label_path") is None:
+        values["validation_label_path"] = values["validation_manifest_path"]
+    for key in ("validation_image_dir", "validation_label_path", "validation_manifest_path"):
         if values.get(key) is not None:
             values[key] = remap_output_path(Path(values[key]))
     return TrainingConfig(**values)
@@ -694,6 +697,15 @@ def format_prompt(
 
 def resolve_label_path(data: DataConfig) -> Path:
     return data.label_path or data.distill_path
+
+
+def resolve_full_label_path(data: DataConfig) -> Path:
+    if data.full_label_path is not None:
+        return data.full_label_path
+    label = resolve_label_path(data)
+    suffix = "".join(label.suffixes) or ".jsonl"
+    stem = label.name[:-len(suffix)] if suffix else label.name
+    return label.with_name(f"{stem}_full{suffix}")
 
 
 def resolve_prediction_path(data: DataConfig) -> Path:

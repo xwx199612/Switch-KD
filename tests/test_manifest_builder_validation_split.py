@@ -2,39 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import subprocess
-import sys
 from types import SimpleNamespace
 
 import pytest
 
-from vlm_distill.data_manifest import validate_manifest
-import vlm_distill.cli as cli
-import vlm_distill.manifest_builder as manifest_builder
+from vlm_distill.labeled_split import split_labeled_dataset
 from vlm_distill.manifest_builder import create_manifest_from_config
-
-
-def _config(tmp_path: Path, seed: int = 42, validation_manifest: Path | None = None, validation_dir: Path | None = None, enabled: bool = False, ratio: float | None = None, mode: str = "move", split_seed: int | None = None):
-    image_dir = tmp_path / "training" / "image"
-    manifest = tmp_path / "out" / "training.jsonl"
-    return SimpleNamespace(
-        seed=seed,
-        data=SimpleNamespace(
-            training_image_dir=image_dir,
-            inference_image_dir=None,
-            image_dir=None,
-            training_manifest_path=manifest,
-            inference_manifest_path=None,
-        ),
-        training=SimpleNamespace(
-            validation_enabled=enabled,
-            validation_ratio=ratio,
-            validation_split_seed=split_seed,
-            validation_split_mode=mode,
-            validation_image_dir=validation_dir,
-            validation_manifest_path=validation_manifest,
-        ),
-    )
 
 
 def _images(root: Path, names: list[str]) -> None:
@@ -48,167 +21,74 @@ def _rows(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-def test_without_ratio_keeps_original_single_manifest_behavior(tmp_path: Path):
+def _config(tmp_path: Path):
+    image_dir = tmp_path / "training"
+    return SimpleNamespace(
+        seed=42,
+        data=SimpleNamespace(training_image_dir=image_dir, image_dir=None, training_manifest_path=tmp_path / "raw.jsonl", inference_image_dir=None, inference_manifest_path=None),
+        training=SimpleNamespace(validation_enabled=True),
+    )
+
+
+def _labeled(path: Path, image_dir: Path, names: list[str]) -> None:
+    rows = []
+    for i, name in enumerate(names):
+        rows.append({"id": f"id-{i}", "image": str(image_dir / name), "task": "parsing", "query": "列出元件", "elements": [{"text": "按鈕", "bbox_norm": [0, 0, 10, 10], "focused": False}], "coordinate_system": "normalized_0_1000", "teacher_answer": "答案", "teacher_tokens": [1, 2], "teacher_logits": [[0.1]], "metadata": {"非ASCII": "保留"}})
+    path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+
+
+def test_create_manifest_only_writes_full_raw_manifest(tmp_path: Path):
     config = _config(tmp_path)
-    _images(config.data.training_image_dir, ["b.png", "a.png"])
-    create_manifest_from_config(config, "parsing", "training")
+    _images(config.data.training_image_dir, ["app/home/a.png", "b.png"])
+    create_manifest_from_config(config, "parsing", "training", recursive=True)
     rows = _rows(config.data.training_manifest_path)
     assert len(rows) == 2
+    assert all(set(row) == {"id", "image", "task", "query"} for row in rows)
     assert not (tmp_path / "validation").exists()
 
 
-def test_deterministic_split_and_relative_structure_copy(tmp_path: Path):
-    validation_dir = tmp_path / "validation" / "image"
-    validation_manifest = tmp_path / "out" / "validation.jsonl"
-    config = _config(tmp_path, validation_manifest=validation_manifest, validation_dir=validation_dir, enabled=True, ratio=.2, split_seed=42, mode="copy")
-    _images(config.data.training_image_dir, ["netflix/home/001.png", "netflix/home/002.png", "other.png", "z.png", "a.png"])
-    create_manifest_from_config(config, "parsing", "training", recursive=True)
-    train, validation = _rows(config.data.training_manifest_path), _rows(validation_manifest)
-    assert len(train) + len(validation) == 5
-    assert not ({row["id"] for row in train} & {row["id"] for row in validation})
-    assert all(Path(row["image"]).is_file() for row in validation)
-    assert all(str(validation_dir) in row["image"] for row in validation)
-    assert any((config.data.training_image_dir / name).is_file() for name in ["netflix/home/001.png", "netflix/home/002.png"])
-    assert (validation_manifest.parent / "manifest_split_metadata.json").is_file()
-    assert len(validate_manifest(config.data.training_manifest_path)) == len(train)
-    assert len(validate_manifest(validation_manifest)) == len(validation)
+def test_labeled_split_is_deterministic_and_preserves_all_fields(tmp_path: Path):
+    source = tmp_path / "training"
+    names = ["app/home/001.png", "app/home/002.png", "x.png", "y.png", "z.png"]
+    _images(source, names)
+    full = tmp_path / "full.jsonl"
+    _labeled(full, source, names)
+    train = tmp_path / "train.jsonl"
+    validation = tmp_path / "validation" / "labels.jsonl"
+    kwargs = dict(full_label_path=full, training_label_path=train, validation_label_path=validation, source_image_dir=source, validation_image_dir=tmp_path / "validation-images", ratio=.2, seed=42, mode="copy")
+    split_labeled_dataset(**kwargs)
+    first = _rows(validation)
+    assert len(_rows(train)) + len(first) == len(_rows(full))
+    assert not ({r["id"] for r in _rows(train)} & {r["id"] for r in first})
+    assert first[0]["metadata"]["非ASCII"] == "保留"
+    assert first[0]["teacher_logits"] == [[0.1]]
+    assert Path(first[0]["image"]).is_file()
+    assert all(Path(row["image"]).is_file() for row in first)
 
 
-def test_dry_run_does_not_modify_files(tmp_path: Path):
-    validation_manifest = tmp_path / "out" / "validation.jsonl"
-    validation_dir = tmp_path / "validation"
-    config = _config(tmp_path, validation_manifest=validation_manifest, validation_dir=validation_dir, enabled=True, ratio=.2)
-    _images(config.data.training_image_dir, ["a.png", "b.png", "c.png"])
-    create_manifest_from_config(config, "parsing", "training", dry_run=True)
-    assert not config.data.training_manifest_path.exists()
-    assert not validation_manifest.exists()
-    assert not validation_dir.exists()
+def test_split_order_independent_and_move_rolls_back_on_missing_source(tmp_path: Path):
+    source = tmp_path / "training"
+    names = ["a.png", "b.png", "c.png"]
+    _images(source, names)
+    full = tmp_path / "full.jsonl"
+    _labeled(full, source, names)
+    kwargs = dict(full_label_path=full, training_label_path=tmp_path / "train.jsonl", validation_label_path=tmp_path / "val.jsonl", source_image_dir=source, validation_image_dir=tmp_path / "validation", ratio=.5, seed=42, mode="move")
+    split_labeled_dataset(**kwargs)
+    assert len(_rows(kwargs["training_label_path"])) + len(_rows(kwargs["validation_label_path"])) == 3
+    assert not (source / "a.png").exists() or (tmp_path / "validation" / "a.png").exists()
 
-
-def test_move_removes_source_and_preserves_nested_path(tmp_path: Path):
-    validation_manifest = tmp_path / "out" / "validation.jsonl"
-    validation_dir = tmp_path / "validation"
-    config = _config(tmp_path, validation_manifest=validation_manifest, validation_dir=validation_dir, enabled=True, ratio=.5, mode="move")
-    _images(config.data.training_image_dir, ["nested/a.png", "nested/b.png", "c.png"])
-    create_manifest_from_config(config, "parsing", "training", recursive=True)
-    for row in _rows(validation_manifest):
-        assert Path(row["image"]).is_file()
-        assert "nested" in row["image"] or row["image"].endswith("c.png")
-
-
-def test_invalid_ratio_and_conflicts(tmp_path: Path):
-    validation_manifest = tmp_path / "out" / "validation.jsonl"
-    validation_dir = tmp_path / "validation"
-    config = _config(tmp_path, validation_manifest=validation_manifest, validation_dir=validation_dir, enabled=True, ratio=1)
-    _images(config.data.training_image_dir, ["a.png", "b.png"])
-    with pytest.raises(ValueError, match="0 < validation_ratio"):
-        create_manifest_from_config(config, "parsing", "training")
-    config.training.validation_ratio = .5
-    create_manifest_from_config(config, "parsing", "training")
-    with pytest.raises(FileExistsError):
-        create_manifest_from_config(config, "parsing", "training")
-
-
-def test_inference_rejects_validation_options(tmp_path: Path):
-    config = _config(tmp_path)
-    _images(config.data.training_image_dir, ["a.png"])
-    config.training.validation_enabled = True
+    broken = tmp_path / "broken.jsonl"
+    _labeled(broken, source, ["a.png"])
     with pytest.raises(FileNotFoundError):
-        create_manifest_from_config(config, "parsing", "inference")
+        split_labeled_dataset(full_label_path=broken, training_label_path=tmp_path / "x.jsonl", validation_label_path=tmp_path / "y.jsonl", source_image_dir=source, validation_image_dir=tmp_path / "v2", ratio=.5, seed=1)
 
 
-def test_move_failure_rolls_back_images_and_manifests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    validation_manifest = tmp_path / "out" / "validation.jsonl"
-    validation_dir = tmp_path / "validation"
-    config = _config(tmp_path, validation_manifest=validation_manifest, validation_dir=validation_dir, enabled=True, ratio=.5, mode="move")
-    _images(config.data.training_image_dir, ["a.png", "b.png", "c.png"])
-    original_move = manifest_builder.shutil.move
-    calls = 0
-
-    def fail_second_move(source, destination):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise OSError("simulated move failure")
-        return original_move(source, destination)
-
-    monkeypatch.setattr(manifest_builder.shutil, "move", fail_second_move)
-    with pytest.raises(RuntimeError, match="rollback completed"):
-        create_manifest_from_config(config, "parsing", "training")
-    assert sorted(path.name for path in config.data.training_image_dir.glob("*.png")) == ["a.png", "b.png", "c.png"]
-    assert not config.data.training_manifest_path.exists()
-    assert not validation_manifest.exists()
-
-
-def test_cli_no_longer_accepts_validation_dataset_options():
-    result = subprocess.run(
-        [sys.executable, "-m", "vlm_distill.cli", "create-manifest", "--help"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    for option in ("--validation-seed", "--validation-mode", "--validation-image-dir", "--validation-manifest-out"):
-        assert option not in result.stdout
-
-
-def _validate_manifest_cli_config(tmp_path: Path, validation_manifest: Path | None = None):
-    return SimpleNamespace(
-        data=SimpleNamespace(
-            image_root=tmp_path / "all-images",
-            max_samples=17,
-        ),
-        training=SimpleNamespace(validation_manifest_path=validation_manifest),
-    )
-
-
-@pytest.mark.parametrize(
-    ("split", "expected_manifest"),
-    [
-        ("training", Path("training.jsonl")),
-        ("validation", Path("validation.jsonl")),
-        ("inference", Path("inference.jsonl")),
-    ],
-)
-def test_validate_manifest_cli_runs_for_each_split_and_uses_image_root(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    split: str,
-    expected_manifest: Path,
-):
-    validation_manifest = expected_manifest if split == "validation" else None
-    config = _validate_manifest_cli_config(tmp_path, validation_manifest)
-    calls = []
-
-    monkeypatch.setattr(cli, "load_config", lambda _: config)
-    monkeypatch.setattr(cli, "resolve_training_manifest_path", lambda _: Path("training.jsonl"))
-    monkeypatch.setattr(cli, "resolve_inference_manifest_path", lambda _: Path("inference.jsonl"))
-
-    def fake_validate_manifest(manifest_path, *, image_root, max_samples):
-        calls.append((manifest_path, image_root, max_samples))
-        return [object()]
-
-    monkeypatch.setattr(cli, "validate_manifest", fake_validate_manifest)
-    monkeypatch.setattr(sys, "argv", ["vlm-distill", "validate-manifest", "--config", "config.yaml", "--split", split])
-
-    cli.main()
-
-    assert calls == [(expected_manifest, tmp_path / "all-images", 17)]
-
-
-def test_validate_manifest_cli_requires_validation_manifest_path(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-):
-    config = _validate_manifest_cli_config(tmp_path)
-    monkeypatch.setattr(cli, "load_config", lambda _: config)
-    monkeypatch.setattr(sys, "argv", [
-        "vlm-distill",
-        "validate-manifest",
-        "--config",
-        "config.yaml",
-        "--split",
-        "validation",
-    ])
-
-    with pytest.raises(ValueError, match="training.validation_manifest_path is required for --split validation"):
-        cli.main()
+def test_dry_run_does_not_write_or_copy(tmp_path: Path):
+    source = tmp_path / "training"
+    _images(source, ["a.png", "b.png"])
+    full = tmp_path / "full.jsonl"
+    _labeled(full, source, ["a.png", "b.png"])
+    result = split_labeled_dataset(full_label_path=full, training_label_path=tmp_path / "train.jsonl", validation_label_path=tmp_path / "val.jsonl", source_image_dir=source, validation_image_dir=tmp_path / "validation", ratio=.5, seed=42, dry_run=True)
+    assert result["validation_count"] == 1
+    assert not (tmp_path / "train.jsonl").exists()
+    assert not (tmp_path / "validation").exists()

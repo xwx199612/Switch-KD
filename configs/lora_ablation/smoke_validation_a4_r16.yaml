@@ -9,10 +9,11 @@ data:
   inference_manifest_path: outputs/lora_ablation/{task_name}_inference_manifest.jsonl
   distill_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/{task_name}_online_dbild_{response_profile}.jsonl
   label_path: outputs/lora_ablation/{task_name}_teacher_labels_{label_profile}.jsonl
+  full_label_path: outputs/lora_ablation/{task_name}_teacher_labels_full.jsonl
   eval_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/{task_name}_online_dbild_{response_profile}.jsonl
   prediction_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/{task_name}_online_dbild_{response_profile}/student_predictions.jsonl
-  training_image_dir: /mnt/nvme0/vlm_distill/TVWorld_eval/graph/image
-  inference_image_dir: /mnt/nvme0/vlm_distill/LG
+  training_image_dir: /mnt/nvme0/vlm_distill/training_data
+  inference_image_dir: /mnt/nvme0/vlm_distill/testing_data
   image_root: .
   max_samples: null
 teacher:
@@ -78,9 +79,9 @@ training:
   validation_enabled: true
   validation_ratio: 0.2
   validation_split_seed: 42
-  validation_split_mode: move
-  validation_image_dir: /mnt/nvme0/vlm_distill/validation_data/image
-  validation_manifest_path: outputs/lora_ablation/validation/parsing_validation_manifest.jsonl
+  validation_split_mode: copy
+  validation_image_dir: /mnt/nvme0/vlm_distill/validation_data
+  validation_label_path: outputs/lora_ablation/validation/parsing_teacher_labels_validation.jsonl
   validation_every_epochs: 1
 
   early_stopping_enabled: false

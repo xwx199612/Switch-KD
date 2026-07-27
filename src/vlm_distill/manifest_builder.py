@@ -284,20 +284,14 @@ def create_manifest_from_config(
     output_path = resolve_training_manifest_path(config.data)
     images = _image_paths(image_dir, recursive)
     rows = [_parsing_row(index, path) for index, path in enumerate(images, start=1)]
-    if not config.training.validation_enabled:
-        return _write_standard_manifest(rows, output_path, split, image_dir)
-    validation_dir = config.training.validation_image_dir
-    validation_manifest = config.training.validation_manifest_path
-    if config.training.validation_ratio is None:
-        raise ValueError("training.validation_enabled=true requires training.validation_ratio")
-    assert validation_dir is not None
-    assert validation_manifest is not None
-    return _validation_split(
-        rows, image_dir, output_path, validation_manifest, validation_dir,
-        config.training.validation_ratio,  # validated during config loading
-        config.seed if config.training.validation_split_seed is None else config.training.validation_split_seed,
-        config.training.validation_split_mode, dry_run, overwrite, task,
-    )
+    print("create-manifest: validation splitting is deferred until label completes")
+    print(f"full_raw_manifest={output_path}")
+    print(f"samples={len(rows)} dry_run={dry_run}")
+    if dry_run:
+        return output_path
+    if output_path.exists() and not overwrite:
+        raise FileExistsError(f"manifest already exists: {output_path}; use --overwrite")
+    return _write_standard_manifest(rows, output_path, split, image_dir)
 
 
 def _write_standard_manifest(rows: list[dict[str, Any]], output_path: Path, split: str, image_dir: Path) -> Path:

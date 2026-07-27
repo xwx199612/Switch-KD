@@ -16,6 +16,7 @@ from urllib.parse import urljoin
 
 from .config_schema import (
     PipelineConfig,
+    resolve_full_label_path,
     resolve_label_path,
     resolve_training_manifest_path,
 )
@@ -800,11 +801,9 @@ def create_teacher_precompute_dataset(config: PipelineConfig, samples: list[VlmS
         image_root=config.data.image_root,
         max_samples=config.data.max_samples,
     )
-    output_path = resolve_label_path(config.data)
+    output_path = resolve_full_label_path(config.data) if getattr(config.training, "validation_enabled", False) else resolve_label_path(config.data)
     _warn_offline_teacher_logits_disabled(config)
     completed = _load_completed_teacher_rows(output_path, config=config)
-    if completed.invalid_count:
-        _rewrite_valid_teacher_rows(output_path, config=config)
 
     pending_samples = [
         sample
@@ -833,36 +832,45 @@ def create_teacher_precompute_dataset(config: PipelineConfig, samples: list[VlmS
     teacher = build_teacher(config)
 
     completed_now = 0
-    with output_path.open("a", encoding="utf-8") as label_handle:
-        for sample in pending_samples:
-            started = time.perf_counter()
-            generated = _generate_label_row(teacher, sample)
-            row = _build_teacher_output_row(sample, generated)
-            if row is not None:
-                label_handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-                label_handle.flush()
-            if sample.task == "parsing":
-                write_parsing_sidecar(
-                    row=_base_output_row(sample),
-                    output_root=output_path.parent,
-                    role="teacher",
-                    raw_model_output=str(generated["raw_model_output"]),
-                )
-                if row is None:
-                    print(
-                        f"Warning: unusable teacher parsing output for id={sample.id}: "
-                        f"{generated['parse_error']}"
+    temporary_output = output_path.with_name(f".{output_path.name}.precompute.tmp")
+    if output_path.exists():
+        import shutil
+        shutil.copy2(output_path, temporary_output)
+    try:
+        with temporary_output.open("a", encoding="utf-8") as label_handle:
+            for sample in pending_samples:
+                started = time.perf_counter()
+                generated = _generate_label_row(teacher, sample)
+                row = _build_teacher_output_row(sample, generated)
+                if row is not None:
+                    label_handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    label_handle.flush()
+                if sample.task == "parsing":
+                    write_parsing_sidecar(
+                        row=_base_output_row(sample),
+                        output_root=output_path.parent,
+                        role="teacher",
+                        raw_model_output=str(generated["raw_model_output"]),
                     )
+                    if row is None:
+                        print(
+                            f"Warning: unusable teacher parsing output for id={sample.id}: "
+                            f"{generated['parse_error']}"
+                        )
 
-            completed_now += 1
-            elapsed = time.perf_counter() - started
-            label_written = row is not None
-            print(
-                "[teacher-precompute] "
-                f"total={len(samples)} completed={len(samples) - (len(pending_samples) - completed_now)} "
-                f"pending={len(pending_samples) - completed_now} id={sample.id} "
-                f"label_written={label_written} elapsed_seconds_per_sample={elapsed:.2f}"
-            )
+                completed_now += 1
+                elapsed = time.perf_counter() - started
+                label_written = row is not None
+                print(
+                    "[teacher-precompute] "
+                    f"total={len(samples)} completed={len(samples) - (len(pending_samples) - completed_now)} "
+                    f"pending={len(pending_samples) - completed_now} id={sample.id} "
+                    f"label_written={label_written} elapsed_seconds_per_sample={elapsed:.2f}"
+                )
+        os.replace(temporary_output, output_path)
+    except Exception:
+        temporary_output.unlink(missing_ok=True)
+        raise
     refresh_parsing_sidecar_reports(output_root=output_path.parent, role="teacher")
     return output_path
 
