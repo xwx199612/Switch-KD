@@ -795,7 +795,12 @@ class CompletedTeacherRows:
     first_invalid_keys: list[str] | None
 
 
-def create_teacher_precompute_dataset(config: PipelineConfig, samples: list[VlmSample] | None = None) -> Path:
+def create_teacher_precompute_dataset(
+    config: PipelineConfig,
+    samples: list[VlmSample] | None = None,
+    *,
+    overwrite: bool = False,
+) -> Path:
     samples = samples or validate_manifest(
         resolve_training_manifest_path(config.data),
         image_root=config.data.image_root,
@@ -803,12 +808,20 @@ def create_teacher_precompute_dataset(config: PipelineConfig, samples: list[VlmS
     )
     output_path = resolve_full_label_path(config.data) if getattr(config.training, "validation_enabled", False) else resolve_label_path(config.data)
     _warn_offline_teacher_logits_disabled(config)
-    completed = _load_completed_teacher_rows(output_path, config=config)
+    if overwrite:
+        completed = CompletedTeacherRows(
+            ids=set(),
+            valid_count=0,
+            invalid_count=0,
+            first_invalid_keys=None,
+        )
+    else:
+        completed = _load_completed_teacher_rows(output_path, config=config)
 
     pending_samples = [
         sample
         for sample in samples
-        if sample.id not in completed.ids
+        if overwrite or sample.id not in completed.ids
     ]
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -816,6 +829,8 @@ def create_teacher_precompute_dataset(config: PipelineConfig, samples: list[VlmS
     print("Teacher precompute:")
     print(f"  output: {output_path}")
     print("  output_schema: id,image,task,query,elements,coordinate_system")
+    print(f"  overwrite: {str(overwrite).lower()}")
+    print(f"  resume_existing_labels: {str(not overwrite).lower()}")
     print("  offline_teacher_logits: disabled")
     print("  note: online DBiLD computes teacher/student logits during training")
     print(f"  total samples: {len(samples)}")
@@ -825,19 +840,22 @@ def create_teacher_precompute_dataset(config: PipelineConfig, samples: list[VlmS
     if completed.first_invalid_keys:
         print(f"  first invalid label row id/reason: {completed.first_invalid_keys}")
 
-    if not pending_samples:
+    if not pending_samples and not overwrite:
         refresh_parsing_sidecar_reports(output_root=output_path.parent, role="teacher")
         return output_path
 
-    teacher = build_teacher(config)
+    teacher = build_teacher(config) if pending_samples else None
 
     completed_now = 0
     temporary_output = output_path.with_name(f".{output_path.name}.precompute.tmp")
-    if output_path.exists():
-        import shutil
-        shutil.copy2(output_path, temporary_output)
     try:
-        with temporary_output.open("a", encoding="utf-8") as label_handle:
+        if output_path.exists() and not overwrite:
+            import shutil
+            shutil.copy2(output_path, temporary_output)
+        else:
+            temporary_output.unlink(missing_ok=True)
+        mode = "w" if overwrite else "a"
+        with temporary_output.open(mode, encoding="utf-8") as label_handle:
             for sample in pending_samples:
                 started = time.perf_counter()
                 generated = _generate_label_row(teacher, sample)
@@ -868,6 +886,12 @@ def create_teacher_precompute_dataset(config: PipelineConfig, samples: list[VlmS
                     f"label_written={label_written} elapsed_seconds_per_sample={elapsed:.2f}"
                 )
         os.replace(temporary_output, output_path)
+        if overwrite:
+            _remove_stale_parsing_sidecars(
+                output_root=output_path.parent,
+                role="teacher",
+                sample_ids={sample.id for sample in samples if sample.task == "parsing"},
+            )
     except Exception:
         temporary_output.unlink(missing_ok=True)
         raise
@@ -877,6 +901,15 @@ def create_teacher_precompute_dataset(config: PipelineConfig, samples: list[VlmS
 
 def create_distillation_dataset(config: PipelineConfig, samples: list[VlmSample]) -> Path:
     return create_teacher_precompute_dataset(config, samples)
+
+
+def _remove_stale_parsing_sidecars(*, output_root: Path, role: str, sample_ids: set[str]) -> None:
+    json_dir = output_root / "json" / role
+    if not json_dir.exists():
+        return
+    for sidecar_path in json_dir.glob("*.json"):
+        if sidecar_path.name not in {"parse_report.json"} and sidecar_path.stem not in sample_ids:
+            sidecar_path.unlink()
 
 
 def _base_output_row(sample: VlmSample) -> dict[str, Any]:

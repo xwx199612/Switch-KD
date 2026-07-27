@@ -289,7 +289,11 @@ def main() -> None:
             if config.training.validation_enabled:
                 print(f"expected_validation_count={max(1, round(len(samples) * config.training.validation_ratio))}")
             return
-        output_path = create_teacher_precompute_dataset(config, samples)
+        output_path = create_teacher_precompute_dataset(
+            config,
+            samples,
+            overwrite=args.overwrite,
+        )
         if config.training.validation_enabled:
             split = split_labeled_dataset(
                 full_label_path=resolve_full_label_path(config.data),
@@ -313,7 +317,11 @@ def main() -> None:
             image_root=config.data.image_root,
             max_samples=config.data.max_samples,
         )
-        output_path = create_teacher_precompute_dataset(config, samples)
+        output_path = create_teacher_precompute_dataset(
+            config,
+            samples,
+            overwrite=args.overwrite,
+        )
         print(f"OK teacher precompute dataset written: {output_path}")
         return
 

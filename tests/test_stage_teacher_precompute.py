@@ -83,6 +83,106 @@ def test_teacher_precompute_skips_invalid_parsing_rows_and_writes_sidecar_only(
     assert failure["json_sidecar"] == "json/teacher/parsing-000002.json"
 
 
+def test_teacher_precompute_resume_only_calls_teacher_for_pending_samples(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    config = _make_config(tmp_path)
+    samples = [VlmSample(id=f"sample-{index}", image="screen.png", task="qa", query=f"q-{index}") for index in range(5)]
+    output_path = tmp_path / "labels.jsonl"
+    output_path.write_text(
+        "".join(json.dumps({"id": sample.id, "old": True}) + "\n" for sample in samples[:3]),
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    class _Teacher:
+        def answer(self, sample):
+            calls.append(sample.id)
+            return {"teacher_answer": f"new-{sample.id}"}
+
+    monkeypatch.setattr(stage_teacher_precompute, "build_teacher", lambda _config: _Teacher())
+    monkeypatch.setattr(
+        stage_teacher_precompute,
+        "_load_completed_teacher_rows",
+        lambda path, *, config: stage_teacher_precompute.CompletedTeacherRows(
+            ids={sample.id for sample in samples[:3]},
+            valid_count=3,
+            invalid_count=0,
+            first_invalid_keys=None,
+        ),
+    )
+
+    stage_teacher_precompute.create_teacher_precompute_dataset(config, samples)
+
+    assert calls == ["sample-3", "sample-4"]
+    rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    assert [row["id"] for row in rows] == [f"sample-{index}" for index in range(5)]
+
+
+def test_teacher_precompute_overwrite_rebuilds_from_empty_and_removes_stale_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+):
+    config = _make_config(tmp_path)
+    samples = [VlmSample(id=f"sample-{index}", image="screen.png", task="qa", query=f"q-{index}") for index in range(5)]
+    output_path = tmp_path / "labels.jsonl"
+    output_path.write_text(
+        "".join(json.dumps({"id": f"sample-{index}", "old": True}) + "\n" for index in range(3))
+        + json.dumps({"id": "stale-id", "old": True})
+        + "\n",
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    class _Teacher:
+        def answer(self, sample):
+            calls.append(sample.id)
+            return {"teacher_answer": f"new-{sample.id}"}
+
+    monkeypatch.setattr(stage_teacher_precompute, "build_teacher", lambda _config: _Teacher())
+
+    stage_teacher_precompute.create_teacher_precompute_dataset(config, samples, overwrite=True)
+
+    assert calls == [sample.id for sample in samples]
+    rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    assert [row["id"] for row in rows] == [sample.id for sample in samples]
+    summary = capsys.readouterr().out
+    assert "overwrite: true" in summary
+    assert "resume_existing_labels: false" in summary
+    assert "valid completed label rows: 0" in summary
+    assert not (tmp_path / ".labels.jsonl.precompute.tmp").exists()
+
+
+def test_teacher_precompute_overwrite_failure_preserves_formal_output_and_removes_temporary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    config = _make_config(tmp_path)
+    samples = [VlmSample(id=f"sample-{index}", image="screen.png", task="qa", query=f"q-{index}") for index in range(3)]
+    output_path = tmp_path / "labels.jsonl"
+    original = json.dumps({"id": "old-row", "answer": "keep-me"}) + "\n"
+    output_path.write_text(original, encoding="utf-8")
+    calls = 0
+
+    class _Teacher:
+        def answer(self, sample):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("mock teacher failure")
+            return {"teacher_answer": sample.id}
+
+    monkeypatch.setattr(stage_teacher_precompute, "build_teacher", lambda _config: _Teacher())
+
+    with pytest.raises(RuntimeError, match="mock teacher failure"):
+        stage_teacher_precompute.create_teacher_precompute_dataset(config, samples, overwrite=True)
+
+    assert output_path.read_text(encoding="utf-8") == original
+    assert not (tmp_path / ".labels.jsonl.precompute.tmp").exists()
+
+
 def test_format_prompt_returns_exact_yaml_formatted_prompt_for_parsing(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     config.distillation.prompt_template = (
