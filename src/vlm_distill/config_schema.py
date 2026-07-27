@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 import re
 from typing import Any
-import warnings
 
 import yaml
 
@@ -106,9 +105,6 @@ class TrainingConfig:
     validation_label_path: Path | None = None
     validation_leakage_check_enabled: bool = True
     validation_leakage_check_hash_images: bool = False
-    # Deprecated spelling retained as an alias only; it is never interpreted
-    # as a raw manifest by the pipeline.
-    validation_manifest_path: Path | None = None
     validation_every_epochs: int = 1
     early_stopping_enabled: bool = False
     early_stopping_patience: int = 2
@@ -207,7 +203,6 @@ def load_config(path: str | Path) -> PipelineConfig:
     config_path = Path(path)
     raw = _load_raw_config(config_path)
     raw = _apply_config_options(raw)
-    raw = _migrate_legacy_validation_config(raw)
     config = PipelineConfig(
         seed=raw.get("seed", 42),
         data=_build_data_config(raw["data"]),
@@ -248,36 +243,10 @@ def _validate_training_validation_config(config: PipelineConfig) -> None:
             raise ValueError(
                 "training.validation_enabled=true requires training.validation_image_dir"
             )
-        if training.validation_label_path is None and training.validation_manifest_path is None:
+        if training.validation_label_path is None:
             raise ValueError(
-                "training.validation_enabled=true requires training.validation_label_path (formerly training.validation_manifest_path)"
+                "training.validation_enabled=true requires training.validation_label_path"
             )
-
-
-def _migrate_legacy_validation_config(raw: dict[str, Any]) -> dict[str, Any]:
-    """Move the former data.validation_* fields into training.validation_* fields."""
-    migrated = dict(raw)
-    data = dict(migrated.get("data", {}))
-    training = dict(migrated.get("training", {}))
-    legacy_value = data.pop("validation_manifest_path", None)
-    if legacy_value is not None and training.get("validation_manifest_path") is not None and Path(legacy_value) != Path(training["validation_manifest_path"]):
-        raise ValueError("Conflicting validation paths: data.validation_manifest_path and training.validation_manifest_path must match")
-    if legacy_value is not None and training.get("validation_label_path") is None:
-        training["validation_label_path"] = legacy_value
-        training["validation_manifest_path"] = legacy_value
-        warnings.warn("data.validation_manifest_path is deprecated; use training.validation_label_path", UserWarning, stacklevel=3)
-    legacy_training_value = training.get("validation_manifest_path")
-    if legacy_training_value is not None and training.get("validation_label_path") is None:
-        training["validation_label_path"] = legacy_training_value
-        training["validation_manifest_path"] = legacy_training_value
-        warnings.warn("training.validation_manifest_path is deprecated; use training.validation_label_path", UserWarning, stacklevel=3)
-    legacy_value = data.pop("validation_image_dir", None)
-    if legacy_value is not None and training.get("validation_image_dir") is None:
-        training["validation_image_dir"] = legacy_value
-        warnings.warn("data.validation_image_dir is deprecated; use training.validation_image_dir", UserWarning, stacklevel=3)
-    migrated["data"] = data
-    migrated["training"] = training
-    return migrated
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -389,9 +358,7 @@ def _build_data_config(raw: dict[str, Any]) -> DataConfig:
 
 def _build_training_config(raw: dict[str, Any]) -> TrainingConfig:
     values = dict(raw)
-    if values.get("validation_manifest_path") is not None and values.get("validation_label_path") is None:
-        values["validation_label_path"] = values["validation_manifest_path"]
-    for key in ("validation_image_dir", "validation_label_path", "validation_manifest_path"):
+    for key in ("validation_image_dir", "validation_label_path"):
         if values.get(key) is not None:
             values[key] = remap_output_path(Path(values[key]))
     return TrainingConfig(**values)

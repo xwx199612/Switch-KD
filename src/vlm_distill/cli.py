@@ -107,7 +107,7 @@ def main() -> None:
         if command == "validate-manifest":
             command_parser.add_argument(
                 "--split",
-                choices=("training", "validation", "inference"),
+                choices=("training", "inference"),
                 default="training",
             )
     validate_teacher_parser = subparsers.add_parser("validate-teacher")
@@ -228,8 +228,6 @@ def main() -> None:
     if args.command == "validate-manifest":
         if args.split == "inference":
             manifest_path = resolve_inference_manifest_path(config.data)
-        elif args.split == "validation":
-            raise ValueError("Validation is a labeled dataset; use validate-teacher --split validation")
         else:
             manifest_path = resolve_training_manifest_path(config.data)
         image_root = config.data.image_root
