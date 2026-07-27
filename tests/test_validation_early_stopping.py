@@ -29,7 +29,6 @@ def _config(tmp_path: Path, **training):
         teacher=TeacherConfig(model_name="teacher"),
         student=StudentConfig(model_name="student", output_dir=tmp_path, adapter_dir=tmp_path / "adapter"),
         training=TrainingConfig(
-            validation_image_dir=training.pop("validation_image_dir", tmp_path / "validation-images"),
             validation_ratio=training.pop("validation_ratio", 0.2),
             **training,
         ),
@@ -74,21 +73,23 @@ def test_validation_split_config_fields_and_seed_fallback(tmp_path):
         "validation_enabled": True,
         "validation_ratio": 0.2,
         "validation_split_seed": None,
-        "validation_split_mode": "copy",
-        "validation_image_dir": str(tmp_path / "images"),
         "validation_label_path": str(tmp_path / "validation.jsonl"),
     })
     assert training.validation_split_seed is None
-    assert training.validation_split_mode == "copy"
-    assert training.validation_image_dir == tmp_path / "images"
     assert training.validation_label_path == tmp_path / "validation.jsonl"
 
 
-def test_invalid_validation_split_mode_is_rejected(tmp_path):
-    config = _config(tmp_path, validation_enabled=False)
-    config.training.validation_split_mode = "link"
-    with pytest.raises(ValueError, match="validation_split_mode"):
-        _validate_training_validation_config(config)
+def test_removed_validation_image_fields_are_rejected(tmp_path):
+    config_path = tmp_path / "legacy.yaml"
+    config_path.write_text(
+        "data:\n  training_manifest_path: train.jsonl\n  distill_path: labels.jsonl\n"
+        "teacher:\n  model_name: teacher\n"
+        "student:\n  model_name: student\n  output_dir: out\n  adapter_dir: adapter\n"
+        "training:\n  " + "validation_" + "image_dir: images\n  " + "validation_" + "split_mode: copy\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(TypeError):
+        load_config(config_path)
 
 
 def test_unknown_validation_manifest_fields_are_rejected(tmp_path):

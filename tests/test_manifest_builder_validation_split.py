@@ -47,7 +47,7 @@ def test_create_manifest_only_writes_full_raw_manifest(tmp_path: Path):
     assert not (tmp_path / "validation").exists()
 
 
-def test_labeled_split_is_deterministic_and_preserves_all_fields(tmp_path: Path):
+def test_labeled_split_preserves_original_images_and_cleans_source_image(tmp_path: Path):
     source = tmp_path / "training"
     names = ["app/home/001.png", "app/home/002.png", "x.png", "y.png", "z.png"]
     _images(source, names)
@@ -55,35 +55,35 @@ def test_labeled_split_is_deterministic_and_preserves_all_fields(tmp_path: Path)
     _labeled(full, source, names)
     train = tmp_path / "train.jsonl"
     validation = tmp_path / "validation" / "labels.jsonl"
-    kwargs = dict(full_label_path=full, training_label_path=train, validation_label_path=validation, source_image_dir=source, validation_image_dir=tmp_path / "validation-images", ratio=.2, seed=42, mode="copy")
-    split_labeled_dataset(**kwargs)
+    split_labeled_dataset(full_label_path=full, training_label_path=train, validation_label_path=validation, ratio=.2, seed=42)
     first = _rows(validation)
     assert len(_rows(train)) + len(first) == len(_rows(full))
     assert not ({r["id"] for r in _rows(train)} & {r["id"] for r in first})
     assert first[0]["metadata"]["非ASCII"] == "保留"
     assert first[0]["teacher_logits"] == [[0.1]]
-    assert Path(first[0]["image"]).is_file()
-    assert all(Path(row["image"]).is_file() for row in first)
-    assert all(row["source_image"] == Path(row["source_image"]).resolve().as_posix() for row in _rows(train) + first)
-    assert all(Path(row["source_image"]).is_file() for row in _rows(train) + first)
+    assert {row["image"] for row in _rows(train) + first} == {str(source / name) for name in names}
+    assert all("source_image" not in row for row in _rows(train) + first)
+    assert not (tmp_path / "validation-images").exists()
 
 
-def test_split_order_independent_and_move_rolls_back_on_missing_source(tmp_path: Path):
+def test_split_overwrite_and_rollback_preserve_existing_outputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     source = tmp_path / "training"
     names = ["a.png", "b.png", "c.png"]
     _images(source, names)
     full = tmp_path / "full.jsonl"
     _labeled(full, source, names)
-    kwargs = dict(full_label_path=full, training_label_path=tmp_path / "train.jsonl", validation_label_path=tmp_path / "val.jsonl", source_image_dir=source, validation_image_dir=tmp_path / "validation", ratio=.5, seed=42, mode="move")
-    split_labeled_dataset(**kwargs)
-    assert len(_rows(kwargs["training_label_path"])) + len(_rows(kwargs["validation_label_path"])) == 3
-    assert not (source / "a.png").exists() or (tmp_path / "validation" / "a.png").exists()
-    assert all("source_image" in row for row in _rows(kwargs["training_label_path"]) + _rows(kwargs["validation_label_path"]))
+    train = tmp_path / "train.jsonl"; validation = tmp_path / "val.jsonl"
+    split_labeled_dataset(full_label_path=full, training_label_path=train, validation_label_path=validation, ratio=.5, seed=42)
+    metadata = validation.parent / "labeled_split_metadata.json"
+    split_labeled_dataset(full_label_path=full, training_label_path=train, validation_label_path=validation, ratio=.5, seed=42, overwrite=True)
+    assert len(_rows(train)) + len(_rows(validation)) == 3
+    assert _rows(metadata)[0]["training_count"] == 1
 
-    broken = tmp_path / "broken.jsonl"
-    _labeled(broken, source, ["a.png"])
-    with pytest.raises(FileNotFoundError):
-        split_labeled_dataset(full_label_path=broken, training_label_path=tmp_path / "x.jsonl", validation_label_path=tmp_path / "y.jsonl", source_image_dir=source, validation_image_dir=tmp_path / "v2", ratio=.5, seed=1)
+    original = {path: path.read_text() for path in (train, validation, metadata)}
+    monkeypatch.setattr("vlm_distill.labeled_split._atomic_jsonl", lambda *_args: (_ for _ in ()).throw(OSError("boom")))
+    with pytest.raises(RuntimeError, match="rollback completed"):
+        split_labeled_dataset(full_label_path=full, training_label_path=train, validation_label_path=validation, ratio=.5, seed=1, overwrite=True)
+    assert all(path.read_text() == original[path] for path in (train, validation, metadata))
 
 
 def test_dry_run_does_not_write_or_copy(tmp_path: Path):
@@ -91,7 +91,7 @@ def test_dry_run_does_not_write_or_copy(tmp_path: Path):
     _images(source, ["a.png", "b.png"])
     full = tmp_path / "full.jsonl"
     _labeled(full, source, ["a.png", "b.png"])
-    result = split_labeled_dataset(full_label_path=full, training_label_path=tmp_path / "train.jsonl", validation_label_path=tmp_path / "val.jsonl", source_image_dir=source, validation_image_dir=tmp_path / "validation", ratio=.5, seed=42, dry_run=True)
+    result = split_labeled_dataset(full_label_path=full, training_label_path=tmp_path / "train.jsonl", validation_label_path=tmp_path / "val.jsonl", ratio=.5, seed=42, dry_run=True)
     assert result["validation_count"] == 1
     assert not (tmp_path / "train.jsonl").exists()
     assert not (tmp_path / "validation").exists()

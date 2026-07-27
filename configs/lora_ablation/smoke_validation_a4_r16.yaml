@@ -7,15 +7,15 @@ options:
 data:
   training_manifest_path: outputs/lora_ablation/{task_name}_training_manifest.jsonl
   inference_manifest_path: outputs/lora_ablation/{task_name}_inference_manifest.jsonl
-  distill_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/{task_name}_online_dbild_{response_profile}.jsonl
-  label_path: outputs/lora_ablation/{task_name}_teacher_labels_{label_profile}.jsonl
-  full_label_path: outputs/lora_ablation/{task_name}_teacher_labels_full.jsonl
-  eval_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/{task_name}_online_dbild_{response_profile}.jsonl
-  prediction_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/{task_name}_online_dbild_{response_profile}/student_predictions.jsonl
+  distill_path: outputs/smoke_validation_a4_r16/{task_name}_online_dbild_{response_profile}.jsonl
+  label_path: outputs/smoke_validation_a4_r16/{task_name}_teacher_labels_train.jsonl
+  full_label_path: outputs/smoke_validation_a4_r16/{task_name}_teacher_labels_full.jsonl
+  eval_path: outputs/smoke_validation_a4_r16/{task_name}_online_dbild_{response_profile}.jsonl
+  prediction_path: outputs/smoke_validation_a4_r16/student_predictions.jsonl
   training_image_dir: /mnt/nvme0/vlm_distill/training_data
   inference_image_dir: /mnt/nvme0/vlm_distill/testing_data
   image_root: .
-  max_samples: null
+  max_samples: 16
 teacher:
   backend: hf
   model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-32B-Instruct
@@ -28,12 +28,12 @@ teacher:
   image_resize: '{quality}'
 student:
   model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-8B-Instruct
-  output_dir: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector
-  adapter_dir: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/adapter
-  merged_model_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/merged_bf16
+  output_dir: outputs/smoke_validation_a4_r16/student
+  adapter_dir: outputs/smoke_validation_a4_r16/student/adapter
+  merged_model_path: outputs/smoke_validation_a4_r16/student/merged_bf16
   inference_model_path: null
-  inference_adapter_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/adapter
-  deployment_artifact_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/deploy_4bit_bf16_adapter
+  inference_adapter_path: outputs/smoke_validation_a4_r16/student/adapter
+  deployment_artifact_path: outputs/smoke_validation_a4_r16/student/deploy_4bit_bf16_adapter
   load_adapter: false
   merge_adapter: false
   device_map: auto
@@ -67,7 +67,7 @@ training:
   learning_rate: 0.0001
   warmup_ratio: 0.03
   max_steps: 2
-  log_every: 50
+  log_every: 1
   save_every: 1000
   mixed_precision: bf16
   gradient_checkpointing: true
@@ -79,9 +79,7 @@ training:
   validation_enabled: true
   validation_ratio: 0.2
   validation_split_seed: 42
-  validation_split_mode: copy
-  validation_image_dir: /mnt/nvme0/vlm_distill/validation_data
-  validation_label_path: outputs/lora_ablation/validation/parsing_teacher_labels_validation.jsonl
+  validation_label_path: outputs/smoke_validation_a4_r16/validation/{task_name}_teacher_labels_validation.jsonl
   validation_every_epochs: 1
   validation_leakage_check_enabled: true
   validation_leakage_check_hash_images: false
@@ -89,7 +87,7 @@ training:
   early_stopping_enabled: false
   early_stopping_patience: 3
   early_stopping_min_delta: 0.01
-  restore_best_model: true
+  restore_best_model: false
 distillation:
   method: online_align_dbild
   lm_loss_weight: 1.0
@@ -152,7 +150,7 @@ distillation:
   dbild_max_top_k: 128
   dbild_kl_mode: reverse
 evaluation:
-  output_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/{task_name}_online_dbild_{response_profile}/eval_report.json
+  output_path: outputs/smoke_validation_a4_r16/eval_report.json
   metrics:
   - exact_match
   - token_f1

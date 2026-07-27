@@ -100,8 +100,6 @@ class TrainingConfig:
     validation_enabled: bool = False
     validation_ratio: float | None = None
     validation_split_seed: int | None = None
-    validation_split_mode: str = "copy"
-    validation_image_dir: Path | None = None
     validation_label_path: Path | None = None
     validation_leakage_check_enabled: bool = True
     validation_leakage_check_hash_images: bool = False
@@ -220,10 +218,6 @@ def load_config(path: str | Path) -> PipelineConfig:
 def _validate_training_validation_config(config: PipelineConfig) -> None:
     training = config.training
     data = config.data
-    if training.validation_split_mode not in {"move", "copy"}:
-        raise ValueError(
-            "training.validation_split_mode must be either 'move' or 'copy'"
-        )
     if training.validation_every_epochs <= 0:
         raise ValueError("training.validation_every_epochs must be > 0")
     if training.early_stopping_patience <= 0:
@@ -238,10 +232,6 @@ def _validate_training_validation_config(config: PipelineConfig) -> None:
         if training.validation_ratio is None or not 0 < training.validation_ratio < 1:
             raise ValueError(
                 "training.validation_enabled=true requires 0 < training.validation_ratio < 1"
-            )
-        if training.validation_image_dir is None:
-            raise ValueError(
-                "training.validation_enabled=true requires training.validation_image_dir"
             )
         if training.validation_label_path is None:
             raise ValueError(
@@ -358,7 +348,7 @@ def _build_data_config(raw: dict[str, Any]) -> DataConfig:
 
 def _build_training_config(raw: dict[str, Any]) -> TrainingConfig:
     values = dict(raw)
-    for key in ("validation_image_dir", "validation_label_path"):
+    for key in ("validation_label_path",):
         if values.get(key) is not None:
             values[key] = remap_output_path(Path(values[key]))
     return TrainingConfig(**values)

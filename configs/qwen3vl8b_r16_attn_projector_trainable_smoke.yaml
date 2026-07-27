@@ -72,8 +72,6 @@ training:
   validation_enabled: true
   validation_ratio: 0.2
   validation_split_seed: 42
-  validation_split_mode: copy
-  validation_image_dir: /mnt/nvme0/vlm_distill/validation_data
   validation_label_path: outputs/lora_ablation/validation/parsing_teacher_labels_validation.jsonl
   validation_leakage_check_enabled: true
   validation_leakage_check_hash_images: false

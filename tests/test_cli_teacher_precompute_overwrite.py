@@ -55,7 +55,6 @@ def test_label_forwards_overwrite_to_teacher_and_labeled_split(
     config.training.validation_enabled = True
     config.training.validation_ratio = 0.5
     config.training.validation_label_path = tmp_path / "validation.jsonl"
-    config.training.validation_image_dir = tmp_path / "validation-images"
     samples = [VlmSample(id="sample-1", image="screen.png", task="qa", query="q")]
     teacher_calls: list[bool] = []
     split_calls: list[bool] = []

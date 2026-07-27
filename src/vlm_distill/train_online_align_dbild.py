@@ -1014,12 +1014,9 @@ def _validate_train_validation_isolation(
             for field in ("id", "image"):
                 if not isinstance(row.get(field), str) or not row[field].strip():
                     raise ValueError(f"Dataset leakage preflight schema validation failed: {split} row {index} missing non-empty {field}")
-            if "source_image" in row and (not isinstance(row["source_image"], str) or not row["source_image"].strip()):
-                raise ValueError(f"Dataset leakage preflight schema validation failed: {split} row {index} has empty source_image")
             normalized[split].append({
                 "id": str(row["id"]).strip(),
                 "image": _normalized_identity(row["image"]),
-                "source_image": _normalized_identity(row.get("source_image") or row["image"]),
             })
 
     def values(split: str, field: str) -> list[str]:
@@ -1030,14 +1027,11 @@ def _validate_train_validation_isolation(
         "training_unique_ids": len(set(values("training", "id"))),
         "validation_unique_ids": len(set(values("validation", "id"))),
         "id_overlap": len(set(values("training", "id")) & set(values("validation", "id"))),
-        "current_image_overlap": len(set(values("training", "image")) & set(values("validation", "image"))),
-        "source_image_overlap": len(set(values("training", "source_image")) & set(values("validation", "source_image"))),
+        "image_overlap": len(set(values("training", "image")) & set(values("validation", "image"))),
         "training_duplicate_ids": _duplicate_count(values("training", "id")),
         "validation_duplicate_ids": _duplicate_count(values("validation", "id")),
         "training_duplicate_images": _duplicate_count(values("training", "image")),
         "validation_duplicate_images": _duplicate_count(values("validation", "image")),
-        "training_duplicate_sources": _duplicate_count(values("training", "source_image")),
-        "validation_duplicate_sources": _duplicate_count(values("validation", "source_image")),
         "content_hash_overlap": 0,
     }
     if hash_images:
@@ -1052,14 +1046,14 @@ def _validate_train_validation_isolation(
         counts["content_hash_overlap"] = len(train_hashes & validation_hashes)
 
     bad = any(counts[name] for name in (
-        "id_overlap", "current_image_overlap", "source_image_overlap",
+        "id_overlap", "image_overlap",
         "training_duplicate_ids", "validation_duplicate_ids", "training_duplicate_images",
-        "validation_duplicate_images", "training_duplicate_sources", "validation_duplicate_sources",
+        "validation_duplicate_images",
         "content_hash_overlap",
     ))
     if bad:
         examples: list[str] = []
-        for field, label in (("id", "id"), ("image", "current_image"), ("source_image", "source_image")):
+        for field, label in (("id", "id"), ("image", "image")):
             shared = set(values("training", field)) & set(values("validation", field))
             for item in sorted(shared)[:10]:
                 train_row = next(row for row in normalized["training"] if row[field] == item)
@@ -1078,9 +1072,7 @@ def _validate_train_validation_isolation(
 def _validate_labeled_split_metadata(config, training_rows: list[dict[str, Any]], validation_rows: list[dict[str, Any]], *, training_label_path: Path, validation_label_path: Path) -> None:
     metadata_path = resolve_labeled_split_metadata_path(config)
     if not metadata_path.is_file():
-        if config.training.validation_split_mode == "copy":
-            raise ValueError("Cannot reliably verify dataset isolation because source_image is missing from labeled rows created with validation_split_mode=copy.\n\nRegenerate teacher labels and labeled split with the current pipeline.")
-        warnings.warn("labeled_split_metadata.json is missing; move-mode isolation falls back to row-level checks.", UserWarning, stacklevel=2)
+        warnings.warn("labeled_split_metadata.json is missing; row-level isolation checks will still run.", UserWarning, stacklevel=2)
         return
     metadata_rows = read_jsonl(metadata_path)
     if len(metadata_rows) != 1 or not isinstance(metadata_rows[0], dict):
@@ -1095,6 +1087,8 @@ def _validate_labeled_split_metadata(config, training_rows: list[dict[str, Any]]
         "seed": (metadata.get("seed"), expected_seed),
         "ratio": (metadata.get("ratio"), config.training.validation_ratio),
         "full_label_sha256": (metadata.get("full_label_sha256"), actual_full),
+        "training_ids_hash": (metadata.get("training_ids_hash"), hashlib.sha256("\n".join(str(row["id"]) for row in training_rows).encode()).hexdigest()),
+        "validation_ids_hash": (metadata.get("validation_ids_hash"), hashlib.sha256("\n".join(str(row["id"]) for row in validation_rows).encode()).hexdigest()),
     }
     if any(left != right for left, right in checks.values()):
         mismatches = ", ".join(f"{key}={left!r} expected={right!r}" for key, (left, right) in checks.items() if left != right)
@@ -1107,10 +1101,8 @@ def _validate_labeled_split_metadata(config, training_rows: list[dict[str, Any]]
 
 def _print_dataset_isolation_summary(counts: dict[str, int]) -> None:
     print("Dataset isolation preflight:")
-    for key in ("training_rows", "validation_rows", "training_unique_ids", "validation_unique_ids", "id_overlap", "current_image_overlap", "source_image_overlap", "training_duplicate_ids", "validation_duplicate_ids", "training_duplicate_images", "validation_duplicate_images", "training_duplicate_sources", "validation_duplicate_sources", "content_hash_overlap"):
+    for key in ("training_rows", "validation_rows", "training_unique_ids", "validation_unique_ids", "id_overlap", "image_overlap", "training_duplicate_ids", "validation_duplicate_ids", "training_duplicate_images", "validation_duplicate_images", "content_hash_overlap"):
         print(f"  {key}={counts[key]}")
-    print(f"  training_rows_without_source_image={counts.get('training_rows_without_source_image', 0)}")
-    print(f"  validation_rows_without_source_image={counts.get('validation_rows_without_source_image', 0)}")
     print("  status=passed")
 
 
@@ -2140,18 +2132,6 @@ def run_training(
                 UserWarning, stacklevel=2,
             )
         else:
-            missing_training_sources = sum("source_image" not in row for row in rows)
-            missing_validation_sources = sum("source_image" not in row for row in validation_rows)
-            if config.training.validation_split_mode == "copy" and (missing_training_sources or missing_validation_sources):
-                raise ValueError(
-                    "Cannot reliably verify dataset isolation because source_image is missing from labeled rows created with validation_split_mode=copy.\n\n"
-                    "Regenerate teacher labels and labeled split with the current pipeline."
-                )
-            if config.training.validation_split_mode == "move" and (missing_training_sources or missing_validation_sources):
-                warnings.warn(
-                    "source_image is missing from labeled rows created with validation_split_mode=move; falling back to image identity.",
-                    UserWarning, stacklevel=2,
-                )
             _validate_labeled_split_metadata(
                 config, rows, validation_rows,
                 training_label_path=resolve_label_path(config.data),
@@ -2163,9 +2143,10 @@ def run_training(
                 validation_label_path=validation_path,
                 hash_images=bool(getattr(config.training, "validation_leakage_check_hash_images", False)),
             )
-            isolation_counts["training_rows_without_source_image"] = missing_training_sources
-            isolation_counts["validation_rows_without_source_image"] = missing_validation_sources
             _print_dataset_isolation_summary(isolation_counts)
+            for row in rows:
+                if not Path(str(row["image"])).is_file():
+                    raise FileNotFoundError(f"Training image does not exist: {row['image']}")
             for row in validation_rows:
                 if not Path(str(row["image"])).is_file():
                     raise FileNotFoundError(f"Validation image does not exist: {row['image']}")

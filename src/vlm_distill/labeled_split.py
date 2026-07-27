@@ -6,7 +6,6 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 import random
-import shutil
 import subprocess
 import tempfile
 from typing import Any
@@ -57,20 +56,26 @@ def _ids_hash(rows: list[dict[str, Any]]) -> str:
     return hashlib.sha256("\n".join(str(row["id"]) for row in rows).encode()).hexdigest()
 
 
-def _normalized_path(value: str | Path) -> str:
-    return os.path.normcase(Path(str(value)).resolve(strict=False).as_posix())
+def _clean_split_row(row: dict[str, Any]) -> dict[str, Any]:
+    cleaned = dict(row)
+    cleaned.pop("source_image", None)
+    return cleaned
 
 
 def split_labeled_dataset(
-    *, full_label_path: Path, training_label_path: Path, validation_label_path: Path,
-    source_image_dir: Path, validation_image_dir: Path, ratio: float, seed: int,
-    mode: str = "copy", overwrite: bool = False, dry_run: bool = False,
-    repository_commit_sha: str | None = None, tool_version: str | None = None,
+    *,
+    full_label_path: Path,
+    training_label_path: Path,
+    validation_label_path: Path,
+    ratio: float,
+    seed: int,
+    overwrite: bool = False,
+    dry_run: bool = False,
+    repository_commit_sha: str | None = None,
+    tool_version: str | None = None,
 ) -> dict[str, Any]:
     if not 0 < ratio < 1:
         raise ValueError("validation_ratio must satisfy 0 < validation_ratio < 1")
-    if mode not in {"copy", "move"}:
-        raise ValueError("validation_split_mode must be 'copy' or 'move'")
     if not full_label_path.is_file():
         raise FileNotFoundError(f"Full labeled dataset does not exist: {full_label_path}")
     if len({training_label_path, validation_label_path, full_label_path}) != 3:
@@ -98,85 +103,55 @@ def split_labeled_dataset(
         validation_count = len(rows) - 1
     ordered = sorted(rows, key=lambda row: str(row.get("image", "")))
     random.Random(seed).shuffle(ordered)
-    validation_rows = ordered[:validation_count]
-    training_rows = ordered[validation_count:]
+    training_rows = [_clean_split_row(row) for row in ordered[validation_count:]]
+    validation_rows = [_clean_split_row(row) for row in ordered[:validation_count]]
 
-    # Store the source identity in both outputs before changing any validation
-    # image paths. Existing identities are retained, but canonicalized.
-    training_rows = [dict(row) for row in training_rows]
-    for row in training_rows:
-        row["image"] = _normalized_path(row["image"])
-        row["source_image"] = _normalized_path(row.get("source_image") or row["image"])
-
-    operations: list[tuple[Path, Path, dict[str, Any]]] = []
-    for row in validation_rows:
-        source = Path(str(row["image"]))
-        try:
-            relative = source.relative_to(source_image_dir)
-        except ValueError:
-            relative = Path(source.name)
-        destination = validation_image_dir / relative
-        updated = dict(row)  # retain every teacher and metadata field
-        updated["image"] = _normalized_path(destination)
-        updated["source_image"] = _normalized_path(row.get("source_image") or source)
-        operations.append((source, destination, updated))
-
-    missing = [source for source, _, _ in operations if not source.is_file()]
-    conflicts = [destination for _, destination, _ in operations if destination.exists()]
     metadata_path = validation_label_path.parent / "labeled_split_metadata.json"
     outputs = [training_label_path, validation_label_path, metadata_path]
-    if missing:
-        raise FileNotFoundError(f"Missing validation source image: {missing[0]}")
-    if not overwrite and any(path.exists() for path in outputs + conflicts):
-        raise FileExistsError("labeled split output or validation image already exists; use --overwrite")
+    if not overwrite and any(path.exists() for path in outputs):
+        raise FileExistsError("labeled split output already exists; use --overwrite")
+    metadata = {
+        "full_label_path": str(full_label_path), "full_label_sha256": _sha256_file(full_label_path),
+        "training_label_path": str(training_label_path), "validation_label_path": str(validation_label_path),
+        "ratio": ratio, "seed": seed, "total_count": len(rows),
+        "training_count": len(training_rows), "validation_count": len(validation_rows),
+        "training_ids_hash": _ids_hash(training_rows), "validation_ids": [str(row["id"]) for row in validation_rows],
+        "validation_ids_hash": _ids_hash(validation_rows), "repository_commit_sha": repository_commit_sha or _repository_commit_sha(),
+        "created_at": datetime.now(timezone.utc).isoformat(), "tool_version": tool_version or _tool_version(),
+    }
     if dry_run:
-        return {"total_count": len(rows), "training_count": len(training_rows), "validation_count": len(validation_rows), "validation_ids": [str(row["id"]) for row in validation_rows], "training_label_path": str(training_label_path), "validation_label_path": str(validation_label_path)}
+        return {"total_count": len(rows), "training_count": len(training_rows), "validation_count": len(validation_rows), "validation_ids": metadata["validation_ids"], "training_label_path": str(training_label_path), "validation_label_path": str(validation_label_path)}
 
-    moved: list[tuple[Path, Path]] = []
-    created: list[Path] = []
-    backups: list[tuple[Path, Path]] = []
-    validation_label_path.parent.mkdir(parents=True, exist_ok=True)
-    backup_dir = Path(tempfile.mkdtemp(prefix=".labeled-split-backup-", dir=validation_label_path.parent)) if overwrite else None
     temporary: list[Path] = []
+    backups: list[tuple[Path, Path]] = []
+    installed: list[Path] = []
+    backup_dir: Path | None = None
     try:
-        if backup_dir:
-            for target in outputs + conflicts:
+        temporary = [_atomic_jsonl(training_label_path, training_rows), _atomic_jsonl(validation_label_path, validation_rows), _atomic_jsonl(metadata_path, [metadata])]
+        if overwrite:
+            backup_dir = Path(tempfile.mkdtemp(prefix=".labeled-split-backup-", dir=validation_label_path.parent))
+            for index, target in enumerate(outputs):
                 if target.exists():
-                    backup = backup_dir / str(len(backups))
-                    backup.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(target), str(backup)); backups.append((target, backup))
-        for source, destination, _ in operations:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if mode == "move":
-                shutil.move(str(source), str(destination)); moved.append((source, destination))
-            else:
-                shutil.copy2(source, destination); created.append(destination)
-        metadata = {
-            "full_label_path": str(full_label_path), "full_label_sha256": _sha256_file(full_label_path),
-            "training_label_path": str(training_label_path), "validation_label_path": str(validation_label_path),
-            "source_image_directory": str(source_image_dir), "validation_image_directory": str(validation_image_dir),
-            "mode": mode, "ratio": ratio, "seed": seed, "total_count": len(rows),
-            "training_count": len(training_rows), "validation_count": len(validation_rows),
-            "training_ids_hash": _ids_hash(training_rows), "validation_ids": [str(row["id"]) for row in validation_rows],
-            "validation_ids_hash": _ids_hash(validation_rows), "repository_commit_sha": repository_commit_sha or _repository_commit_sha(),
-            "created_at": datetime.now(timezone.utc).isoformat(), "tool_version": tool_version or _tool_version(),
-        }
-        temporary = [_atomic_jsonl(training_label_path, training_rows), _atomic_jsonl(validation_label_path, [item[2] for item in operations]), _atomic_jsonl(metadata_path, [metadata])]
-        for temp, target in zip(temporary, outputs):
-            os.replace(temp, target)
-        if backup_dir: shutil.rmtree(backup_dir)
+                    backup = backup_dir / str(index)
+                    os.replace(target, backup)
+                    backups.append((target, backup))
+        for temporary_path, target in zip(temporary, outputs):
+            os.replace(temporary_path, target)
+            installed.append(target)
+        if backup_dir:
+            for _, backup in backups:
+                backup.unlink(missing_ok=True)
+            backup_dir.rmdir()
         return metadata
     except Exception as exc:
-        for path in temporary: path.unlink(missing_ok=True)
-        for target in outputs:
-            if target.exists() and not any(target == original for original, _ in backups): target.unlink()
-        for source, destination in reversed(moved):
-            if destination.exists() and not source.exists():
-                source.parent.mkdir(parents=True, exist_ok=True); shutil.move(str(destination), str(source))
-        for destination in created:
-            destination.unlink(missing_ok=True)
+        for path in temporary:
+            path.unlink(missing_ok=True)
+        for target in installed:
+            if target.exists():
+                target.unlink()
         for target, backup in reversed(backups):
             if backup.exists():
-                target.parent.mkdir(parents=True, exist_ok=True); shutil.move(str(backup), str(target))
-        if backup_dir: shutil.rmtree(backup_dir, ignore_errors=True)
+                os.replace(backup, target)
+        if backup_dir and backup_dir.exists():
+            backup_dir.rmdir()
         raise RuntimeError(f"labeled split failed: {exc}; rollback completed") from exc

@@ -147,28 +147,25 @@ def test_validate_rows_accepts_parsing_rows_without_teacher_fields(tmp_path: Pat
     assert len(rows) == 1
 
 
-def _isolation_row(row_id: str, image: Path, source: Path | None = None) -> dict:
-    row = {"id": row_id, "image": str(image)}
-    if source is not None:
-        row["source_image"] = str(source)
-    return row
+def _isolation_row(row_id: str, image: Path) -> dict:
+    return {"id": row_id, "image": str(image)}
 
 
-def test_train_validation_isolation_checks_ids_current_paths_and_sources(tmp_path: Path):
+def test_train_validation_isolation_checks_ids_and_image_paths(tmp_path: Path):
     train_image = tmp_path / "train.png"
     val_image = tmp_path / "val.png"
     train_image.write_bytes(b"train")
     val_image.write_bytes(b"val")
     counts = _validate_train_validation_isolation(
-        [_isolation_row("train", train_image, tmp_path / "original-train.png")],
-        [_isolation_row("val", val_image, tmp_path / "original-val.png")],
+        [_isolation_row("train", train_image)],
+        [_isolation_row("val", val_image)],
     )
-    assert counts["id_overlap"] == counts["current_image_overlap"] == counts["source_image_overlap"] == 0
+    assert counts["id_overlap"] == counts["image_overlap"] == 0
 
     with pytest.raises(ValueError, match="Dataset leakage detected before training"):
         _validate_train_validation_isolation(
-            [_isolation_row("same", train_image, tmp_path / "original.png")],
-            [_isolation_row("same", val_image, tmp_path / "original.png")],
+            [_isolation_row("same", train_image)],
+            [_isolation_row("same", val_image)],
             training_label_path=tmp_path / "train.jsonl",
             validation_label_path=tmp_path / "val.jsonl",
         )

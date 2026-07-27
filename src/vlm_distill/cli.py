@@ -298,8 +298,7 @@ def main() -> None:
             print(f"  expected_validation_count: {validation_count}")
             print(f"  training_label_path: {resolve_label_path(config.data)}")
             print(f"  validation_label_path: {config.training.validation_label_path}")
-            print(f"  validation_image_dir: {config.training.validation_image_dir}")
-            print(f"  validation_split_mode: {config.training.validation_split_mode}")
+            print(f"  validation_split_seed: {config.seed if config.training.validation_split_seed is None else config.training.validation_split_seed}")
             return
         output_path = create_label_dataset(
             config,
@@ -311,11 +310,9 @@ def main() -> None:
                 full_label_path=resolve_full_label_path(config.data),
                 training_label_path=resolve_label_path(config.data),
                 validation_label_path=config.training.validation_label_path,
-                source_image_dir=config.data.training_image_dir or config.data.image_dir or Path("data/images"),
-                validation_image_dir=config.training.validation_image_dir,
                 ratio=config.training.validation_ratio,
                 seed=config.seed if config.training.validation_split_seed is None else config.training.validation_split_seed,
-                mode=config.training.validation_split_mode, overwrite=args.overwrite,
+                overwrite=args.overwrite,
             )
             print(f"OK labeled split: training={split['training_count']} validation={split['validation_count']}")
         else:
