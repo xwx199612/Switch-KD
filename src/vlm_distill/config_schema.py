@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 from typing import Any
+import warnings
 
 import yaml
 
@@ -26,6 +27,7 @@ class DataConfig:
     output_dir: Path | None = None
     max_samples: int | None = None
     validation_manifest_path: Path | None = None
+    validation_image_dir: Path | None = None
 
 
 @dataclass
@@ -98,6 +100,11 @@ class TrainingConfig:
     mask_prompt_labels: bool = True
     quantization: str = "none"
     validation_enabled: bool = False
+    validation_ratio: float | None = None
+    validation_split_seed: int | None = None
+    validation_split_mode: str = "move"
+    validation_image_dir: Path | None = None
+    validation_manifest_path: Path | None = None
     validation_every_epochs: int = 1
     early_stopping_enabled: bool = False
     early_stopping_patience: int = 2
@@ -196,12 +203,13 @@ def load_config(path: str | Path) -> PipelineConfig:
     config_path = Path(path)
     raw = _load_raw_config(config_path)
     raw = _apply_config_options(raw)
+    raw = _migrate_legacy_validation_config(raw)
     config = PipelineConfig(
         seed=raw.get("seed", 42),
         data=_build_data_config(raw["data"]),
         teacher=TeacherConfig(**raw["teacher"]),
         student=_build_student_config(raw["student"]),
-        training=TrainingConfig(**raw.get("training", {})),
+        training=_build_training_config(raw.get("training", {})),
         distillation=_build_distillation_config(raw.get("distillation", {})),
         evaluation=_build_evaluation_config(raw.get("evaluation", {})),
         prediction=PredictionConfig(**raw.get("prediction", {})),
@@ -213,6 +221,10 @@ def load_config(path: str | Path) -> PipelineConfig:
 def _validate_training_validation_config(config: PipelineConfig) -> None:
     training = config.training
     data = config.data
+    if training.validation_split_mode not in {"move", "copy"}:
+        raise ValueError(
+            "training.validation_split_mode must be either 'move' or 'copy'"
+        )
     if training.validation_every_epochs <= 0:
         raise ValueError("training.validation_every_epochs must be > 0")
     if training.early_stopping_patience <= 0:
@@ -224,15 +236,49 @@ def _validate_training_validation_config(config: PipelineConfig) -> None:
             "training.early_stopping_enabled=true requires training.validation_enabled=true"
         )
     if training.validation_enabled:
-        if data.validation_manifest_path is None:
+        if training.validation_ratio is None or not 0 < training.validation_ratio < 1:
             raise ValueError(
-                "training.validation_enabled=true requires data.validation_manifest_path"
+                "training.validation_enabled=true requires 0 < training.validation_ratio < 1"
             )
-        if not data.validation_manifest_path.is_file():
-            raise FileNotFoundError(
-                "Validation manifest does not exist: "
-                f"{data.validation_manifest_path}"
+        if training.validation_image_dir is None:
+            raise ValueError(
+                "training.validation_enabled=true requires training.validation_image_dir"
             )
+        if training.validation_manifest_path is None:
+            raise ValueError(
+                "training.validation_enabled=true requires training.validation_manifest_path"
+            )
+
+
+def _migrate_legacy_validation_config(raw: dict[str, Any]) -> dict[str, Any]:
+    """Move the former data.validation_* fields into training.validation_* fields."""
+    migrated = dict(raw)
+    data = dict(migrated.get("data", {}))
+    training = dict(migrated.get("training", {}))
+    legacy_pairs = (
+        ("validation_manifest_path", "validation_manifest_path"),
+        ("validation_image_dir", "validation_image_dir"),
+    )
+    for legacy_key, training_key in legacy_pairs:
+        legacy_value = data.get(legacy_key)
+        new_value = training.get(training_key)
+        if legacy_value is not None and new_value is not None:
+            if Path(legacy_value) != Path(new_value):
+                raise ValueError(
+                    f"Conflicting validation paths: data.{legacy_key} and "
+                    f"training.{training_key} must match"
+                )
+        elif legacy_value is not None:
+            training[training_key] = legacy_value
+            warnings.warn(
+                f"data.{legacy_key} is deprecated; use training.{training_key}",
+                UserWarning,
+                stacklevel=3,
+            )
+        data.pop(legacy_key, None)
+    migrated["data"] = data
+    migrated["training"] = training
+    return migrated
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -318,6 +364,7 @@ def _build_data_config(raw: dict[str, Any]) -> DataConfig:
     for key in (
         "training_manifest_path",
         "validation_manifest_path",
+        "validation_image_dir",
         "manifest_path",
         "distill_path",
         "inference_manifest_path",
@@ -335,6 +382,14 @@ def _build_data_config(raw: dict[str, Any]) -> DataConfig:
         if values.get(key) is not None:
             values[key] = remap_output_path(Path(values[key]))
     return DataConfig(**values)
+
+
+def _build_training_config(raw: dict[str, Any]) -> TrainingConfig:
+    values = dict(raw)
+    for key in ("validation_image_dir", "validation_manifest_path"):
+        if values.get(key) is not None:
+            values[key] = remap_output_path(Path(values[key]))
+    return TrainingConfig(**values)
 
 
 def _build_student_config(raw: dict[str, Any]) -> StudentConfig:

@@ -8,6 +8,8 @@ from vlm_distill.config_schema import (
     StudentConfig,
     TeacherConfig,
     TrainingConfig,
+    _build_training_config,
+    _migrate_legacy_validation_config,
     _validate_training_validation_config,
     load_config,
 )
@@ -24,11 +26,15 @@ def _config(tmp_path: Path, **training):
         data=DataConfig(
             training_manifest_path=tmp_path / "train.jsonl",
             distill_path=tmp_path / "labels.jsonl",
-            validation_manifest_path=training.pop("validation_manifest_path", None),
         ),
         teacher=TeacherConfig(model_name="teacher"),
         student=StudentConfig(model_name="student", output_dir=tmp_path, adapter_dir=tmp_path / "adapter"),
-        training=TrainingConfig(**training),
+        training=TrainingConfig(
+            validation_manifest_path=training.pop("validation_manifest_path", None),
+            validation_image_dir=training.pop("validation_image_dir", tmp_path / "validation-images"),
+            validation_ratio=training.pop("validation_ratio", 0.2),
+            **training,
+        ),
     )
 
 
@@ -65,11 +71,47 @@ def test_patience_and_min_delta_are_strict(tmp_path):
     assert _early_stopping_update(0.89, 1.0, 0, min_delta=0.01, patience=2)[2]
 
 
+def test_validation_split_config_fields_and_seed_fallback(tmp_path):
+    training = _build_training_config({
+        "validation_enabled": True,
+        "validation_ratio": 0.2,
+        "validation_split_seed": None,
+        "validation_split_mode": "copy",
+        "validation_image_dir": str(tmp_path / "images"),
+        "validation_manifest_path": str(tmp_path / "validation.jsonl"),
+    })
+    assert training.validation_split_seed is None
+    assert training.validation_split_mode == "copy"
+    assert training.validation_image_dir == tmp_path / "images"
+    assert training.validation_manifest_path == tmp_path / "validation.jsonl"
+
+
+def test_invalid_validation_split_mode_is_rejected(tmp_path):
+    config = _config(tmp_path, validation_enabled=False)
+    config.training.validation_split_mode = "link"
+    with pytest.raises(ValueError, match="validation_split_mode"):
+        _validate_training_validation_config(config)
+
+
+def test_legacy_validation_paths_migrate_and_conflicts_fail(tmp_path):
+    migrated = _migrate_legacy_validation_config({
+        "data": {"validation_manifest_path": str(tmp_path / "old.jsonl")},
+        "training": {},
+    })
+    assert migrated["training"]["validation_manifest_path"].endswith("old.jsonl")
+    assert "validation_manifest_path" not in migrated["data"]
+    with pytest.raises(ValueError, match="Conflicting validation paths"):
+        _migrate_legacy_validation_config({
+            "data": {"validation_manifest_path": "old.jsonl"},
+            "training": {"validation_manifest_path": "new.jsonl"},
+        })
+
+
 def test_old_config_keeps_validation_disabled():
     config = load_config("configs/parsing_switch_kd_test.yaml")
     assert config.training.validation_enabled is False
     assert config.training.early_stopping_enabled is False
-    assert config.data.validation_manifest_path is None
+    assert config.training.validation_manifest_path is None
 
 
 def test_single_process_reduce_and_broadcast_are_identity():

@@ -2044,7 +2044,7 @@ def run_training(
     scheduler = None
     if validation_enabled:
         validation_rows = _validate_rows(
-            config, path=config.data.validation_manifest_path,
+            config, path=config.training.validation_manifest_path,
         )
         # A constant scheduler preserves the historical learning-rate behavior while
         # making the best checkpoint restartable and explicit about scheduler state.

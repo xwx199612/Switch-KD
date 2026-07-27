@@ -38,7 +38,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="vlm-distill")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    create_manifest_parser = subparsers.add_parser("create-manifest")
+    create_manifest_parser = subparsers.add_parser(
+        "create-manifest",
+        description=(
+            "Create a manifest. Validation splitting is available only for --split training; "
+            "when training.validation_enabled is false the original single-manifest behavior is preserved. "
+            "Validation split settings come from training config. Use --dry-run to inspect "
+            "the deterministic plan. move removes source images; copy retains them."
+        ),
+    )
     create_manifest_parser.add_argument("--config", type=Path, required=True)
     create_manifest_parser.add_argument(
         "--split",
@@ -50,6 +58,14 @@ def main() -> None:
         choices=("parsing",),
     )
     create_manifest_parser.add_argument("--recursive", action="store_true")
+    create_manifest_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Plan and validate the split without moving, copying, or writing files.",
+    )
+    create_manifest_parser.add_argument(
+        "--overwrite", action="store_true",
+        help="Allow existing validation destinations, manifests, and split metadata to be replaced.",
+    )
 
     parse_outputs_parser = subparsers.add_parser("parse-parsing-outputs")
     parse_outputs_parser.add_argument("--output-root", type=Path, required=True)
@@ -90,7 +106,7 @@ def main() -> None:
         if command == "validate-manifest":
             command_parser.add_argument(
                 "--split",
-                choices=("training", "inference"),
+                choices=("training", "validation", "inference"),
                 default="training",
             )
     validate_teacher_parser = subparsers.add_parser("validate-teacher")
@@ -151,6 +167,19 @@ def main() -> None:
 
     if args.command == "create-manifest":
         config = load_config(args.config)
+        print("create-manifest config:")
+        for key, value in {
+            "validation_enabled": config.training.validation_enabled,
+            "validation_ratio": config.training.validation_ratio,
+            "validation_split_seed": (
+                config.seed if config.training.validation_split_seed is None
+                else config.training.validation_split_seed
+            ),
+            "validation_split_mode": config.training.validation_split_mode,
+            "validation_image_dir": config.training.validation_image_dir,
+            "validation_manifest_path": config.training.validation_manifest_path,
+        }.items():
+            print(f"{key}={value}")
         task = _resolve_create_manifest_task(
             config_path=args.config,
             cli_task=args.task,
@@ -161,8 +190,10 @@ def main() -> None:
             task=task,
             split=args.split,
             recursive=args.recursive,
+            dry_run=args.dry_run,
+            overwrite=args.overwrite,
         )
-        print(f"OK manifest written: {output_path}")
+        print(f"OK manifest {'planned' if args.dry_run else 'written'}: {output_path}")
         return
 
     if args.command == "parse-parsing-outputs":
@@ -205,11 +236,17 @@ def main() -> None:
     if args.command == "validate-manifest":
         if args.split == "inference":
             manifest_path = resolve_inference_manifest_path(config.data)
+            image_root = config.data.image_root
+        elif args.split == "validation":
+            if config.training.validation_manifest_path is None:
+                raise ValueError("training.validation_manifest_path is required for --split validation")
+            manifest_path = config.training.validation_manifest_path
+            image_root = config.data.image_root
         else:
             manifest_path = resolve_training_manifest_path(config.data)
         samples = validate_manifest(
             manifest_path,
-            image_root=config.data.image_root,
+            image_root=image_root,
             max_samples=config.data.max_samples,
         )
         print(
