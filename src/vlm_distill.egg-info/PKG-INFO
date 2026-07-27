@@ -205,14 +205,13 @@ vlm-distill label \
   --config configs/parsing_labeling.yaml
 ```
 
-`label` now runs unified teacher precompute. By default
-teacher precompute writes only `serialized parsing target`, `cached answer token ids`, and
+`label` is the unified teacher-labeling flow. By default
+labeling writes only `serialized parsing target`, `cached answer token ids`, and
 `teacher_element_count` to `data.label_path`. This project no longer stores
 offline teacher logits. Online DBiLD computes teacher/student logits on the
 fly during training.
 
-Use `vlm-distill teacher-precompute --config ...` for the same stage with an
-explicit name.
+Use `vlm-distill label --config ...` for both initial generation and resume.
 
 ---
 
@@ -457,7 +456,7 @@ Example manifest row:
 Generate parsing teacher labels:
 
 ```powershell
-vlm-distill teacher-precompute \
+vlm-distill label \
   --config configs/parsing_labeling.yaml
 ```
 
@@ -720,19 +719,19 @@ student:
   merge_adapter: false
 ```
 
-Parallel teacher precompute helper:
+Parallel label helper:
 
 ```bash
-bash scripts/run_parallel_switch_kd_precompute_4gpu.sh --clean-outputs teacher-precompute
+bash scripts/run_parallel_switch_kd_precompute_4gpu.sh --clean-outputs label
 ```
 
-This helper splits `outputs/switch-kd/parsing_manifest.jsonl` into four shard manifests, generates temporary configs in `configs/generated/`, launches four `teacher-precompute` workers with `CUDA_VISIBLE_DEVICES=0..3`, then merges shard teacher outputs back into `outputs/switch-kd/parsing_teacher_labels_480p_8bit.jsonl` after all workers succeed.
+This helper splits `outputs/switch-kd/parsing_manifest.jsonl` into four shard manifests, generates temporary configs in `configs/generated/`, launches four `label` workers with `CUDA_VISIBLE_DEVICES=0..3`, then merges shard teacher outputs back into `outputs/switch-kd/parsing_teacher_labels_480p_8bit.jsonl` after all workers succeed.
 
 ## Step 8
 
 Batch test a merged student model.
 
-Instead of using `infer_merged.py` one sample at a time, you can run the merged model on the whole manifest like `teacher-precompute`.
+Instead of using `infer_merged.py` one sample at a time, you can run the merged model on the whole manifest with `label`.
 
 Example config:
 
@@ -826,7 +825,7 @@ Notes for Qwen2.5-VL:
 Teacher-label generation plus online DBiLD training:
 
 ```bash
-python -m vlm_distill.cli teacher-precompute --config configs/parsing_switch_kd.yaml
+python -m vlm_distill.cli label --config configs/parsing_switch_kd.yaml
 python -m vlm_distill.cli validate-teacher --config configs/parsing_switch_kd.yaml
 python -m vlm_distill.cli train --config configs/qwen3vl8b_r32_attn_mlp.yaml
 ```
@@ -869,7 +868,7 @@ Screen Parsing + Grounding:
 vlm-distill create-manifest \
   --config configs/parsing_labeling.yaml \
 
-vlm-distill teacher-precompute \
+vlm-distill label \
   --config configs/parsing_labeling.yaml
 ```
 

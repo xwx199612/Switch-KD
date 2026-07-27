@@ -26,7 +26,7 @@ from .stage_package_adapter_deployment import package_high_fidelity_adapter_depl
 from .adapter_merger import merge_adapter_artifact
 from .stage_prediction_evaluation import evaluate_predictions
 from .stage_student_prediction import create_student_predictions
-from .stage_teacher_precompute import create_teacher_precompute_dataset
+from .stage_teacher_precompute import create_label_dataset
 from .train_online_align_dbild import run_training, validate_adapter_checkpoint
 from .stage_visual_switch_logits import create_visual_switch_dataset
 from .switch_logits_validation import validate_switch_logits_file
@@ -43,7 +43,7 @@ def main() -> None:
     create_manifest_parser = subparsers.add_parser(
         "create-manifest",
         description=(
-            "Create the complete raw manifest. Labeled validation splitting happens after teacher precompute."
+            "Create the complete raw manifest. Labeled validation splitting happens after label generation."
         ),
     )
     create_manifest_parser.add_argument("--config", type=Path, required=True)
@@ -73,7 +73,6 @@ def main() -> None:
     for command in (
         "validate-manifest",
         "label",
-        "teacher-precompute",
         "predict",
         "switch-logits",
         "validate-switch-logits",
@@ -102,7 +101,7 @@ def main() -> None:
                 default=None,
                 help="Override config.training.max_steps.",
             )
-        if command in {"label", "teacher-precompute"}:
+        if command == "label":
             command_parser.add_argument("--dry-run", action="store_true")
             command_parser.add_argument("--overwrite", action="store_true")
         if command == "validate-manifest":
@@ -285,11 +284,26 @@ def main() -> None:
         )
         if args.dry_run:
             output_path = resolve_full_label_path(config.data) if config.training.validation_enabled else resolve_label_path(config.data)
-            print(f"label dry-run: samples={len(samples)} output={output_path}")
-            if config.training.validation_enabled:
-                print(f"expected_validation_count={max(1, round(len(samples) * config.training.validation_ratio))}")
+            validation_enabled = bool(config.training.validation_enabled)
+            validation_count = 0
+            if validation_enabled:
+                validation_count = max(1, round(len(samples) * config.training.validation_ratio))
+                if len(samples) > 1 and validation_count >= len(samples):
+                    validation_count = len(samples) - 1
+            print("Label dry-run:")
+            print(f"  raw_manifest: {manifest_path}")
+            print(f"  sample_count: {len(samples)}")
+            print(f"  output: {output_path}")
+            print(f"  overwrite: {str(args.overwrite).lower()}")
+            print(f"  validation_enabled: {str(validation_enabled).lower()}")
+            print(f"  expected_training_count: {len(samples) - validation_count}")
+            print(f"  expected_validation_count: {validation_count}")
+            print(f"  training_label_path: {resolve_label_path(config.data)}")
+            print(f"  validation_label_path: {config.training.validation_label_path}")
+            print(f"  validation_image_dir: {config.training.validation_image_dir}")
+            print(f"  validation_split_mode: {config.training.validation_split_mode}")
             return
-        output_path = create_teacher_precompute_dataset(
+        output_path = create_label_dataset(
             config,
             samples,
             overwrite=args.overwrite,
@@ -307,22 +321,7 @@ def main() -> None:
             )
             print(f"OK labeled split: training={split['training_count']} validation={split['validation_count']}")
         else:
-            print(f"OK teacher precompute dataset written: {output_path}")
-        return
-
-    if args.command == "teacher-precompute":
-        manifest_path = resolve_training_manifest_path(config.data)
-        samples = validate_manifest(
-            manifest_path,
-            image_root=config.data.image_root,
-            max_samples=config.data.max_samples,
-        )
-        output_path = create_teacher_precompute_dataset(
-            config,
-            samples,
-            overwrite=args.overwrite,
-        )
-        print(f"OK teacher precompute dataset written: {output_path}")
+            print(f"OK teacher labels written: {output_path}")
         return
 
     if args.command == "predict":

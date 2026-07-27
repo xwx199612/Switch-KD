@@ -2130,7 +2130,7 @@ def run_training(
             raise FileNotFoundError(
                 "Validation labeled dataset does not exist:\n"
                 f"{validation_path}\n\n"
-                "Run teacher precompute first:\n"
+                "Generate labels first:\n"
                 "python -m vlm_distill.cli label --config <config>"
             )
         validation_rows = _validate_rows(config, path=validation_path)

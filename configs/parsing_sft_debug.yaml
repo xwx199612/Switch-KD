@@ -90,7 +90,7 @@ training:
 distillation:
   method: sft
   #switch_kd
-  # Teacher precompute writes elements-only parsing labels. Online DBiLD computes teacher/student logits during training.
+  # Label writes canonical supervised parsing labels. Online DBiLD computes teacher/student logits during training.
   teacher_logits: false
   confidence_weighting: true
   min_teacher_confidence: 0.35

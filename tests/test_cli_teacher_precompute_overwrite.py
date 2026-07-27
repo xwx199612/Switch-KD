@@ -25,11 +25,9 @@ def _config(tmp_path: Path) -> PipelineConfig:
     )
 
 
-@pytest.mark.parametrize("command", ["label", "teacher-precompute"])
-def test_teacher_commands_forward_overwrite(
+def test_label_forwards_overwrite_to_label_dataset(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    command: str,
 ):
     config = _config(tmp_path)
     samples = [VlmSample(id="sample-1", image="screen.png", task="qa", query="q")]
@@ -39,10 +37,10 @@ def test_teacher_commands_forward_overwrite(
     monkeypatch.setattr(cli, "validate_manifest", lambda *args, **kwargs: samples)
     monkeypatch.setattr(
         cli,
-        "create_teacher_precompute_dataset",
+        "create_label_dataset",
         lambda _config, _samples, *, overwrite=False: calls.append(overwrite) or tmp_path / "labels.jsonl",
     )
-    monkeypatch.setattr(sys, "argv", ["vlm-distill", command, "--config", str(tmp_path / "config.yaml"), "--overwrite"])
+    monkeypatch.setattr(sys, "argv", ["vlm-distill", "label", "--config", str(tmp_path / "config.yaml"), "--overwrite"])
 
     cli.main()
 
@@ -66,7 +64,7 @@ def test_label_forwards_overwrite_to_teacher_and_labeled_split(
     monkeypatch.setattr(cli, "validate_manifest", lambda *args, **kwargs: samples)
     monkeypatch.setattr(
         cli,
-        "create_teacher_precompute_dataset",
+        "create_label_dataset",
         lambda _config, _samples, *, overwrite=False: teacher_calls.append(overwrite) or tmp_path / "full-labels.jsonl",
     )
     monkeypatch.setattr(
@@ -94,9 +92,31 @@ def test_label_dry_run_does_not_call_teacher_or_modify_labels(
 
     monkeypatch.setattr(cli, "load_config", lambda _path: config)
     monkeypatch.setattr(cli, "validate_manifest", lambda *args, **kwargs: samples)
-    monkeypatch.setattr(cli, "create_teacher_precompute_dataset", lambda *args, **kwargs: pytest.fail("teacher called"))
+    monkeypatch.setattr(cli, "create_label_dataset", lambda *args, **kwargs: pytest.fail("teacher called"))
     monkeypatch.setattr(sys, "argv", ["vlm-distill", "label", "--config", str(tmp_path / "config.yaml"), "--overwrite", "--dry-run"])
 
     cli.main()
 
     assert output_path.read_text(encoding="utf-8") == original
+
+
+def test_removed_teacher_command_is_not_valid(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    removed_command = "teacher" + "-precompute"
+    monkeypatch.setattr(sys, "argv", ["vlm-distill", removed_command, "--config", str(tmp_path / "config.yaml")])
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+
+    assert exc_info.value.code == 2
+
+
+def test_cli_help_contains_label_but_not_teacher_precompute(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    monkeypatch.setattr(sys, "argv", ["vlm-distill", "--help"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "label" in help_text
+    assert ("teacher" + "-precompute") not in help_text

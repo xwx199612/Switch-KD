@@ -44,7 +44,7 @@ def test_teacher_precompute_writes_elements_only_rows_and_json_sidecars(
 
     monkeypatch.setattr(stage_teacher_precompute, "build_teacher", lambda _config: _Teacher())
 
-    output_path = stage_teacher_precompute.create_teacher_precompute_dataset(config, [sample])
+    output_path = stage_teacher_precompute.create_label_dataset(config, [sample])
     row = json.loads(output_path.read_text(encoding="utf-8").splitlines()[0])
 
     assert set(row.keys()) == {"id", "image", "task", "query", "elements", "coordinate_system"}
@@ -68,7 +68,7 @@ def test_teacher_precompute_skips_invalid_parsing_rows_and_writes_sidecar_only(
 
     monkeypatch.setattr(stage_teacher_precompute, "build_teacher", lambda _config: _Teacher())
 
-    output_path = stage_teacher_precompute.create_teacher_precompute_dataset(config, [sample])
+    output_path = stage_teacher_precompute.create_label_dataset(config, [sample])
 
     assert output_path.read_text(encoding="utf-8") == ""
     assert not (tmp_path / "raw" / "teacher" / "parsing-000002.txt").exists()
@@ -113,7 +113,7 @@ def test_teacher_precompute_resume_only_calls_teacher_for_pending_samples(
         ),
     )
 
-    stage_teacher_precompute.create_teacher_precompute_dataset(config, samples)
+    stage_teacher_precompute.create_label_dataset(config, samples)
 
     assert calls == ["sample-3", "sample-4"]
     rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
@@ -143,7 +143,7 @@ def test_teacher_precompute_overwrite_rebuilds_from_empty_and_removes_stale_rows
 
     monkeypatch.setattr(stage_teacher_precompute, "build_teacher", lambda _config: _Teacher())
 
-    stage_teacher_precompute.create_teacher_precompute_dataset(config, samples, overwrite=True)
+    stage_teacher_precompute.create_label_dataset(config, samples, overwrite=True)
 
     assert calls == [sample.id for sample in samples]
     rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
@@ -177,7 +177,7 @@ def test_teacher_precompute_overwrite_failure_preserves_formal_output_and_remove
     monkeypatch.setattr(stage_teacher_precompute, "build_teacher", lambda _config: _Teacher())
 
     with pytest.raises(RuntimeError, match="mock teacher failure"):
-        stage_teacher_precompute.create_teacher_precompute_dataset(config, samples, overwrite=True)
+        stage_teacher_precompute.create_label_dataset(config, samples, overwrite=True)
 
     assert output_path.read_text(encoding="utf-8") == original
     assert not (tmp_path / ".labels.jsonl.precompute.tmp").exists()

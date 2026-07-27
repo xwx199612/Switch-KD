@@ -7,7 +7,7 @@ This helper has been deprecated.
 The project no longer stores offline teacher logits or switch logits.
 Use:
 
-  vlm-distill teacher-precompute --config <config>
+  vlm-distill label --config <config>
 
 to write teacher labels only, then run:
 

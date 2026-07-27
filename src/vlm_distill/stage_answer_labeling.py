@@ -13,7 +13,7 @@ from .stage_teacher_precompute import (
     _normalize_teacher_answer,
     _strip_special_tokens,
     build_teacher,
-    create_distillation_dataset,
+    create_label_dataset,
 )
 
 __all__ = [
@@ -29,5 +29,5 @@ __all__ = [
     "_normalize_teacher_answer",
     "_strip_special_tokens",
     "build_teacher",
-    "create_distillation_dataset",
+    "create_label_dataset",
 ]

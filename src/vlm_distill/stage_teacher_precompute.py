@@ -795,7 +795,7 @@ class CompletedTeacherRows:
     first_invalid_keys: list[str] | None
 
 
-def create_teacher_precompute_dataset(
+def create_label_dataset(
     config: PipelineConfig,
     samples: list[VlmSample] | None = None,
     *,
@@ -826,13 +826,14 @@ def create_teacher_precompute_dataset(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    print("Teacher precompute:")
+    print("Teacher labeling:")
     print(f"  output: {output_path}")
     print("  output_schema: id,image,task,query,elements,coordinate_system")
+    print("  label_output: canonical supervised labels")
     print(f"  overwrite: {str(overwrite).lower()}")
     print(f"  resume_existing_labels: {str(not overwrite).lower()}")
     print("  offline_teacher_logits: disabled")
-    print("  note: online DBiLD computes teacher/student logits during training")
+    print("  online_dbild_logits: computed during training")
     print(f"  total samples: {len(samples)}")
     print(f"  valid completed label rows: {completed.valid_count}")
     print(f"  invalid stale label rows: {completed.invalid_count}")
@@ -880,7 +881,7 @@ def create_teacher_precompute_dataset(
                 elapsed = time.perf_counter() - started
                 label_written = row is not None
                 print(
-                    "[teacher-precompute] "
+                    "[label] "
                     f"total={len(samples)} completed={len(samples) - (len(pending_samples) - completed_now)} "
                     f"pending={len(pending_samples) - completed_now} id={sample.id} "
                     f"label_written={label_written} elapsed_seconds_per_sample={elapsed:.2f}"
@@ -897,10 +898,6 @@ def create_teacher_precompute_dataset(
         raise
     refresh_parsing_sidecar_reports(output_root=output_path.parent, role="teacher")
     return output_path
-
-
-def create_distillation_dataset(config: PipelineConfig, samples: list[VlmSample]) -> Path:
-    return create_teacher_precompute_dataset(config, samples)
 
 
 def _remove_stale_parsing_sidecars(*, output_root: Path, role: str, sample_ids: set[str]) -> None:
@@ -1043,7 +1040,7 @@ def _rewrite_valid_teacher_rows(path: Path, *, config: PipelineConfig, require_t
     with path.open("w", encoding="utf-8") as handle:
         for row in valid_rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-    print(f"[teacher-precompute] pruned invalid existing rows from {path}; remaining_valid_rows={len(valid_rows)}")
+    print(f"[label] pruned invalid existing rows from {path}; remaining_valid_rows={len(valid_rows)}")
 
 
 def _validate_teacher_label_row(

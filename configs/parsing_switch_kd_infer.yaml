@@ -85,7 +85,7 @@ training:
 
 distillation:
   method: switch_kd
-  # Teacher precompute writes elements-only parsing labels,
+  # Label writes elements-only parsing labels,
   # and answer-only teacher_logits together. Set false for answer/tokens only.
   teacher_logits: true
   confidence_weighting: true

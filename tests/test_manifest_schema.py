@@ -19,7 +19,7 @@ from vlm_distill.config_schema import (
 )
 from vlm_distill.data_manifest import VlmSample, validate_manifest
 from vlm_distill.manifest_builder import infer_manifest_task_from_config_path
-from vlm_distill.stage_teacher_precompute import _load_completed_ids, create_teacher_precompute_dataset
+from vlm_distill.stage_teacher_precompute import _load_completed_ids, create_label_dataset
 
 
 def _make_image(path: Path) -> None:
@@ -177,7 +177,7 @@ def test_load_completed_ids_reads_existing_ids(tmp_path: Path):
     assert _load_completed_ids(output_path) == {"row-1", "row-2"}
 
 
-def test_create_teacher_precompute_dataset_writes_elements_only_rows(tmp_path: Path):
+def test_create_label_dataset_writes_elements_only_rows(tmp_path: Path):
     config = PipelineConfig(
         data=DataConfig(
             training_manifest_path=tmp_path / "manifest.jsonl",
@@ -198,7 +198,7 @@ def test_create_teacher_precompute_dataset_writes_elements_only_rows(tmp_path: P
         metadata={"elements": [{"text": "Home", "bbox_norm": [1, 2, 3, 4], "focused": False}]},
     )
 
-    output_path = create_teacher_precompute_dataset(config, [sample])
+    output_path = create_label_dataset(config, [sample])
     row = json.loads(output_path.read_text(encoding="utf-8").splitlines()[0])
 
     assert set(row.keys()) == {"id", "image", "task", "query", "elements", "coordinate_system"}

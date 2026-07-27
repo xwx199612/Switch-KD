@@ -4,12 +4,12 @@ This repo no longer stores offline teacher logits.
 
 Current flow:
 
-1. `teacher-precompute` writes teacher labels only.
+1. `label` writes canonical supervised teacher labels only.
 2. `train_online_align_dbild.py` computes teacher/student logits online during training.
 
-## Teacher Precompute Output
+## Teacher Label Output
 
-Teacher precompute writes rows like:
+Label generation writes rows like:
 
 ```json
 {
