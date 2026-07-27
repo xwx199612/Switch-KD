@@ -236,14 +236,13 @@ def main() -> None:
     if args.command == "validate-manifest":
         if args.split == "inference":
             manifest_path = resolve_inference_manifest_path(config.data)
-            image_root = config.data.image_root
         elif args.split == "validation":
             if config.training.validation_manifest_path is None:
                 raise ValueError("training.validation_manifest_path is required for --split validation")
             manifest_path = config.training.validation_manifest_path
-            image_root = config.data.image_root
         else:
             manifest_path = resolve_training_manifest_path(config.data)
+        image_root = config.data.image_root
         samples = validate_manifest(
             manifest_path,
             image_root=image_root,

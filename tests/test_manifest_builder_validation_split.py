@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from vlm_distill.data_manifest import validate_manifest
+import vlm_distill.cli as cli
 import vlm_distill.manifest_builder as manifest_builder
 from vlm_distill.manifest_builder import create_manifest_from_config
 
@@ -148,3 +149,66 @@ def test_cli_no_longer_accepts_validation_dataset_options():
     )
     for option in ("--validation-seed", "--validation-mode", "--validation-image-dir", "--validation-manifest-out"):
         assert option not in result.stdout
+
+
+def _validate_manifest_cli_config(tmp_path: Path, validation_manifest: Path | None = None):
+    return SimpleNamespace(
+        data=SimpleNamespace(
+            image_root=tmp_path / "all-images",
+            max_samples=17,
+        ),
+        training=SimpleNamespace(validation_manifest_path=validation_manifest),
+    )
+
+
+@pytest.mark.parametrize(
+    ("split", "expected_manifest"),
+    [
+        ("training", Path("training.jsonl")),
+        ("validation", Path("validation.jsonl")),
+        ("inference", Path("inference.jsonl")),
+    ],
+)
+def test_validate_manifest_cli_runs_for_each_split_and_uses_image_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    split: str,
+    expected_manifest: Path,
+):
+    validation_manifest = expected_manifest if split == "validation" else None
+    config = _validate_manifest_cli_config(tmp_path, validation_manifest)
+    calls = []
+
+    monkeypatch.setattr(cli, "load_config", lambda _: config)
+    monkeypatch.setattr(cli, "resolve_training_manifest_path", lambda _: Path("training.jsonl"))
+    monkeypatch.setattr(cli, "resolve_inference_manifest_path", lambda _: Path("inference.jsonl"))
+
+    def fake_validate_manifest(manifest_path, *, image_root, max_samples):
+        calls.append((manifest_path, image_root, max_samples))
+        return [object()]
+
+    monkeypatch.setattr(cli, "validate_manifest", fake_validate_manifest)
+    monkeypatch.setattr(sys, "argv", ["vlm-distill", "validate-manifest", "--config", "config.yaml", "--split", split])
+
+    cli.main()
+
+    assert calls == [(expected_manifest, tmp_path / "all-images", 17)]
+
+
+def test_validate_manifest_cli_requires_validation_manifest_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    config = _validate_manifest_cli_config(tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda _: config)
+    monkeypatch.setattr(sys, "argv", [
+        "vlm-distill",
+        "validate-manifest",
+        "--config",
+        "config.yaml",
+        "--split",
+        "validation",
+    ])
+
+    with pytest.raises(ValueError, match="training.validation_manifest_path is required for --split validation"):
+        cli.main()
