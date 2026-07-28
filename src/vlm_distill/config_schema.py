@@ -86,6 +86,7 @@ class TrainingConfig:
     gradient_accumulation_steps: int = 1
     ddp_find_unused_parameters: bool | None = False
     learning_rate: float = 2e-4
+    projector_learning_rate: float | None = None
     warmup_ratio: float = 0.03
     max_steps: int | None = None
     log_every: int = 10
@@ -211,8 +212,27 @@ def load_config(path: str | Path) -> PipelineConfig:
         evaluation=_build_evaluation_config(raw.get("evaluation", {})),
         prediction=PredictionConfig(**raw.get("prediction", {})),
     )
+    _validate_projector_learning_rate_config(config)
     _validate_training_validation_config(config)
     return config
+
+
+def _validate_projector_learning_rate_config(config: PipelineConfig) -> None:
+    training = config.training
+    student = config.student
+    projector_lr = training.projector_learning_rate
+    if projector_lr is not None and projector_lr <= 0:
+        raise ValueError(
+            "training.projector_learning_rate must be > 0 when specified"
+        )
+    if projector_lr is not None and (
+        not student.train_multimodal_projector or student.use_projector_lora
+    ):
+        raise ValueError(
+            "training.projector_learning_rate requires "
+            "student.train_multimodal_projector=true and "
+            "student.use_projector_lora=false"
+        )
 
 
 def _validate_training_validation_config(config: PipelineConfig) -> None:

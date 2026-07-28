@@ -26,6 +26,7 @@ from .student_trainability import (
     QWEN3_VL_ATTENTION_TARGETS,
     QWEN3_VL_MLP_TARGETS,
     parameter_matches_module_path,
+    get_module_by_exact_path,
     summarize_trainable_groups,
     dequantize_trainable_projector,
     full_projector_modules_to_save_path,
@@ -1399,7 +1400,7 @@ def _student_gradient_checkpointing_modules(model):
 def _build_optimizer(config, model):
     import torch
 
-    trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    all_trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     trainable_items = [(name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad]
     invalid = [
         name for name, parameter in model.named_parameters()
@@ -1410,14 +1411,70 @@ def _build_optimizer(config, model):
             "Optimizer received non-floating trainable parameters: "
             f"{invalid}"
         )
-    if not trainable_parameters:
+    if not all_trainable_parameters:
         raise RuntimeError("Optimizer validation failed: no trainable parameters.")
-    if len({id(parameter) for parameter in trainable_parameters}) != len(trainable_parameters):
+    all_trainable_ids = {id(parameter) for parameter in all_trainable_parameters}
+    if len(all_trainable_ids) != len(all_trainable_parameters):
         raise RuntimeError("Optimizer validation failed: duplicate trainable parameter object identities.")
+    projector_lr = getattr(config.training, "projector_learning_rate", None)
+    projector_group_enabled = (
+        bool(config.student.train_multimodal_projector)
+        and not bool(getattr(config.student, "use_projector_lora", False))
+        and projector_lr is not None
+    )
+    projector_parameter_ids = set()
+    if projector_group_enabled:
+        try:
+            projector_module = get_module_by_exact_path(
+                model, config.student.multimodal_projector_path
+            )
+        except (AttributeError, TypeError) as exc:
+            raise RuntimeError(
+                "Optimizer validation failed: invalid multimodal projector path "
+                f"{config.student.multimodal_projector_path!r}"
+            ) from exc
+        projector_parameter_ids = {
+            id(parameter)
+            for parameter in projector_module.parameters()
+            if parameter.requires_grad
+        }
+        if not projector_parameter_ids:
+            raise RuntimeError(
+                "training.projector_learning_rate is set, but no trainable "
+                "full-projector parameters were found"
+            )
+    projector_parameters = []
+    default_parameters = []
+    for parameter in all_trainable_parameters:
+        if id(parameter) in projector_parameter_ids:
+            projector_parameters.append(parameter)
+        else:
+            default_parameters.append(parameter)
+    default_ids = {id(parameter) for parameter in default_parameters}
+    projector_ids = {id(parameter) for parameter in projector_parameters}
+    if all_trainable_ids != default_ids | projector_ids:
+        raise RuntimeError("Optimizer validation failed: trainable parameter partition has missing parameters.")
+    if not default_ids.isdisjoint(projector_ids):
+        raise RuntimeError("Optimizer validation failed: default and projector groups overlap.")
+    parameter_groups = []
+    if default_parameters:
+        parameter_groups.append({
+            "params": default_parameters,
+            "lr": config.training.learning_rate,
+            "group_name": "default",
+        })
+    if projector_parameters:
+        parameter_groups.append({
+            "params": projector_parameters,
+            "lr": projector_lr,
+            "group_name": "multimodal_projector",
+        })
+    if not parameter_groups:
+        raise RuntimeError("Optimizer validation failed: no trainable parameters.")
     groups = summarize_trainable_groups(model, config.student.multimodal_projector_path)
     print("Trainable parameter groups:")
-    print(f"optimizer_unique_parameter_tensors={len(trainable_parameters)}")
-    print(f"optimizer_total_numel={sum(parameter.numel() for parameter in trainable_parameters)}")
+    print(f"optimizer_unique_parameter_tensors={len(all_trainable_parameters)}")
+    print(f"optimizer_total_numel={sum(parameter.numel() for parameter in all_trainable_parameters)}")
     for key in ("attention_lora", "projector", "vision_encoder", "base_llm", "other"):
         print(f"  {key}={groups.get(key, 0)}")
     if groups.get("attention_lora", 0) <= 0:
@@ -1439,7 +1496,23 @@ def _build_optimizer(config, model):
     print(f"base_llm_numel={groups['base_llm']}")
     print(f"other_numel={groups['other']}")
     print(f"optimizer_trainable_names={len(trainable_items)}")
-    return torch.optim.AdamW(trainable_parameters, lr=config.training.learning_rate)
+    print("Optimizer parameter groups:")
+    format_lr = lambda value: f"{float(value):.10f}".rstrip("0").rstrip(".")
+    print(
+        f"  default: trainable_parameters={sum(p.numel() for p in default_parameters)} "
+        f"tensors={len(default_parameters)} learning_rate={format_lr(config.training.learning_rate)}"
+    )
+    if projector_parameters:
+        print(
+            f"  multimodal_projector: module_path={config.student.multimodal_projector_path} "
+            f"trainable_parameters={sum(p.numel() for p in projector_parameters)} "
+            f"tensors={len(projector_parameters)} learning_rate={format_lr(projector_lr)}"
+        )
+    print(
+        f"default_lr={format_lr(config.training.learning_rate)} "
+        f"projector_lr={format_lr(projector_lr if projector_parameters else config.training.learning_rate)}"
+    )
+    return torch.optim.AdamW(parameter_groups)
 
 
 def _weighted_online_align_loss(lm_loss, align_loss, *, lm_loss_weight: float, dbild_loss_weight: float):
@@ -1545,6 +1618,12 @@ def _restore_best_checkpoint(model, optimizer, scheduler, checkpoint_dir: Path) 
     state = torch.load(checkpoint_dir / "training_state.pt", map_location="cpu", weights_only=False)
     model.load_state_dict(state["model_state_dict"], strict=False)
     if optimizer is not None and state.get("optimizer_state_dict") is not None:
+        saved_groups = state["optimizer_state_dict"].get("param_groups", [])
+        if len(saved_groups) != len(optimizer.param_groups):
+            raise RuntimeError(
+                "Cannot resume optimizer state: optimizer group schema changed "
+                f"(checkpoint={len(saved_groups)}, current={len(optimizer.param_groups)})."
+            )
         optimizer.load_state_dict(state["optimizer_state_dict"])
     if scheduler is not None and state.get("scheduler_state_dict") is not None:
         scheduler.load_state_dict(state["scheduler_state_dict"])
@@ -1671,6 +1750,16 @@ def _print_dry_run_summary(config, model) -> None:
     print(f"MLP target modules = {len(mlp_modules)}")
     print(f"total LoRA target modules = {len(attention_modules | mlp_modules)}")
     print(f"projector mode = {projector_mode}")
+    projector_lr = getattr(config.training, "projector_learning_rate", None)
+    projector_lr_enabled = bool(
+        projector_lr is not None
+        and config.student.train_multimodal_projector
+        and not getattr(config.student, "use_projector_lora", False)
+    )
+    print(f"base_learning_rate: {getattr(config.training, 'learning_rate', None)}")
+    print(f"projector_learning_rate: {projector_lr}")
+    print(f"projector_lr_enabled: {str(projector_lr_enabled).lower()}")
+    print(f"projector_module_path: {config.student.multimodal_projector_path}")
     print(f"projector LoRA = {groups['projector_lora']}")
     print(f"vision trainable = {groups['vision_encoder']}")
     print(f"base LM trainable = {groups['base_lm']}")
@@ -1684,6 +1773,18 @@ def _print_dry_run_summary(config, model) -> None:
     allocated, reserved = _gpu_mem_stats()
     print(f"GPU allocated/reserved memory = {allocated}/{reserved} bytes")
     print("dry-run complete: optimizer=not_created forward=not_run backward=not_run checkpoint=not_written")
+
+
+def _optimizer_lr_summary(optimizer) -> dict[str, float]:
+    return {
+        str(group.get("group_name", f"group_{index}")): float(group.get("lr", 0.0))
+        for index, group in enumerate(optimizer.param_groups)
+    }
+
+
+def _format_optimizer_lr_summary(optimizer) -> str:
+    values = _optimizer_lr_summary(optimizer)
+    return " ".join(f"{name}_lr={value:g}" for name, value in values.items())
 
 
 def _synchronize_for_timing(device: Any) -> None:
@@ -2524,6 +2625,7 @@ def run_training(
                     )
                 if last_step_log_values["vocab_prefix_alignment_used"]:
                     step_message += f" shared_vocab_size={last_step_log_values['shared_vocab_size']}"
+                step_message += f" {_format_optimizer_lr_summary(optimizer)}"
                 print(step_message)
                 print(f"optimizer step {global_step} completed")
 
@@ -2556,6 +2658,7 @@ def run_training(
                 )
             if last_step_log_values["vocab_prefix_alignment_used"]:
                 step_message += f" shared_vocab_size={last_step_log_values['shared_vocab_size']}"
+            step_message += f" {_format_optimizer_lr_summary(optimizer)}"
             print(step_message)
             print(f"optimizer step {global_step} completed")
 
