@@ -678,11 +678,11 @@ def summarize_trainable_groups(model, projector_path: str) -> dict[str, int]:
     return groups
 
 
-def validate_a3_attn_mlp_full_projector_contract(
+def validate_a4_attn_mlp_full_projector_contract(
     model, *, projector_path: str = QWEN3_VL_PROJECTOR_PATH,
     expected_layer_count: int = QWEN3_VL_LANGUAGE_LAYER_COUNT,
 ) -> dict[str, object]:
-    """Fail-fast A3 contract: QKVO + gated MLP LoRA and only saved full projector."""
+    """Fail-fast A4 contract: QKVO + gated MLP LoRA and only saved full projector."""
     trainable = [(name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad]
     expected = set(range(expected_layer_count))
     groups = {"attention": set(), "mlp": set()}
@@ -730,13 +730,13 @@ def validate_a3_attn_mlp_full_projector_contract(
     expected_counts = {"attention": expected_layer_count * 4 * 2, "mlp": expected_layer_count * 3 * 2}
     if any(missing.values()) or forbidden or counts != expected_counts:
         raise RuntimeError(
-            "A3 trainability contract failed: "
+            "A4 trainability contract failed: "
             f"missing={missing}, lora_tensor_counts={counts}, forbidden={forbidden[:10]}"
         )
     projector_saved = [name for name, _ in trainable
                        if is_allowed_full_projector_parameter(name, allowed_full_projector_path)]
     if not projector_saved or any("lora_" in name.lower() for name in projector_saved):
-        raise RuntimeError("A3 trainability contract failed: modules_to_save.default full projector is missing.")
+        raise RuntimeError("A4 trainability contract failed: modules_to_save.default full projector is missing.")
     report = {
         "attention_module_count": expected_layer_count * 4,
         "mlp_module_count": expected_layer_count * 3,
@@ -744,6 +744,44 @@ def validate_a3_attn_mlp_full_projector_contract(
         "attention_tensor_count": counts["attention"], "mlp_tensor_count": counts["mlp"],
         "projector_full_tensor_count": len(projector_saved), "projector_lora_tensor_count": 0,
     }
+    print(f"A4 trainability contract: {report}")
+    return report
+
+
+# Backward-compatible name retained for callers written before the A3/A4
+# experiment-mode distinction was made explicit.
+validate_a3_attn_mlp_full_projector_contract = validate_a4_attn_mlp_full_projector_contract
+
+
+def validate_a3_attn_mlp_lora_contract(
+    model, *, projector_path: str = QWEN3_VL_PROJECTOR_PATH,
+    expected_layer_count: int = QWEN3_VL_LANGUAGE_LAYER_COUNT,
+) -> dict[str, object]:
+    """Validate QKVO+MLP LoRA with a completely frozen projector."""
+    projector_parameters = [
+        (name, parameter) for name, parameter in model.named_parameters()
+        if parameter_matches_module_path(name, projector_path)
+    ]
+    projector_trainable = [name for name, parameter in projector_parameters if parameter.requires_grad]
+    projector_lora = [name for name, _ in projector_parameters if "lora_" in name.lower()]
+    if projector_trainable or projector_lora:
+        raise RuntimeError(
+            "A3 trainability contract failed: projector must be frozen and contain no LoRA; "
+            f"trainable={projector_trainable[:10]}, lora={projector_lora[:10]}"
+        )
+    report = validate_language_model_lora_scope(
+        model, None,
+        list(QWEN3_VL_ATTENTION_TARGETS) + list(QWEN3_VL_MLP_TARGETS),
+        expected_layer_count=expected_layer_count,
+        projector_path=projector_path,
+    )
+    report.update({
+        "attention_module_count": expected_layer_count * 4,
+        "mlp_module_count": expected_layer_count * 3,
+        "total_module_count": expected_layer_count * 7,
+        "projector_trainable_parameter_count": 0,
+        "projector_lora_parameter_count": 0,
+    })
     print(f"A3 trainability contract: {report}")
     return report
 

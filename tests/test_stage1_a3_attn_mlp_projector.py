@@ -15,6 +15,7 @@ from vlm_distill.student_trainability import (
     QWEN3_VL_ATTENTION_TARGETS,
     QWEN3_VL_MLP_TARGETS,
     resolve_language_model_lora_targets,
+    validate_a3_attn_mlp_lora_contract,
     validate_a3_attn_mlp_full_projector_contract,
 )
 
@@ -100,8 +101,66 @@ def test_a3_contract_rejects_forbidden_trainables(bad_kind):
         module.lora_A = nn.Parameter(torch.ones(1, 2))
         parameter = module.lora_A
     parameter.requires_grad_(True)
-    with pytest.raises(RuntimeError, match="A3 trainability contract failed"):
+    with pytest.raises(RuntimeError, match="A4 trainability contract failed"):
         validate_a3_attn_mlp_full_projector_contract(model)
+
+
+def _frozen_a3_model():
+    model = _FakeQwen3VL()
+    for name, parameter in model.named_parameters():
+        if ".modules_to_save.default." in name:
+            parameter.requires_grad_(False)
+    return model
+
+
+def test_a3_contract_allows_attn_mlp_lora_with_frozen_projector():
+    report = validate_a3_attn_mlp_lora_contract(_frozen_a3_model())
+    assert report["attention_module_count"] == 144
+    assert report["mlp_module_count"] == 108
+    assert report["total_module_count"] == 252
+    assert report["projector_trainable_parameter_count"] == 0
+    assert report["projector_lora_parameter_count"] == 0
+
+
+@pytest.mark.parametrize("target", [*QWEN3_VL_ATTENTION_TARGETS, *QWEN3_VL_MLP_TARGETS])
+def test_a3_contract_rejects_missing_lora_target(target):
+    model = _frozen_a3_model()
+    layer_module = next(
+        module for name, module in model.named_modules()
+        if name == f"model.language_model.layers.0.self_attn.{target}"
+        or name == f"model.language_model.layers.0.mlp.{target}"
+    )
+    del layer_module.lora_A
+    del layer_module.lora_B
+    with pytest.raises(RuntimeError, match="missing"):
+        validate_a3_attn_mlp_lora_contract(model)
+
+
+def test_a3_contract_rejects_trainable_projector():
+    model = _frozen_a3_model()
+    model.model.visual.merger.modules_to_save["default"]["linear_fc1"].weight.requires_grad_(True)
+    with pytest.raises(RuntimeError, match="projector must be frozen"):
+        validate_a3_attn_mlp_lora_contract(model)
+
+
+def test_a3_contract_rejects_projector_lora():
+    model = _frozen_a3_model()
+    module = model.model.visual.merger.modules_to_save["default"]["linear_fc1"]
+    module.register_parameter("lora_A", nn.Parameter(torch.ones(1, 2)))
+    with pytest.raises(RuntimeError, match="contain no LoRA"):
+        validate_a3_attn_mlp_lora_contract(model)
+
+
+@pytest.mark.parametrize("bad_path", ["vision", "base_lm"])
+def test_a3_contract_rejects_non_lora_trainables(bad_path):
+    model = _frozen_a3_model()
+    if bad_path == "vision":
+        parameter = model.model.visual.encoder.weight
+    else:
+        parameter = model.model.language_model.layers[0].self_attn.q_proj.weight
+    parameter.requires_grad_(True)
+    with pytest.raises(RuntimeError, match="Language-model LoRA trainability validation failed"):
+        validate_a3_attn_mlp_lora_contract(model)
 
 
 def test_unknown_or_visual_targets_are_rejected(tmp_path: Path):

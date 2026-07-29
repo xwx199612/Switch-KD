@@ -35,7 +35,8 @@ from .student_trainability import (
     resolve_a2_lora_targets,
     resolve_language_model_lora_targets,
     validate_a2_projector_lora_contract,
-    validate_a3_attn_mlp_full_projector_contract,
+    validate_a4_attn_mlp_full_projector_contract,
+    validate_a3_attn_mlp_lora_contract,
     validate_a0_attention_lora_contract,
     validate_language_model_lora_scope,
     validate_projector_trainable_parameters,
@@ -1262,22 +1263,34 @@ def _apply_student_train_setup(config, model, *, dry_run: bool = False):
         multimodal_projector_path=config.student.multimodal_projector_path,
         configured_targets=attention_targets,
     )
-    if set(attention_targets) & set(QWEN3_VL_MLP_TARGETS):
+    has_mlp_lora = bool(set(attention_targets) & set(QWEN3_VL_MLP_TARGETS))
+    if has_mlp_lora:
         groups = summarize_trainable_groups(model, config.student.multimodal_projector_path)
-        print("Experiment mode: A3 attention + MLP LoRA + full projector")
+        if config.student.train_multimodal_projector:
+            print("Experiment mode: A4 attention + MLP LoRA + full projector")
+        else:
+            print("Experiment mode: A3 attention + MLP LoRA, projector frozen")
         print(f"Attention LoRA: targets={','.join(QWEN3_VL_ATTENTION_TARGETS)} module_count=144 parameter_count={groups['attention_lora']}")
         print(f"MLP LoRA: targets={','.join(QWEN3_VL_MLP_TARGETS)} module_count=108 parameter_count={groups['llm_mlp_lora']}")
-        print("Full projector: path=model.visual.merger storage=modules_to_save.default dtype=bfloat16")
-        print("projector LoRA parameter count = 0")
+        if config.student.train_multimodal_projector:
+            print("Full projector: path=model.visual.merger storage=modules_to_save.default dtype=bfloat16")
+        else:
+            print("Projector trainable count = 0")
+            print("Projector LoRA parameter count = 0")
         print(f"vision encoder trainable count = {groups['vision_encoder']}")
         print(f"base LM trainable count = {groups['base_lm']}")
         print(f"other trainable count = {groups['other']}")
     if config.student.train_multimodal_projector:
         validate_projector_trainable_parameters(model, config.student.multimodal_projector_path)
-    if (set(attention_targets) & set(QWEN3_VL_MLP_TARGETS)
+    if (has_mlp_lora
             and config.student.train_multimodal_projector
             and not config.student.use_projector_lora):
-        validate_a3_attn_mlp_full_projector_contract(
+        validate_a4_attn_mlp_full_projector_contract(
+            model, projector_path=config.student.multimodal_projector_path
+        )
+    elif (has_mlp_lora and not config.student.train_multimodal_projector
+          and not config.student.use_projector_lora):
+        validate_a3_attn_mlp_lora_contract(
             model, projector_path=config.student.multimodal_projector_path
         )
     elif config.student.use_projector_lora:
