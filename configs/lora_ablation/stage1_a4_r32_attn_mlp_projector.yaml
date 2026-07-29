@@ -8,13 +8,14 @@ data:
   training_manifest_path: outputs/lora_ablation/{task_name}_training_manifest.jsonl
   inference_manifest_path: outputs/lora_ablation/{task_name}_inference_manifest.jsonl
   distill_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/{task_name}_online_dbild_{response_profile}.jsonl
-  label_path: outputs/lora_ablation/{task_name}_teacher_labels_{label_profile}.jsonl
-  eval_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/{task_name}_online_dbild_{response_profile}.jsonl
-  prediction_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/{task_name}_online_dbild_{response_profile}/student_predictions.jsonl
-  training_image_dir: /mnt/nvme0/vlm_distill/TVWorld_eval/graph/image
-  inference_image_dir: /mnt/nvme0/vlm_distill/LG
+  label_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/{task_name}_teacher_labels_train.jsonl
+  eval_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/{task_name}_evaluation_inputs.jsonl
+  prediction_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/predictions/{task_name}_student_predictions.jsonl
+  training_image_dir: /mnt/nvme0/vlm_distill/training_data
+  inference_image_dir: /mnt/nvme0/vlm_distill/testing_data
   image_root: .
   max_samples: null
+  full_label_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/{task_name}_teacher_labels_full.jsonl
 teacher:
   backend: hf
   model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-32B-Instruct
@@ -60,20 +61,34 @@ student:
   merged_artifact_mode: 4bit_base_bf16_adapter
   attn_implementation: sdpa
 training:
-  epochs: 3
+  epochs: 5
   batch_size: 1
   gradient_accumulation_steps: 8
   learning_rate: 0.0001
+  projector_learning_rate: 0.00001
   warmup_ratio: 0.03
   max_steps: null
-  log_every: 50
-  save_every: 1000
+  log_every: 5
+  save_every: 100
   mixed_precision: bf16
   gradient_checkpointing: true
   image_resize: '{quality}'
   max_length: 4096
   freeze_vision_tower: true
   mask_prompt_labels: true
+
+  validation_enabled: true
+  validation_ratio: 0.2
+  validation_split_seed: 42
+  validation_label_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/validation/{task_name}_teacher_labels_validation.jsonl
+  validation_every_epochs: 1
+  validation_leakage_check_enabled: true
+  validation_leakage_check_hash_images: false
+
+  early_stopping_enabled: true
+  early_stopping_patience: 2
+  early_stopping_min_delta: 0.01
+  restore_best_model: true
 distillation:
   method: online_align_dbild
   lm_loss_weight: 1.0
@@ -136,7 +151,7 @@ distillation:
   dbild_max_top_k: 128
   dbild_kl_mode: reverse
 evaluation:
-  output_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/{task_name}_online_dbild_{response_profile}/eval_report.json
+  output_path: outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/evaluation/{task_name}_eval_report.json
   metrics:
   - exact_match
   - token_f1
