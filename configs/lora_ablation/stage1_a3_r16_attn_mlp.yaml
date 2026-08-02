@@ -5,17 +5,22 @@ options:
   teacher_quantization: 4bit
   student_quantization: 4bit
 data:
-  training_manifest_path: outputs/lora_ablation/{task_name}_training_manifest.jsonl
-  inference_manifest_path: outputs/lora_ablation/{task_name}_inference_manifest.jsonl
-  distill_path: outputs/lora_ablation/stage1_a3_r16_attn_mlp/{task_name}_online_dbild_{response_profile}.jsonl
-  label_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/{task_name}_teacher_labels_train.jsonl
-  eval_path: outputs/lora_ablation/stage1_a3_r16_attn_mlp/{task_name}_evaluation_inputs.jsonl
-  prediction_path: outputs/lora_ablation/stage1_a3_r16_attn_mlp/predictions/{task_name}_student_predictions.jsonl
+  training_manifest_path: outputs/lora_ablation/shared/{task_name}_training_manifest.jsonl
+  inference_manifest_path: outputs/lora_ablation/shared/{task_name}_inference_manifest.jsonl
+
+  full_label_path: outputs/lora_ablation/shared/{task_name}_teacher_labels_full.jsonl
+  label_path: outputs/lora_ablation/shared/{task_name}_teacher_labels_train.jsonl
+
   training_image_dir: /mnt/nvme0/vlm_distill/training_data
   inference_image_dir: /mnt/nvme0/vlm_distill/testing_data
   image_root: .
+
+  distill_path: outputs/lora_ablation/stage1_a3_r16_attn_mlp/{task_name}_online_dbild_{response_profile}.jsonl
+  eval_path: outputs/lora_ablation/stage1_a3_r16_attn_mlp/{task_name}_evaluation_inputs.jsonl
+  prediction_path: outputs/lora_ablation/stage1_a3_r16_attn_mlp/predictions/{task_name}_student_predictions.jsonl
+
   max_samples: null
-  full_label_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/{task_name}_teacher_labels_full.jsonl
+
 teacher:
   backend: hf
   model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-32B-Instruct
@@ -30,11 +35,11 @@ student:
   model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-8B-Instruct
   output_dir: outputs/lora_ablation/stage1_a3_r16_attn_mlp
   adapter_dir: outputs/lora_ablation/stage1_a3_r16_attn_mlp/adapter
-  merged_model_path: outputs/lora_ablation/stage1_a3_r16_attn_mlp/merged_bf16
+  merged_model_path: null
   inference_model_path: null
   inference_adapter_path: outputs/lora_ablation/stage1_a3_r16_attn_mlp/adapter
   deployment_artifact_path: outputs/lora_ablation/stage1_a3_r16_attn_mlp/deploy_4bit_bf16_adapter
-  load_adapter: false
+  load_adapter: true
   merge_adapter: false
   device_map: auto
   use_lora: true
@@ -80,7 +85,7 @@ training:
   validation_enabled: true
   validation_ratio: 0.2
   validation_split_seed: 42
-  validation_label_path: outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/validation/{task_name}_teacher_labels_validation.jsonl
+  validation_label_path: outputs/lora_ablation/shared/validation/{task_name}_teacher_labels_validation.jsonl
   validation_every_epochs: 1
   validation_leakage_check_enabled: true
   validation_leakage_check_hash_images: false

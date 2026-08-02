@@ -196,4 +196,6 @@ def run_visualization(predictions: Path, output_dir: Path, *, image_root: Path =
 
 def run_from_config(config_path: Path, output_dir: Path, **kwargs: Any) -> dict[str, int | str]:
     config = load_config(config_path)
-    return run_visualization(resolve_prediction_path(config.data), output_dir, image_root=config.data.image_root, max_samples=kwargs.pop("max_samples", None) if kwargs.get("max_samples") is not None else config.data.max_samples, **kwargs)
+    cli_max_samples = kwargs.pop("max_samples", None)
+    max_samples = cli_max_samples if cli_max_samples is not None else config.data.max_samples
+    return run_visualization(resolve_prediction_path(config.data), output_dir, image_root=config.data.image_root, max_samples=max_samples, **kwargs)

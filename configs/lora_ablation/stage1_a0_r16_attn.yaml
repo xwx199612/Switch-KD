@@ -1,20 +1,28 @@
 seed: 42
+
 options:
   task_name: parsing
   quality: 1080p
   teacher_quantization: 4bit
   student_quantization: 4bit
+
 data:
-  training_manifest_path: outputs/lora_ablation/{task_name}_training_manifest.jsonl
-  inference_manifest_path: outputs/lora_ablation/{task_name}_inference_manifest.jsonl
-  distill_path: outputs/lora_ablation/stage1_a0_r16_attn/{task_name}_online_dbild_{response_profile}.jsonl
-  label_path: outputs/lora_ablation/{task_name}_teacher_labels_{label_profile}.jsonl
-  eval_path: outputs/lora_ablation/stage1_a0_r16_attn/{task_name}_online_dbild_{response_profile}.jsonl
-  prediction_path: outputs/lora_ablation/stage1_a0_r16_attn/{task_name}_online_dbild_{response_profile}/student_predictions.jsonl
-  training_image_dir: /mnt/nvme0/vlm_distill/TV_data
-  inference_image_dir: /mnt/nvme0/vlm_distill/validation_data
+  training_manifest_path: outputs/lora_ablation/shared/{task_name}_training_manifest.jsonl
+  inference_manifest_path: outputs/lora_ablation/shared/{task_name}_inference_manifest.jsonl
+
+  full_label_path: outputs/lora_ablation/shared/{task_name}_teacher_labels_full.jsonl
+  label_path: outputs/lora_ablation/shared/{task_name}_teacher_labels_train.jsonl
+
+  training_image_dir: /mnt/nvme0/vlm_distill/training_data
+  inference_image_dir: /mnt/nvme0/vlm_distill/testing_data
   image_root: .
+
+  distill_path: outputs/lora_ablation/stage1_a0_r16_attn/{task_name}_online_dbild_{response_profile}.jsonl
+  eval_path: outputs/lora_ablation/stage1_a0_r16_attn/{task_name}_evaluation_inputs.jsonl
+  prediction_path: outputs/lora_ablation/stage1_a0_r16_attn/predictions/{task_name}_student_predictions.jsonl
+
   max_samples: null
+
 teacher:
   backend: hf
   model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-32B-Instruct
@@ -23,60 +31,98 @@ teacher:
   quantization: '{teacher_quantization}'
   attn_implementation: sdpa
   temperature: 0.0
-  max_new_tokens: 1280
+  max_new_tokens: 2048
   image_resize: '{quality}'
+
 student:
   model_name: /mnt/nvme0/vlm_distill/models/Qwen3-VL-8B-Instruct
+
   output_dir: outputs/lora_ablation/stage1_a0_r16_attn
   adapter_dir: outputs/lora_ablation/stage1_a0_r16_attn/adapter
-  merged_model_path: outputs/lora_ablation/stage1_a2_r16_attn_projector_lora/merged_bf16
+  
+  merged_model_path: null
   inference_model_path: null
-  inference_adapter_path: null
-  load_adapter: false
+  
+  inference_adapter_path: outputs/lora_ablation/stage1_a0_r16_attn/adapter
+  deployment_artifact_path: outputs/lora_ablation/stage1_a0_r16_attn/deploy_4bit_bf16_adapter
+
+  load_adapter: true
   merge_adapter: false
   device_map: auto
+
   use_lora: true
   lora_rank: 16
   lora_alpha: 32
   lora_layers_to_transform: null
   lora_layers_pattern: null
   lora_dropout: 0.05
+
+  # A0: attention LoRA only.
   target_modules:
-  - q_proj
-  - k_proj
-  - v_proj
-  - o_proj
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+
   quantization: '{student_quantization}'
+
+  # Projector is fully frozen in A0.
   train_multimodal_projector: false
   use_projector_lora: false
   projector_lora_rank: 16
   projector_lora_alpha: 32
   projector_lora_dropout: 0.05
   multimodal_projector_path: model.visual.merger
-  merged_artifact_mode: bf16_standalone
+
+  merged_artifact_mode: 4bit_base_bf16_adapter
   attn_implementation: sdpa
+
 training:
-  epochs: 3
+  epochs: 5
   batch_size: 1
   gradient_accumulation_steps: 8
+
   learning_rate: 0.0001
   warmup_ratio: 0.03
+
   max_steps: null
-  log_every: 50
-  save_every: 1000
+  log_every: 5
+  save_every: 100
+
   mixed_precision: bf16
   gradient_checkpointing: true
   image_resize: '{quality}'
   max_length: 4096
+
   freeze_vision_tower: true
   mask_prompt_labels: true
+
+  validation_enabled: true
+  validation_ratio: 0.2
+  validation_split_seed: 42
+
+
+  validation_label_path: outputs/lora_ablation/shared/validation/{task_name}_teacher_labels_validation.jsonl
+
+  validation_every_epochs: 1
+  validation_leakage_check_enabled: true
+  validation_leakage_check_hash_images: false
+
+  early_stopping_enabled: true
+  early_stopping_patience: 2
+  early_stopping_min_delta: 0.01
+  restore_best_model: true
+
 distillation:
   method: online_align_dbild
+
   lm_loss_weight: 1.0
   dbild_loss_weight: 1.0
   vsd_loss_weight: 0.0
+
   confidence_weighting: true
   min_teacher_confidence: 0.35
+
   prompt_template: |
     You are labeling Android TV screenshots for UI grounding.
 
@@ -124,15 +170,20 @@ distillation:
     - Keep placeholders as single braces: {query}, {question}, {task}
     - Escape literal JSON braces as double braces: {{ and }}
     - Do not use unescaped JSON braces in YAML.
+
   kd_temperature: 2.0
+
   dbild_top_k: 64
   dbild_top_k_mode: kneedle
   dbild_kneedle_candidate_k: 256
   dbild_min_top_k: 4
   dbild_max_top_k: 128
   dbild_kl_mode: reverse
+
 evaluation:
-  output_path: outputs/lora_ablation/stage1_a0_r16_attn/{task_name}_online_dbild_{response_profile}/eval_report.json
+  output_path: outputs/lora_ablation/stage1_a0_r16_attn/evaluation/{task_name}_eval_report.json
+
   metrics:
-  - exact_match
-  - token_f1
+    - exact_match
+    - token_f1
+
