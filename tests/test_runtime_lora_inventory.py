@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import pytest
-import torch
 from torch import nn
 
-from vlm_distill.deployment_loader import collect_runtime_lora_inventory, _summary
+from vlm_distill.deployment_loader import collect_runtime_lora_inventory
 
 
 ATTENTION = ("q_proj", "k_proj", "v_proj", "o_proj")

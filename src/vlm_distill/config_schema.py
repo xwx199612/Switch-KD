@@ -237,7 +237,6 @@ def _validate_projector_learning_rate_config(config: PipelineConfig) -> None:
 
 def _validate_training_validation_config(config: PipelineConfig) -> None:
     training = config.training
-    data = config.data
     if training.validation_every_epochs <= 0:
         raise ValueError("training.validation_every_epochs must be > 0")
     if training.early_stopping_patience <= 0:

@@ -6,12 +6,12 @@ from pathlib import Path
 import pytest
 
 torch = pytest.importorskip("torch")
-from torch import nn
+from torch import nn  # noqa: E402
 
-from vlm_distill.config_schema import load_config
-from vlm_distill.config_schema import DataConfig, PipelineConfig, StudentConfig, TeacherConfig
-from vlm_distill.stage_package_adapter_deployment import package_high_fidelity_adapter_deployment
-from vlm_distill.student_trainability import (
+from vlm_distill.config_schema import load_config  # noqa: E402
+from vlm_distill.config_schema import DataConfig, PipelineConfig, StudentConfig, TeacherConfig  # noqa: E402
+from vlm_distill.stage_package_adapter_deployment import package_high_fidelity_adapter_deployment  # noqa: E402
+from vlm_distill.student_trainability import (  # noqa: E402
     QWEN3_VL_ATTENTION_TARGETS,
     QWEN3_VL_MLP_TARGETS,
     resolve_language_model_lora_targets,

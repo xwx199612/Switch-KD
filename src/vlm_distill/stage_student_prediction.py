@@ -9,7 +9,7 @@ from typing import Protocol
 
 from .config_schema import PipelineConfig, resolve_prediction_path
 from .data_manifest import VlmSample, read_jsonl
-from .model_loading import apply_attn_implementation, resolve_model_path
+from .model_loading import resolve_model_path
 from .bbox_grounding_inference import BBoxGroundingInferenceEngine
 from .model_output_artifacts import refresh_parsing_sidecar_reports, write_parsing_sidecar
 from .stage_teacher_precompute import (

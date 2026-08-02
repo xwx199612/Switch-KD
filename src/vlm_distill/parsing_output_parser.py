@@ -10,7 +10,11 @@ COORDINATE_SYSTEM_NORMALIZED_0_1000 = "normalized_0_1000"
 
 def is_truncation_error(exc: ValueError) -> bool:
     message = str(exc).casefold()
-    return "no complete top-level json object found" in message or "truncated" in message or "unterminated" in message
+    return (
+        "no complete top-level json object found" in message
+        or "truncated" in message
+        or "unterminated" in message
+    )
 
 
 def recover_truncated_elements_json(raw_text: str) -> dict[str, Any]:
@@ -30,29 +34,43 @@ def recover_truncated_elements_json(raw_text: str) -> dict[str, Any]:
     for index in range(start + 1, len(text)):
         char = text[index]
         if in_string:
-            if escaped: escaped = False
-            elif char == "\\": escaped = True
-            elif char == '"': in_string = False
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
             continue
-        if char == '"': in_string = True
-        elif char == "[": array_depth += 1
+        if char == '"':
+            in_string = True
+        elif char == "[":
+            array_depth += 1
         elif char == "]":
             array_depth -= 1
-            if array_depth == 0: break
-        elif char == "{" and depth == 0: object_start = index; depth = 1
-        elif char == "{" and depth > 0: depth += 1
+            if array_depth == 0:
+                break
+        elif char == "{" and depth == 0:
+            object_start = index
+            depth = 1
+        elif char == "{" and depth > 0:
+            depth += 1
         elif char == "}" and depth > 0:
             depth -= 1
             if depth == 0 and object_start is not None:
-                try: value = json.loads(text[object_start:index + 1])
-                except json.JSONDecodeError: value = None
-                if isinstance(value, dict): elements.append(value)
+                try:
+                    value = json.loads(text[object_start : index + 1])
+                except json.JSONDecodeError:
+                    value = None
+                if isinstance(value, dict):
+                    elements.append(value)
                 object_start = None
     if not elements:
         raise ValueError("No completed elements found in truncated JSON output.")
-    coordinate_system = (COORDINATE_SYSTEM_NORMALIZED_0_1000
-                         if re.search(r'"coordinate_system"\s*:\s*"normalized_0_1000"', text)
-                         else None)
+    coordinate_system = (
+        COORDINATE_SYSTEM_NORMALIZED_0_1000
+        if re.search(r'"coordinate_system"\s*:\s*"normalized_0_1000"', text)
+        else None
+    )
     return {"elements": elements, "coordinate_system": coordinate_system}
 
 
@@ -62,22 +80,41 @@ def normalize_elements(parsed_json: dict[str, Any]) -> tuple[list[dict[str, Any]
         raise ValueError("Parsed JSON does not contain an 'elements' list.")
     normalized, skipped = [], []
     for index, element in enumerate(elements, start=1):
-        if not isinstance(element, dict): skipped.append(f"element_{index}: not an object"); continue
+        if not isinstance(element, dict):
+            skipped.append(f"element_{index}: not an object")
+            continue
         text = element.get("text")
         bbox = element.get("bbox_norm")
         focused = element.get("focused")
-        if not isinstance(text, str) or not text.strip(): skipped.append(f"element_{index}: missing text"); continue
-        if bbox is None: skipped.append(f"element_{index}: malformed bbox_norm"); continue
-        if not isinstance(bbox, list) or len(bbox) != 4: skipped.append(f"element_{index}: malformed bbox_norm"); continue
-        if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in bbox): skipped.append(f"element_{index}: bbox_norm must contain numeric values"); continue
-        if any(isinstance(v, float) and not v.is_integer() for v in bbox): skipped.append(f"element_{index}: bbox_norm must contain integers"); continue
+        if not isinstance(text, str) or not text.strip():
+            skipped.append(f"element_{index}: missing text")
+            continue
+        if bbox is None:
+            skipped.append(f"element_{index}: malformed bbox_norm")
+            continue
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            skipped.append(f"element_{index}: malformed bbox_norm")
+            continue
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in bbox):
+            skipped.append(f"element_{index}: bbox_norm must contain numeric values")
+            continue
+        if any(isinstance(v, float) and not v.is_integer() for v in bbox):
+            skipped.append(f"element_{index}: bbox_norm must contain integers")
+            continue
         bbox = [int(v) for v in bbox]
         x1, y1, x2, y2 = bbox
-        if not (0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000): skipped.append(f"element_{index}: invalid bbox_norm coordinates"); continue
-        if focused is None: focused = False
-        if not isinstance(focused, bool): skipped.append(f"element_{index}: focused must be boolean"); continue
+        if not (0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000):
+            skipped.append(f"element_{index}: invalid bbox_norm coordinates")
+            continue
+        if focused is None:
+            focused = False
+        if not isinstance(focused, bool):
+            skipped.append(f"element_{index}: focused must be boolean")
+            continue
         normalized.append({"text": text.strip(), "bbox_norm": bbox, "focused": focused})
     return normalized, skipped
+
+
 _SCHEMA_TOKEN_TEXTS = {
     "text",
     "label",
@@ -117,11 +154,16 @@ def parse_parsing_answer(raw_text: str) -> dict[str, Any]:
             elements, parse_errors = normalize_elements(recovered)
             return _parsed_payload(
                 elements=elements,
-                parse_errors=[{"row": i, "line": None, "raw_line": None, "error": e}
-                              for i, e in enumerate(parse_errors, 1)],
-                parse_error=None if elements else "No usable elements remained after normalization.",
+                parse_errors=[
+                    {"row": i, "line": None, "raw_line": None, "error": e}
+                    for i, e in enumerate(parse_errors, 1)
+                ],
+                parse_error=None
+                if elements
+                else "No usable elements remained after normalization.",
                 coordinate_system=COORDINATE_SYSTEM_NORMALIZED_0_1000,
-                salvaged=True, salvage_reason="truncated_elements_recovered",
+                salvaged=True,
+                salvage_reason="truncated_elements_recovered",
                 dropped_tail_element=True,
             )
         return _parsed_payload(
@@ -171,10 +213,18 @@ def parse_parsing_answer(raw_text: str) -> dict[str, Any]:
     normalized_elements, skipped = normalize_elements({"elements": raw_elements})
     elements: list[dict[str, Any]] = []
     parse_errors: list[dict[str, Any]] = [
-        {"row": index, "line": None, "raw_line": None,
-         "error": ("bbox_norm is required" if index <= len(raw_elements)
-                    and isinstance(raw_elements[index - 1], dict)
-                    and "bbox_norm" not in raw_elements[index - 1] else error)}
+        {
+            "row": index,
+            "line": None,
+            "raw_line": None,
+            "error": (
+                "bbox_norm is required"
+                if index <= len(raw_elements)
+                and isinstance(raw_elements[index - 1], dict)
+                and "bbox_norm" not in raw_elements[index - 1]
+                else error
+            ),
+        }
         for index, error in enumerate(skipped, 1)
     ]
     for normalized in normalized_elements:
@@ -192,7 +242,9 @@ def parse_parsing_answer(raw_text: str) -> dict[str, Any]:
 
     return _parsed_payload(
         elements=elements,
-        parse_errors=parse_errors if coordinate_system_error is None else [
+        parse_errors=parse_errors
+        if coordinate_system_error is None
+        else [
             {
                 "row": None,
                 "line": None,
@@ -283,7 +335,10 @@ def normalize_element(element: object) -> tuple[dict[str, Any] | None, str | Non
         return None, "bbox_norm is required"
     bbox = _normalize_bbox_value(element.get("bbox_norm"))
     if bbox is None:
-        return None, "bbox_norm must be a list of exactly four integers satisfying 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000"
+        return (
+            None,
+            "bbox_norm must be a list of exactly four integers satisfying 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000",
+        )
 
     focused_raw = element.get("focused", False)
     if not isinstance(focused_raw, bool):
@@ -307,7 +362,9 @@ def _parsed_payload(
     dropped_tail_element: bool,
 ) -> dict[str, Any]:
     usable = bool(elements)
-    parse_ok = usable and not parse_errors and coordinate_system == COORDINATE_SYSTEM_NORMALIZED_0_1000
+    parse_ok = (
+        usable and not parse_errors and coordinate_system == COORDINATE_SYSTEM_NORMALIZED_0_1000
+    )
     return {
         "parse_ok": parse_ok,
         "usable": usable,

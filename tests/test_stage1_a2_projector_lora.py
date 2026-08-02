@@ -4,10 +4,10 @@ import pytest
 
 
 torch = pytest.importorskip("torch")
-from torch import nn
+from torch import nn  # noqa: E402
 
-from vlm_distill.config_schema import load_config
-from vlm_distill.student_trainability import (
+from vlm_distill.config_schema import load_config  # noqa: E402
+from vlm_distill.student_trainability import (  # noqa: E402
     build_a2_lora_scope,
     resolve_a2_lora_targets,
     validate_language_model_lora_scope,
@@ -38,7 +38,12 @@ class _ToyA2(nn.Module):
 
 def _attach_a2_adapters(model):
     for name, module in model.named_modules():
-        if ".self_attn." in name and name.rsplit(".", 1)[-1] in {"q_proj", "k_proj", "v_proj", "o_proj"}:
+        if ".self_attn." in name and name.rsplit(".", 1)[-1] in {
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+        }:
             module.lora_A = nn.Parameter(torch.ones(1, 2))
             module.lora_B = nn.Parameter(torch.ones(2, 1))
     for target in ("linear_fc1", "linear_fc2"):
@@ -52,7 +57,8 @@ def _attach_a2_adapters(model):
 def test_a2_resolves_only_main_merger_and_all_36_qkvo_layers():
     resolved = resolve_a2_lora_targets(_ToyA2())
     assert resolved["projector_targets"] == [
-        "model.visual.merger.linear_fc1", "model.visual.merger.linear_fc2"
+        "model.visual.merger.linear_fc1",
+        "model.visual.merger.linear_fc2",
     ]
     assert len(resolved["attention_targets"]) == 144
     assert not any("deepstack" in name for name in resolved["all_targets"])
@@ -62,7 +68,8 @@ def test_a2_scope_keeps_lm_canonical_and_projector_expanded_targets_separate():
     scope = build_a2_lora_scope(_ToyA2())
     assert scope["language_model_targets"] == ["q_proj", "k_proj", "v_proj", "o_proj"]
     assert scope["projector_targets"] == [
-        "model.visual.merger.linear_fc1", "model.visual.merger.linear_fc2"
+        "model.visual.merger.linear_fc1",
+        "model.visual.merger.linear_fc2",
     ]
     assert scope["peft_target_modules"][-2:] == scope["projector_targets"]
 
@@ -77,9 +84,9 @@ def test_lm_validator_rejects_expanded_paths_fast():
 def test_projector_validator_accepts_exact_two_targets():
     model = _ToyA2()
     _attach_a2_adapters(model)
-    report = validate_projector_lora_scope(model, [
-        "model.visual.merger.linear_fc1", "model.visual.merger.linear_fc2"
-    ])
+    report = validate_projector_lora_scope(
+        model, ["model.visual.merger.linear_fc1", "model.visual.merger.linear_fc2"]
+    )
     assert report["projector_logical_module_count"] == 2
     assert report["projector_lora_tensor_count"] == 4
 
@@ -121,9 +128,11 @@ def test_a2_config_and_mutual_exclusion_validation():
     assert config.student.adapter_dir.as_posix().endswith("r16_attn_projector_lora/adapter")
 
     import yaml
+
     raw = yaml.safe_load(open("configs/lora_ablation/stage1_a2_r16_attn_projector_lora.yaml"))
     raw["student"]["train_multimodal_projector"] = True
     path = __import__("tempfile").NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
-    yaml.safe_dump(raw, path); path.close()
+    yaml.safe_dump(raw, path)
+    path.close()
     with pytest.raises(ValueError, match="mutually exclusive"):
         load_config(path.name)

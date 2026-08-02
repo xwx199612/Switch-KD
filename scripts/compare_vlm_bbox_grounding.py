@@ -14,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.vlm_compare_utils import (
+from scripts.vlm_compare_utils import (  # noqa: E402
     MODEL_SPECS,
     cleanup_model,
     ensure_dir,
@@ -25,7 +25,7 @@ from scripts.vlm_compare_utils import (
     parse_line_bbox_elements,
     run_vlm_inference,
 )
-from tools.draw_lm_bboxes import (
+from tools.draw_lm_bboxes import (  # noqa: E402
     COORD_SYSTEM_AUTO,
     COORD_SYSTEM_NORMALIZED_1000,
     COORD_SYSTEM_PIXEL,

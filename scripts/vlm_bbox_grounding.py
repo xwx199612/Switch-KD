@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.vlm_compare_utils import (
+from scripts.vlm_compare_utils import (  # noqa: E402
     cleanup_model,
     ensure_dir,
     extract_json_from_text,
@@ -24,12 +24,12 @@ from scripts.vlm_compare_utils import (
     QUANTIZATION_CHOICES,
     run_vlm_inference,
 )
-from vlm_distill.bbox_grounding_inference import BBoxGroundingInferenceEngine
-from vlm_distill.config_schema import load_config
-from vlm_distill.parsing_output_parser import (
+from vlm_distill.bbox_grounding_inference import BBoxGroundingInferenceEngine  # noqa: E402
+from vlm_distill.config_schema import load_config  # noqa: E402
+from vlm_distill.parsing_output_parser import (  # noqa: E402
     is_truncation_error, normalize_elements, recover_truncated_elements_json,
 )
-from tools.draw_lm_bboxes import (
+from tools.draw_lm_bboxes import (  # noqa: E402
     COORD_SYSTEM_AUTO,
     COORD_SYSTEM_NORMALIZED_1000,
     COORD_SYSTEM_PIXEL,

@@ -14,11 +14,11 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from vlm_distill.compare_outputs import build_teacher_student_unique_rows
-from vlm_distill.config_schema import load_config, resolve_label_path, resolve_prediction_path
-from vlm_distill.data_manifest import read_jsonl, validate_manifest, write_jsonl
-from vlm_distill.stage_teacher_precompute import create_distillation_dataset
-from vlm_distill.stage_student_prediction import create_student_predictions
+from vlm_distill.compare_outputs import build_teacher_student_unique_rows  # noqa: E402
+from vlm_distill.config_schema import load_config, resolve_label_path, resolve_prediction_path  # noqa: E402
+from vlm_distill.data_manifest import read_jsonl, validate_manifest, write_jsonl  # noqa: E402
+from vlm_distill.stage_teacher_precompute import create_distillation_dataset  # noqa: E402
+from vlm_distill.stage_student_prediction import create_student_predictions  # noqa: E402
 
 
 def main() -> None:

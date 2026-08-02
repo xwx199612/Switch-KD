@@ -342,7 +342,7 @@ def merge_adapter_artifact(
         }
         (output / "deployment_config.json").write_text(json.dumps(deployment, indent=2) + "\n", encoding="utf-8")
     _write_readme(output, mode)
-    print(f"prediction_model_source=adapter_merger")
+    print("prediction_model_source=adapter_merger")
     print(f"artifact_mode={mode}")
     print("adapter_merged=true")
     print(f"quantization={'none' if quantization == 'none' else 'bnb_nf4_4bit'}")

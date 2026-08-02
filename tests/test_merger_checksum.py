@@ -4,10 +4,10 @@ import pytest
 
 
 torch = pytest.importorskip("torch")
-from torch import nn
+from torch import nn  # noqa: E402
 
-from vlm_distill.deployment_loader import _tensor_digest
-from vlm_distill.student_trainability import merger_base_checksum, merger_base_tensors, tensor_storage_bytes
+from vlm_distill.deployment_loader import _tensor_digest  # noqa: E402
+from vlm_distill.student_trainability import merger_base_checksum, merger_base_tensors, tensor_storage_bytes  # noqa: E402
 
 
 class _MergerModel(nn.Module):

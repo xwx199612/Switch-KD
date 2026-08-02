@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import sys
 
 from vlm_distill.config_schema import load_config, resolve_inference_manifest_path

@@ -1,7 +1,7 @@
 import torch
 from PIL import Image
 
-from vlm_distill.logits_cache_utils import align_reference_logits_to_suffix, compact_logits
+from vlm_distill.logits_cache_utils import align_reference_logits_to_suffix
 from vlm_distill.stage_student_training import VocabAlignment, _remap_reference_logits_to_student_vocab
 from vlm_distill.vlm_batching import VlmDataCollator, encode_vlm_training_sample
 

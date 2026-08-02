@@ -18,14 +18,14 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from vlm_distill.data_manifest import read_jsonl, write_jsonl
-from vlm_distill.device_utils import (
+from vlm_distill.data_manifest import read_jsonl, write_jsonl  # noqa: E402
+from vlm_distill.device_utils import (  # noqa: E402
     ensure_stage_uses_cuda,
     print_stage_model_debug,
     resolve_requested_device_map,
     select_model_input_device,
 )
-from vlm_distill.model_loading import apply_attn_implementation, resolve_model_path
+from vlm_distill.model_loading import apply_attn_implementation, resolve_model_path  # noqa: E402
 
 
 def build_prompt(max_elements: int) -> str:
@@ -279,7 +279,6 @@ def _load_reused_teacher_rows(
 
 
 def _load_model(spec: ModelRunSpec, args: argparse.Namespace) -> LoadedInferenceModel:
-    import torch
     from transformers import AutoProcessor, BitsAndBytesConfig
 
     try:

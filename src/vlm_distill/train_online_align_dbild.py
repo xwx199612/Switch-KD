@@ -13,11 +13,19 @@ from typing import Any
 import warnings
 
 from .config_schema import (
-    load_config, format_prompt, resolve_full_label_path, resolve_label_path,
+    load_config,
+    format_prompt,
+    resolve_full_label_path,
+    resolve_label_path,
     resolve_labeled_split_metadata_path,
 )
 from .data_manifest import read_jsonl
-from .device_utils import batch_to_device, resolve_requested_device_map, resolve_training_device_map, select_model_input_device
+from .device_utils import (
+    batch_to_device,
+    resolve_requested_device_map,
+    resolve_training_device_map,
+    select_model_input_device,
+)
 from .loss_switch_kd import full_dynamic_bidirectional_logits_difference
 from .model_loading import apply_attn_implementation, resolve_model_path
 from .mixed_precision import build_mixed_precision_quantization_config
@@ -32,7 +40,6 @@ from .student_trainability import (
     full_projector_modules_to_save_path,
     prepare_projector_for_lora,
     build_a2_lora_scope,
-    resolve_a2_lora_targets,
     resolve_language_model_lora_targets,
     validate_a2_projector_lora_contract,
     validate_a4_attn_mlp_full_projector_contract,
@@ -121,8 +128,8 @@ def _validate_teacher_token_identity(
     if cached_tokens != encoded_tokens:
         mismatch = _first_mismatch_index(cached_tokens, encoded_tokens)
         mismatch_index = mismatch or 0
-        cached_window = cached_tokens[max(0, mismatch_index - 5):mismatch_index + 6]
-        encoded_window = encoded_tokens[max(0, mismatch_index - 5):mismatch_index + 6]
+        cached_window = cached_tokens[max(0, mismatch_index - 5) : mismatch_index + 6]
+        encoded_window = encoded_tokens[max(0, mismatch_index - 5) : mismatch_index + 6]
 
         raise ValueError(
             "Teacher token identity validation failed. "
@@ -152,8 +159,8 @@ def _validate_teacher_student_tokenizer_identity(
     if teacher_ids != student_ids:
         mismatch = _first_mismatch_index(teacher_ids, student_ids)
         mismatch_index = mismatch or 0
-        teacher_window = teacher_ids[max(0, mismatch_index - 5):mismatch_index + 6]
-        student_window = student_ids[max(0, mismatch_index - 5):mismatch_index + 6]
+        teacher_window = teacher_ids[max(0, mismatch_index - 5) : mismatch_index + 6]
+        student_window = student_ids[max(0, mismatch_index - 5) : mismatch_index + 6]
 
         raise ValueError(
             "Teacher/student tokenizer identity validation failed. "
@@ -207,7 +214,9 @@ def _validate_student_label_answer_span(
     target_texts = batch.get("target_text") or batch.get("target_texts")
 
     if target_texts is None:
-        raise ValueError("Missing target_text metadata in batch; cannot validate supervised answer span.")
+        raise ValueError(
+            "Missing target_text metadata in batch; cannot validate supervised answer span."
+        )
 
     supervised_counts: list[int] = []
 
@@ -219,7 +228,9 @@ def _validate_student_label_answer_span(
         decoded = _decode_answer_tokens(student_processor, label_ids)
         expected = str(expected_answer)
 
-        if _canonical_text_for_token_alignment(decoded) != _canonical_text_for_token_alignment(expected):
+        if _canonical_text_for_token_alignment(decoded) != _canonical_text_for_token_alignment(
+            expected
+        ):
             raise ValueError(
                 "Student supervised answer span validation failed. "
                 f"batch_index={batch_index}, "
@@ -277,7 +288,9 @@ def _answer_logits_request_from_labels(labels, *, label_name: str):
     import torch
 
     if not torch.is_tensor(labels) or labels.ndim != 2:
-        raise ValueError(f"{label_name} must have shape [batch, sequence], got {getattr(labels, 'shape', None)}")
+        raise ValueError(
+            f"{label_name} must have shape [batch, sequence], got {getattr(labels, 'shape', None)}"
+        )
     if labels.shape[0] != 1:
         raise ValueError(
             "Online Align DBiLD requires batch_size == 1 for exact answer-position logits; "
@@ -325,7 +338,7 @@ def _answer_logits_request_from_labels(labels, *, label_name: str):
             f"logits_to_keep_count={logits_to_keep_count}, answer_length={answer_length}"
         )
 
-    answer_labels = labels[:, first_supervised:last_supervised + 1]
+    answer_labels = labels[:, first_supervised : last_supervised + 1]
     return logits_to_keep_count, answer_length, answer_labels, trailing_logit_count
 
 
@@ -334,7 +347,9 @@ def _answer_only_lm_loss(answer_logits, answer_labels):
     import torch.nn.functional as F
 
     if answer_logits.ndim != 3 or answer_labels.ndim != 2:
-        raise ValueError("answer_logits must be [batch, answer_len, vocab] and answer_labels [batch, answer_len].")
+        raise ValueError(
+            "answer_logits must be [batch, answer_len, vocab] and answer_labels [batch, answer_len]."
+        )
     if tuple(answer_logits.shape[:2]) != tuple(answer_labels.shape):
         raise ValueError(
             "Answer logits/labels shape mismatch: "
@@ -345,6 +360,7 @@ def _answer_only_lm_loss(answer_logits, answer_labels):
         answer_labels.reshape(-1),
         ignore_index=-100,
     )
+
 
 @dataclass(frozen=True)
 class TrainableSummary:
@@ -407,7 +423,9 @@ class OnlineAlignDataset(VlmTrainingDataset):
             print(f"  sample_id={row['id']}")
             print(f"  student_supervised_label_count={student_supervised_label_count}")
             print(f"  runtime_target_token_count={runtime_target_token_count}")
-            print("  note=startup validation enforces target_text/tokenizer identity before training")
+            print(
+                "  note=startup validation enforces target_text/tokenizer identity before training"
+            )
             self._token_identity_debug_printed = True
         item["sample_id"] = str(row["id"])
         item["image_path"] = str(row["image"])
@@ -430,11 +448,16 @@ class OnlineAlignCollator:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Online teacher-student full-logits DBiLD training.")
+    parser = argparse.ArgumentParser(
+        description="Online teacher-student full-logits DBiLD training."
+    )
     parser.add_argument("--config", required=True, help="Path to YAML config.")
-    parser.add_argument("--max-steps", type=int, default=None, help="Override config.training.max_steps.")
     parser.add_argument(
-        "--smoke-test", action="store_true",
+        "--max-steps", type=int, default=None, help="Override config.training.max_steps."
+    )
+    parser.add_argument(
+        "--smoke-test",
+        action="store_true",
         help="Run exactly one real training step and save an isolated smoke adapter.",
     )
     return parser.parse_args()
@@ -475,15 +498,23 @@ def _build_model_kwargs(
         "local_files_only": True,
     }
     if role == "teacher":
-        resolved_device_map = resolve_requested_device_map(device_map, quantization=quantization, role=role)
+        resolved_device_map = resolve_requested_device_map(
+            device_map, quantization=quantization, role=role
+        )
     else:
-        resolved_device_map = resolve_training_device_map(device_map, quantization=quantization, role=role)
+        resolved_device_map = resolve_training_device_map(
+            device_map, quantization=quantization, role=role
+        )
     if resolved_device_map is not None:
         model_kwargs["device_map"] = resolved_device_map
     apply_attn_implementation(model_kwargs, attn_implementation)
 
     if quantization == "none":
-        dtype = _resolve_torch_dtype(torch_dtype_name) if torch_dtype_name is not None else torch.bfloat16
+        dtype = (
+            _resolve_torch_dtype(torch_dtype_name)
+            if torch_dtype_name is not None
+            else torch.bfloat16
+        )
         if dtype is not None:
             model_kwargs["torch_dtype"] = dtype
     elif quantization == "4bit":
@@ -578,7 +609,8 @@ def _load_student(config):
                 quantization=config.student.quantization,
                 device_map=config.student.device_map,
                 attn_implementation=config.student.attn_implementation,
-                torch_dtype_name="bfloat16", role="student",
+                torch_dtype_name="bfloat16",
+                role="student",
             )
     else:
         model_kwargs, resolved_device_map = _build_model_kwargs(
@@ -589,20 +621,36 @@ def _load_student(config):
             role="student",
         )
     model = AutoModelForVLM.from_pretrained(student_model_path, **model_kwargs)
-    if mixed_merger and config.student.quantization in {"4bit", "8bit"} and "quantization_config" in model_kwargs and allow_fallback is False:
-        validation = validate_mixed_precision_merger(model, config.student.multimodal_projector_path)
+    if (
+        mixed_merger
+        and config.student.quantization in {"4bit", "8bit"}
+        and "quantization_config" in model_kwargs
+        and allow_fallback is False
+    ):
+        validation = validate_mixed_precision_merger(
+            model, config.student.multimodal_projector_path
+        )
         model._mixed_precision_source = "load_time_exclusion"
-        model._main_merger_base_checksum = merger_base_checksum(model, config.student.multimodal_projector_path)
-        model._main_merger_dtype_map = merger_dtype_map(model, config.student.multimodal_projector_path)
+        model._main_merger_base_checksum = merger_base_checksum(
+            model, config.student.multimodal_projector_path
+        )
+        model._main_merger_dtype_map = merger_dtype_map(
+            model, config.student.multimodal_projector_path
+        )
         print(f"main_merger_base_checksum={model._main_merger_base_checksum}")
         print("mixed precision merger validation passed")
         print("training_mixed_precision_source=load_time_exclusion")
         print("main_merger_quantized_before_peft=false")
-        print(f"language_model_linear4bit_count={sum(1 for _, m in model.named_modules() if type(m).__name__ == 'Linear4bit')}")
+        print(
+            f"language_model_linear4bit_count={sum(1 for _, m in model.named_modules() if type(m).__name__ == 'Linear4bit')}"
+        )
         print(f"main_merger_linear_count={validation['main_merger_linear_count']}")
         print(f"training_merger_norm_dtype_before_peft={validation['norm_dtype']}")
-    setattr(model, "_allow_dequantized_projector_fallback",
-            bool(getattr(config.student, "allow_dequantized_projector_fallback", False)))
+    setattr(
+        model,
+        "_allow_dequantized_projector_fallback",
+        bool(getattr(config.student, "allow_dequantized_projector_fallback", False)),
+    )
     return model, processor, student_model_path, resolved_device_map
 
 
@@ -629,19 +677,31 @@ def freeze_student_vision_keep_merger_lm_trainable(
             continue
 
         lora_targets = configured_targets or list(QWEN3_VL_ATTENTION_TARGETS)
-        is_attention_lora = "lora" in lowered and any(target in lowered for target in QWEN3_VL_ATTENTION_TARGETS)
-        is_mlp_lora = "lora" in lowered and any(target in lowered for target in QWEN3_VL_MLP_TARGETS)
+        is_attention_lora = "lora" in lowered and any(
+            target in lowered for target in QWEN3_VL_ATTENTION_TARGETS
+        )
+        is_mlp_lora = "lora" in lowered and any(
+            target in lowered for target in QWEN3_VL_MLP_TARGETS
+        )
         is_projector_lora = ("lora_a" in lowered or "lora_b" in lowered) and (
-            any(parameter_matches_module_path(name, f"{multimodal_projector_path}.{child}")
-                for child in ("linear_fc1", "linear_fc2"))
-            if use_projector_lora else parameter_matches_module_path(name, multimodal_projector_path)
+            any(
+                parameter_matches_module_path(name, f"{multimodal_projector_path}.{child}")
+                for child in ("linear_fc1", "linear_fc2")
+            )
+            if use_projector_lora
+            else parameter_matches_module_path(name, multimodal_projector_path)
         )
         is_peft_original_copy = ".original_module." in name
-        should_train = (use_lora and (
-            (is_attention_lora or is_mlp_lora) and any(target in lowered for target in lora_targets)
-            or is_projector_lora
-        )) or (
-            train_multimodal_projector and not is_peft_original_copy
+        should_train = (
+            use_lora
+            and (
+                (is_attention_lora or is_mlp_lora)
+                and any(target in lowered for target in lora_targets)
+                or is_projector_lora
+            )
+        ) or (
+            train_multimodal_projector
+            and not is_peft_original_copy
             and parameter_matches_module_path(name, multimodal_projector_path)
         )
 
@@ -677,9 +737,13 @@ def freeze_student_vision_keep_merger_lm_trainable(
     print(f"Base LM parameters: {groups['base_lm']}")
     print(f"Other parameters: {groups['other']}")
     if groups["vision_encoder"] != 0:
-        raise RuntimeError("Trainability validation failed: vision encoder parameters are trainable.")
+        raise RuntimeError(
+            "Trainability validation failed: vision encoder parameters are trainable."
+        )
     if train_multimodal_projector and groups["projector"] == 0:
-        raise RuntimeError("Trainability validation failed: configured projector has no trainable parameters.")
+        raise RuntimeError(
+            "Trainability validation failed: configured projector has no trainable parameters."
+        )
     if train_multimodal_projector:
         _validate_a1_trainable_contract(model, multimodal_projector_path)
     return TrainableSummary(
@@ -693,14 +757,25 @@ def freeze_student_vision_keep_merger_lm_trainable(
 
 def _validate_a1_trainable_contract(model, projector_path: str) -> dict[str, int]:
     """Validate the names and ownership of A1's trainable tensors."""
-    trainable = [(name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad]
-    projector = [name for name, _ in trainable if parameter_matches_module_path(name, projector_path)]
+    trainable = [
+        (name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad
+    ]
+    projector = [
+        name for name, _ in trainable if parameter_matches_module_path(name, projector_path)
+    ]
     projector_original = [name for name in projector if ".original_module." in name]
     projector_saved = [name for name in projector if ".modules_to_save.default." in name]
     if projector_original:
-        raise RuntimeError(f"Trainability validation failed: frozen original projector is trainable: {projector_original}")
-    if projector_saved and len({name.split('.modules_to_save.default.', 1)[0] for name in projector_saved}) != 1:
-        raise RuntimeError("Trainability validation failed: duplicate projector trainable copies detected.")
+        raise RuntimeError(
+            f"Trainability validation failed: frozen original projector is trainable: {projector_original}"
+        )
+    if (
+        projector_saved
+        and len({name.split(".modules_to_save.default.", 1)[0] for name in projector_saved}) != 1
+    ):
+        raise RuntimeError(
+            "Trainability validation failed: duplicate projector trainable copies detected."
+        )
     groups = summarize_trainable_groups(model, projector_path)
     if groups["vision_encoder"] or groups["base_llm"] or groups["other"]:
         raise RuntimeError(
@@ -709,8 +784,20 @@ def _validate_a1_trainable_contract(model, projector_path: str) -> dict[str, int
         )
     print("Trainable parameter representatives:")
     for label, predicate in (
-        ("attention LoRA", lambda name: "lora" in name.lower() and any(x in name.lower() for x in ("q_proj", "k_proj", "v_proj", "o_proj"))),
-        ("projector modules_to_save", lambda name: ".modules_to_save.default." in name and parameter_matches_module_path(name, projector_path)),
+        (
+            "attention LoRA",
+            lambda name: (
+                "lora" in name.lower()
+                and any(x in name.lower() for x in ("q_proj", "k_proj", "v_proj", "o_proj"))
+            ),
+        ),
+        (
+            "projector modules_to_save",
+            lambda name: (
+                ".modules_to_save.default." in name
+                and parameter_matches_module_path(name, projector_path)
+            ),
+        ),
     ):
         examples = [name for name, _ in trainable if predicate(name)][:5]
         print(f"  {label}: {examples}")
@@ -760,9 +847,7 @@ def summarize_trainable_lora_targets(model, configured_targets: list[str]) -> Lo
         for target, stats in target_stats.items()
     }
     missing_targets = [
-        target
-        for target, stats in frozen_target_stats.items()
-        if stats.tensor_count == 0
+        target for target, stats in frozen_target_stats.items() if stats.tensor_count == 0
     ]
     return LoraTargetSummary(
         configured_targets=normalized_targets,
@@ -856,7 +941,9 @@ def _build_teacher_inputs(batch, teacher_processor, config):
     return teacher_inputs, teacher_labels.unsqueeze(0)
 
 
-def align_logits_to_supervised_positions(teacher_logits, student_logits, teacher_labels, student_labels):
+def align_logits_to_supervised_positions(
+    teacher_logits, student_logits, teacher_labels, student_labels
+):
     import torch
 
     if teacher_logits.ndim != 3 or student_logits.ndim != 3:
@@ -910,7 +997,10 @@ def align_logits_to_supervised_positions(teacher_logits, student_logits, teacher
             f"teacher_count={teacher_count}, student_count={student_count}."
         )
 
-    if int(teacher_logits_for_align.shape[1]) != teacher_count or int(student_logits_for_align.shape[1]) != student_count:
+    if (
+        int(teacher_logits_for_align.shape[1]) != teacher_count
+        or int(student_logits_for_align.shape[1]) != student_count
+    ):
         raise ValueError(
             "Answer-only logits length does not match supervised label count: "
             f"teacher_logits_len={teacher_logits_for_align.shape[1]} teacher_count={teacher_count} "
@@ -1012,20 +1102,27 @@ def _validate_train_validation_isolation(
     for split, rows in (("training", training_rows), ("validation", validation_rows)):
         for index, row in enumerate(rows, 1):
             if not isinstance(row, dict):
-                raise ValueError(f"Dataset leakage preflight schema validation failed: {split} row {index} is not an object")
+                raise ValueError(
+                    f"Dataset leakage preflight schema validation failed: {split} row {index} is not an object"
+                )
             for field in ("id", "image"):
                 if not isinstance(row.get(field), str) or not row[field].strip():
-                    raise ValueError(f"Dataset leakage preflight schema validation failed: {split} row {index} missing non-empty {field}")
-            normalized[split].append({
-                "id": str(row["id"]).strip(),
-                "image": _normalized_identity(row["image"]),
-            })
+                    raise ValueError(
+                        f"Dataset leakage preflight schema validation failed: {split} row {index} missing non-empty {field}"
+                    )
+            normalized[split].append(
+                {
+                    "id": str(row["id"]).strip(),
+                    "image": _normalized_identity(row["image"]),
+                }
+            )
 
     def values(split: str, field: str) -> list[str]:
         return [item[field] for item in normalized[split]]
 
     counts = {
-        "training_rows": len(training_rows), "validation_rows": len(validation_rows),
+        "training_rows": len(training_rows),
+        "validation_rows": len(validation_rows),
         "training_unique_ids": len(set(values("training", "id"))),
         "validation_unique_ids": len(set(values("validation", "id"))),
         "id_overlap": len(set(values("training", "id")) & set(values("validation", "id"))),
@@ -1037,22 +1134,30 @@ def _validate_train_validation_isolation(
         "content_hash_overlap": 0,
     }
     if hash_images:
+
         def content_hash(path: str) -> str:
             digest = hashlib.sha256()
             with Path(path).open("rb") as handle:
                 for block in iter(lambda: handle.read(1024 * 1024), b""):
                     digest.update(block)
             return digest.hexdigest()
+
         train_hashes = {content_hash(item["image"]) for item in normalized["training"]}
         validation_hashes = {content_hash(item["image"]) for item in normalized["validation"]}
         counts["content_hash_overlap"] = len(train_hashes & validation_hashes)
 
-    bad = any(counts[name] for name in (
-        "id_overlap", "image_overlap",
-        "training_duplicate_ids", "validation_duplicate_ids", "training_duplicate_images",
-        "validation_duplicate_images",
-        "content_hash_overlap",
-    ))
+    bad = any(
+        counts[name]
+        for name in (
+            "id_overlap",
+            "image_overlap",
+            "training_duplicate_ids",
+            "validation_duplicate_ids",
+            "training_duplicate_images",
+            "validation_duplicate_images",
+            "content_hash_overlap",
+        )
+    )
     if bad:
         examples: list[str] = []
         for field, label in (("id", "id"), ("image", "image")):
@@ -1060,27 +1165,48 @@ def _validate_train_validation_isolation(
             for item in sorted(shared)[:10]:
                 train_row = next(row for row in normalized["training"] if row[field] == item)
                 val_row = next(row for row in normalized["validation"] if row[field] == item)
-                examples.append(f"  {label}={item}\n  training_id={train_row['id']}\n  validation_id={val_row['id']}")
+                examples.append(
+                    f"  {label}={item}\n  training_id={train_row['id']}\n  validation_id={val_row['id']}"
+                )
         detail = "\n".join(examples[:10]) or "  duplicate identity inside one split"
         raise ValueError(
             "Dataset leakage detected before training.\n\n"
-            + "\n".join(f"{key}={value}" for key, value in counts.items() if key not in {"training_unique_ids", "validation_unique_ids"})
+            + "\n".join(
+                f"{key}={value}"
+                for key, value in counts.items()
+                if key not in {"training_unique_ids", "validation_unique_ids"}
+            )
             + f"\n\nExamples:\n{detail}\n\ntraining_labels={training_label_path}\nvalidation_labels={validation_label_path}\n\n"
             "Training aborted.\nRegenerate the labeled split with a fixed seed and verify that each source image belongs to exactly one split."
         )
     return counts
 
 
-def _validate_labeled_split_metadata(config, training_rows: list[dict[str, Any]], validation_rows: list[dict[str, Any]], *, training_label_path: Path, validation_label_path: Path) -> None:
+def _validate_labeled_split_metadata(
+    config,
+    training_rows: list[dict[str, Any]],
+    validation_rows: list[dict[str, Any]],
+    *,
+    training_label_path: Path,
+    validation_label_path: Path,
+) -> None:
     metadata_path = resolve_labeled_split_metadata_path(config)
     if not metadata_path.is_file():
-        warnings.warn("labeled_split_metadata.json is missing; row-level isolation checks will still run.", UserWarning, stacklevel=2)
+        warnings.warn(
+            "labeled_split_metadata.json is missing; row-level isolation checks will still run.",
+            UserWarning,
+            stacklevel=2,
+        )
         return
     metadata_rows = read_jsonl(metadata_path)
     if len(metadata_rows) != 1 or not isinstance(metadata_rows[0], dict):
         raise ValueError(f"Invalid labeled split metadata: {metadata_path}")
     metadata = metadata_rows[0]
-    expected_seed = config.training.validation_split_seed if config.training.validation_split_seed is not None else config.seed
+    expected_seed = (
+        config.training.validation_split_seed
+        if config.training.validation_split_seed is not None
+        else config.seed
+    )
     expected_full = resolve_full_label_path(config.data)
     actual_full = hashlib.sha256(expected_full.read_bytes()).hexdigest()
     checks = {
@@ -1089,21 +1215,49 @@ def _validate_labeled_split_metadata(config, training_rows: list[dict[str, Any]]
         "seed": (metadata.get("seed"), expected_seed),
         "ratio": (metadata.get("ratio"), config.training.validation_ratio),
         "full_label_sha256": (metadata.get("full_label_sha256"), actual_full),
-        "training_ids_hash": (metadata.get("training_ids_hash"), hashlib.sha256("\n".join(str(row["id"]) for row in training_rows).encode()).hexdigest()),
-        "validation_ids_hash": (metadata.get("validation_ids_hash"), hashlib.sha256("\n".join(str(row["id"]) for row in validation_rows).encode()).hexdigest()),
+        "training_ids_hash": (
+            metadata.get("training_ids_hash"),
+            hashlib.sha256("\n".join(str(row["id"]) for row in training_rows).encode()).hexdigest(),
+        ),
+        "validation_ids_hash": (
+            metadata.get("validation_ids_hash"),
+            hashlib.sha256(
+                "\n".join(str(row["id"]) for row in validation_rows).encode()
+            ).hexdigest(),
+        ),
     }
     if any(left != right for left, right in checks.values()):
-        mismatches = ", ".join(f"{key}={left!r} expected={right!r}" for key, (left, right) in checks.items() if left != right)
-        raise ValueError(f"Labeled split metadata mismatch; refusing to train: {mismatches}\nmetadata={metadata_path}")
+        mismatches = ", ".join(
+            f"{key}={left!r} expected={right!r}"
+            for key, (left, right) in checks.items()
+            if left != right
+        )
+        raise ValueError(
+            f"Labeled split metadata mismatch; refusing to train: {mismatches}\nmetadata={metadata_path}"
+        )
     metadata_ids = {str(item) for item in metadata.get("validation_ids", [])}
     actual_ids = {str(row["id"]) for row in validation_rows}
     if metadata_ids != actual_ids:
-        raise ValueError(f"Labeled split metadata validation IDs mismatch; refusing to train: metadata={metadata_path}")
+        raise ValueError(
+            f"Labeled split metadata validation IDs mismatch; refusing to train: metadata={metadata_path}"
+        )
 
 
 def _print_dataset_isolation_summary(counts: dict[str, int]) -> None:
     print("Dataset isolation preflight:")
-    for key in ("training_rows", "validation_rows", "training_unique_ids", "validation_unique_ids", "id_overlap", "image_overlap", "training_duplicate_ids", "validation_duplicate_ids", "training_duplicate_images", "validation_duplicate_images", "content_hash_overlap"):
+    for key in (
+        "training_rows",
+        "validation_rows",
+        "training_unique_ids",
+        "validation_unique_ids",
+        "id_overlap",
+        "image_overlap",
+        "training_duplicate_ids",
+        "validation_duplicate_ids",
+        "training_duplicate_images",
+        "validation_duplicate_images",
+        "content_hash_overlap",
+    ):
         print(f"  {key}={counts[key]}")
     print("  status=passed")
 
@@ -1134,13 +1288,19 @@ def _maybe_enable_student_lora(config, model, *, dry_run: bool = False):
         # prepare_model_for_kbit_training may cast floating parameters; do the
         # exact projector conversion after it and before PEFT copies it.
         conversion = dequantize_trainable_projector(
-            model, config.student.multimodal_projector_path,
+            model,
+            config.student.multimodal_projector_path,
             validate_forward=not dry_run,
         )
         model._mixed_precision_source = conversion.get("source", "load_time_exclusion")
         print(f"projector_dequantization={conversion}")
         validate_projector_trainable_parameters(model, config.student.multimodal_projector_path)
-    language_model_targets = config.student.target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
+    language_model_targets = config.student.target_modules or [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+    ]
     target_modules = language_model_targets
     a2_scope = None
     if projector_targets:
@@ -1167,7 +1327,9 @@ def _maybe_enable_student_lora(config, model, *, dry_run: bool = False):
         alpha = config.student.projector_lora_alpha or config.student.lora_alpha
         dropout = config.student.projector_lora_dropout
         if dropout is not None and dropout != config.student.lora_dropout:
-            raise ValueError("PEFT uses one lora_dropout per adapter; projector_lora_dropout must equal lora_dropout for A2.")
+            raise ValueError(
+                "PEFT uses one lora_dropout per adapter; projector_lora_dropout must equal lora_dropout for A2."
+            )
         rank_pattern = {path: rank for path in projector_targets}
         alpha_pattern = {path: alpha for path in projector_targets}
     lora_kwargs = dict(
@@ -1176,7 +1338,8 @@ def _maybe_enable_student_lora(config, model, *, dry_run: bool = False):
         lora_dropout=config.student.lora_dropout,
         target_modules=target_modules,
         modules_to_save=[config.student.multimodal_projector_path]
-        if config.student.train_multimodal_projector else None,
+        if config.student.train_multimodal_projector
+        else None,
         task_type="CAUSAL_LM",
         rank_pattern=rank_pattern,
         alpha_pattern=alpha_pattern,
@@ -1188,19 +1351,26 @@ def _maybe_enable_student_lora(config, model, *, dry_run: bool = False):
         lora_kwargs["layers_pattern"] = layers_pattern
     lora_config = LoraConfig(**lora_kwargs)
     wrapped = get_peft_model(model, lora_config)
-    for attr in ("_main_merger_base_checksum", "_main_merger_dtype_map", "_mixed_precision_source",
-                 "_allow_dequantized_projector_fallback"):
+    for attr in (
+        "_main_merger_base_checksum",
+        "_main_merger_dtype_map",
+        "_mixed_precision_source",
+        "_allow_dequantized_projector_fallback",
+    ):
         if hasattr(model, attr):
             setattr(wrapped, attr, getattr(model, attr))
     validate_projector_trainable_parameters(wrapped, config.student.multimodal_projector_path)
     if hasattr(config.student, "lora_layers_to_transform"):
         allowed_full_projector_path = (
             full_projector_modules_to_save_path(config.student.multimodal_projector_path)
-            if config.student.train_multimodal_projector and not getattr(config.student, "use_projector_lora", False)
+            if config.student.train_multimodal_projector
+            and not getattr(config.student, "use_projector_lora", False)
             else None
         )
         validate_language_model_lora_scope(
-            wrapped, layers_to_transform, language_model_targets,
+            wrapped,
+            layers_to_transform,
+            language_model_targets,
             projector_path=config.student.multimodal_projector_path,
             allowed_projector_lora_paths=projector_targets,
             allowed_full_projector_path=allowed_full_projector_path,
@@ -1222,34 +1392,41 @@ def _apply_student_train_setup(config, model, *, dry_run: bool = False):
             model.config.use_cache = False
     print(f"student_gradient_checkpointing_enabled={str(checkpointing_enabled).lower()}")
     print(
-        "student_is_gradient_checkpointing="
-        f"{str(bool(student_is_gradient_checkpointing)).lower()}"
+        f"student_is_gradient_checkpointing={str(bool(student_is_gradient_checkpointing)).lower()}"
     )
     print(f"student_gradient_checkpointing_use_reentrant={use_reentrant}")
     print(f"student_gradient_checkpointing_module_count={len(checkpointing_modules)}")
     print(f"student_gradient_checkpointing_module_examples={checkpointing_modules[:20]}")
     validate_projector_path(model, config.student.multimodal_projector_path)
-    mixed_merger = bool(
-        getattr(config.student, "train_multimodal_projector", False)
-        or getattr(config.student, "use_projector_lora", False)
-    ) and config.student.quantization in {"4bit", "8bit"} and not bool(
-        getattr(config.student, "allow_dequantized_projector_fallback", False)
+    mixed_merger = (
+        bool(
+            getattr(config.student, "train_multimodal_projector", False)
+            or getattr(config.student, "use_projector_lora", False)
+        )
+        and config.student.quantization in {"4bit", "8bit"}
+        and not bool(getattr(config.student, "allow_dequantized_projector_fallback", False))
     )
     if mixed_merger:
         # prepare_model_for_kbit_training may promote floating parameters to FP32;
         # restore the explicit deployment contract without quantize->dequantize.
         from .student_trainability import get_module_by_exact_path
         import torch
+
         prepared_merger = get_module_by_exact_path(model, config.student.multimodal_projector_path)
         for child_name in ("linear_fc1", "linear_fc2"):
             getattr(prepared_merger, child_name).to(dtype=torch.bfloat16)
-        validation = validate_mixed_precision_merger(model, config.student.multimodal_projector_path)
-        print(f"training_merger_norm_dtype_after_prepare_model_for_kbit_training={validation['norm_dtype']}")
+        validation = validate_mixed_precision_merger(
+            model, config.student.multimodal_projector_path
+        )
+        print(
+            f"training_merger_norm_dtype_after_prepare_model_for_kbit_training={validation['norm_dtype']}"
+        )
     if config.student.train_multimodal_projector:
         # Do this before PEFT modules_to_save copies the module.
         if not config.student.use_lora:
             conversion = dequantize_trainable_projector(
-                model, config.student.multimodal_projector_path,
+                model,
+                config.student.multimodal_projector_path,
                 validate_forward=not dry_run,
             )
             model._mixed_precision_source = conversion.get("source", "load_time_exclusion")
@@ -1270,10 +1447,16 @@ def _apply_student_train_setup(config, model, *, dry_run: bool = False):
             print("Experiment mode: A4 attention + MLP LoRA + full projector")
         else:
             print("Experiment mode: A3 attention + MLP LoRA, projector frozen")
-        print(f"Attention LoRA: targets={','.join(QWEN3_VL_ATTENTION_TARGETS)} module_count=144 parameter_count={groups['attention_lora']}")
-        print(f"MLP LoRA: targets={','.join(QWEN3_VL_MLP_TARGETS)} module_count=108 parameter_count={groups['llm_mlp_lora']}")
+        print(
+            f"Attention LoRA: targets={','.join(QWEN3_VL_ATTENTION_TARGETS)} module_count=144 parameter_count={groups['attention_lora']}"
+        )
+        print(
+            f"MLP LoRA: targets={','.join(QWEN3_VL_MLP_TARGETS)} module_count=108 parameter_count={groups['llm_mlp_lora']}"
+        )
         if config.student.train_multimodal_projector:
-            print("Full projector: path=model.visual.merger storage=modules_to_save.default dtype=bfloat16")
+            print(
+                "Full projector: path=model.visual.merger storage=modules_to_save.default dtype=bfloat16"
+            )
         else:
             print("Projector trainable count = 0")
             print("Projector LoRA parameter count = 0")
@@ -1282,14 +1465,19 @@ def _apply_student_train_setup(config, model, *, dry_run: bool = False):
         print(f"other trainable count = {groups['other']}")
     if config.student.train_multimodal_projector:
         validate_projector_trainable_parameters(model, config.student.multimodal_projector_path)
-    if (has_mlp_lora
-            and config.student.train_multimodal_projector
-            and not config.student.use_projector_lora):
+    if (
+        has_mlp_lora
+        and config.student.train_multimodal_projector
+        and not config.student.use_projector_lora
+    ):
         validate_a4_attn_mlp_full_projector_contract(
             model, projector_path=config.student.multimodal_projector_path
         )
-    elif (has_mlp_lora and not config.student.train_multimodal_projector
-          and not config.student.use_projector_lora):
+    elif (
+        has_mlp_lora
+        and not config.student.train_multimodal_projector
+        and not config.student.use_projector_lora
+    ):
         validate_a3_attn_mlp_lora_contract(
             model, projector_path=config.student.multimodal_projector_path
         )
@@ -1311,11 +1499,14 @@ def _apply_student_train_setup(config, model, *, dry_run: bool = False):
         merger = model
         try:
             from .student_trainability import get_module_by_exact_path
+
             merger = get_module_by_exact_path(model, config.student.multimodal_projector_path)
             active = getattr(getattr(merger, "modules_to_save", None), "default", None)
             if active is not None:
                 active.norm.to(dtype=__import__("torch").float32)
-                print(f"training_merger_norm_dtype_modules_to_save={next(active.norm.parameters()).dtype}")
+                print(
+                    f"training_merger_norm_dtype_modules_to_save={next(active.norm.parameters()).dtype}"
+                )
         except AttributeError:
             pass
     return model, summary
@@ -1371,9 +1562,7 @@ def _student_gradient_checkpointing_use_reentrant(model) -> bool | None:
         keywords = getattr(checkpoint_func, "keywords", None)
 
         if isinstance(keywords, dict) and "use_reentrant" in keywords:
-            observed.append(
-                (module_name or "<root>", bool(keywords["use_reentrant"]))
-            )
+            observed.append((module_name or "<root>", bool(keywords["use_reentrant"])))
 
     if not observed:
         config = getattr(model, "config", None)
@@ -1385,8 +1574,7 @@ def _student_gradient_checkpointing_use_reentrant(model) -> bool | None:
     values = {value for _, value in observed}
     if len(values) > 1:
         raise RuntimeError(
-            "Student gradient checkpoint modules disagree about use_reentrant: "
-            f"{observed[:20]}"
+            f"Student gradient checkpoint modules disagree about use_reentrant: {observed[:20]}"
         )
 
     return observed[0][1]
@@ -1413,22 +1601,26 @@ def _student_gradient_checkpointing_modules(model):
 def _build_optimizer(config, model):
     import torch
 
-    all_trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
-    trainable_items = [(name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad]
+    all_trainable_parameters = [
+        parameter for parameter in model.parameters() if parameter.requires_grad
+    ]
+    trainable_items = [
+        (name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad
+    ]
     invalid = [
-        name for name, parameter in model.named_parameters()
+        name
+        for name, parameter in model.named_parameters()
         if parameter.requires_grad and not parameter.is_floating_point()
     ]
     if invalid:
-        raise RuntimeError(
-            "Optimizer received non-floating trainable parameters: "
-            f"{invalid}"
-        )
+        raise RuntimeError(f"Optimizer received non-floating trainable parameters: {invalid}")
     if not all_trainable_parameters:
         raise RuntimeError("Optimizer validation failed: no trainable parameters.")
     all_trainable_ids = {id(parameter) for parameter in all_trainable_parameters}
     if len(all_trainable_ids) != len(all_trainable_parameters):
-        raise RuntimeError("Optimizer validation failed: duplicate trainable parameter object identities.")
+        raise RuntimeError(
+            "Optimizer validation failed: duplicate trainable parameter object identities."
+        )
     projector_lr = getattr(config.training, "projector_learning_rate", None)
     projector_group_enabled = (
         bool(config.student.train_multimodal_projector)
@@ -1447,9 +1639,7 @@ def _build_optimizer(config, model):
                 f"{config.student.multimodal_projector_path!r}"
             ) from exc
         projector_parameter_ids = {
-            id(parameter)
-            for parameter in projector_module.parameters()
-            if parameter.requires_grad
+            id(parameter) for parameter in projector_module.parameters() if parameter.requires_grad
         }
         if not projector_parameter_ids:
             raise RuntimeError(
@@ -1466,28 +1656,36 @@ def _build_optimizer(config, model):
     default_ids = {id(parameter) for parameter in default_parameters}
     projector_ids = {id(parameter) for parameter in projector_parameters}
     if all_trainable_ids != default_ids | projector_ids:
-        raise RuntimeError("Optimizer validation failed: trainable parameter partition has missing parameters.")
+        raise RuntimeError(
+            "Optimizer validation failed: trainable parameter partition has missing parameters."
+        )
     if not default_ids.isdisjoint(projector_ids):
         raise RuntimeError("Optimizer validation failed: default and projector groups overlap.")
     parameter_groups = []
     if default_parameters:
-        parameter_groups.append({
-            "params": default_parameters,
-            "lr": config.training.learning_rate,
-            "group_name": "default",
-        })
+        parameter_groups.append(
+            {
+                "params": default_parameters,
+                "lr": config.training.learning_rate,
+                "group_name": "default",
+            }
+        )
     if projector_parameters:
-        parameter_groups.append({
-            "params": projector_parameters,
-            "lr": projector_lr,
-            "group_name": "multimodal_projector",
-        })
+        parameter_groups.append(
+            {
+                "params": projector_parameters,
+                "lr": projector_lr,
+                "group_name": "multimodal_projector",
+            }
+        )
     if not parameter_groups:
         raise RuntimeError("Optimizer validation failed: no trainable parameters.")
     groups = summarize_trainable_groups(model, config.student.multimodal_projector_path)
     print("Trainable parameter groups:")
     print(f"optimizer_unique_parameter_tensors={len(all_trainable_parameters)}")
-    print(f"optimizer_total_numel={sum(parameter.numel() for parameter in all_trainable_parameters)}")
+    print(
+        f"optimizer_total_numel={sum(parameter.numel() for parameter in all_trainable_parameters)}"
+    )
     for key in ("attention_lora", "projector", "vision_encoder", "base_llm", "other"):
         print(f"  {key}={groups.get(key, 0)}")
     if groups.get("attention_lora", 0) <= 0:
@@ -1510,7 +1708,8 @@ def _build_optimizer(config, model):
     print(f"other_numel={groups['other']}")
     print(f"optimizer_trainable_names={len(trainable_items)}")
     print("Optimizer parameter groups:")
-    format_lr = lambda value: f"{float(value):.10f}".rstrip("0").rstrip(".")
+    def format_lr(value):
+        return f"{float(value):.10f}".rstrip("0").rstrip(".")
     print(
         f"  default: trainable_parameters={sum(p.numel() for p in default_parameters)} "
         f"tensors={len(default_parameters)} learning_rate={format_lr(config.training.learning_rate)}"
@@ -1528,7 +1727,9 @@ def _build_optimizer(config, model):
     return torch.optim.AdamW(parameter_groups)
 
 
-def _weighted_online_align_loss(lm_loss, align_loss, *, lm_loss_weight: float, dbild_loss_weight: float):
+def _weighted_online_align_loss(
+    lm_loss, align_loss, *, lm_loss_weight: float, dbild_loss_weight: float
+):
     return lm_loss_weight * lm_loss + dbild_loss_weight * align_loss
 
 
@@ -1555,6 +1756,7 @@ def _dataloader(dataset, processor, batch_size: int):
 
 def _distributed_state() -> tuple[bool, int, int]:
     import torch.distributed as dist
+
     if not dist.is_available() or not dist.is_initialized():
         return False, 0, 1
     return True, dist.get_rank(), dist.get_world_size()
@@ -1564,8 +1766,13 @@ def _reduce_validation_totals(total: Any, count: int) -> tuple[float, int]:
     """Reduce loss sum/count, making uneven validation shards mathematically correct."""
     import torch
     import torch.distributed as dist
+
     active, _rank, _world = _distributed_state()
-    device = torch.device("cuda", torch.cuda.current_device()) if active and dist.get_backend() == "nccl" else torch.device("cpu")
+    device = (
+        torch.device("cuda", torch.cuda.current_device())
+        if active and dist.get_backend() == "nccl"
+        else torch.device("cpu")
+    )
     values = torch.tensor([float(total), float(count)], dtype=torch.float64, device=device)
     if active:
         dist.all_reduce(values, op=dist.ReduceOp.SUM)
@@ -1575,6 +1782,7 @@ def _reduce_validation_totals(total: Any, count: int) -> tuple[float, int]:
 def _broadcast_early_stop(flag: bool) -> bool:
     import torch
     import torch.distributed as dist
+
     active, rank, _world = _distributed_state()
     if not active:
         return bool(flag)
@@ -1583,9 +1791,14 @@ def _broadcast_early_stop(flag: bool) -> bool:
     return bool(value.item())
 
 
-def _early_stopping_update(current_val_loss: float, best_val_loss: float,
-                           epochs_without_improvement: int, *, min_delta: float,
-                           patience: int) -> tuple[float, int, bool, bool]:
+def _early_stopping_update(
+    current_val_loss: float,
+    best_val_loss: float,
+    epochs_without_improvement: int,
+    *,
+    min_delta: float,
+    patience: int,
+) -> tuple[float, int, bool, bool]:
     """Pure state transition used by the loop and unit tests."""
     improved = current_val_loss < best_val_loss - min_delta
     next_best = current_val_loss if improved else best_val_loss
@@ -1595,7 +1808,9 @@ def _early_stopping_update(current_val_loss: float, best_val_loss: float,
 
 def _jsonable_config(config) -> dict[str, Any]:
     from dataclasses import asdict
+
     value = asdict(config)
+
     def convert(item):
         if isinstance(item, Path):
             return str(item)
@@ -1604,30 +1819,46 @@ def _jsonable_config(config) -> dict[str, Any]:
         if isinstance(item, list):
             return [convert(val) for val in item]
         return item
+
     return convert(value)
 
 
-def _save_best_checkpoint(model, processor, optimizer, scheduler, *, checkpoint_dir: Path,
-                           epoch: int, global_step: int, best_val_loss: float,
-                           epochs_without_improvement: int, config) -> None:
+def _save_best_checkpoint(
+    model,
+    processor,
+    optimizer,
+    scheduler,
+    *,
+    checkpoint_dir: Path,
+    epoch: int,
+    global_step: int,
+    best_val_loss: float,
+    epochs_without_improvement: int,
+    config,
+) -> None:
     import torch
+
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(checkpoint_dir)
     processor.save_pretrained(checkpoint_dir)
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
-        "epoch": epoch,
-        "global_step": global_step,
-        "best_val_loss": best_val_loss,
-        "epochs_without_improvement": epochs_without_improvement,
-        "resolved_config": _jsonable_config(config),
-    }, checkpoint_dir / "training_state.pt")
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+            "epoch": epoch,
+            "global_step": global_step,
+            "best_val_loss": best_val_loss,
+            "epochs_without_improvement": epochs_without_improvement,
+            "resolved_config": _jsonable_config(config),
+        },
+        checkpoint_dir / "training_state.pt",
+    )
 
 
 def _restore_best_checkpoint(model, optimizer, scheduler, checkpoint_dir: Path) -> dict[str, Any]:
     import torch
+
     state = torch.load(checkpoint_dir / "training_state.pt", map_location="cpu", weights_only=False)
     model.load_state_dict(state["model_state_dict"], strict=False)
     if optimizer is not None and state.get("optimizer_state_dict") is not None:
@@ -1643,22 +1874,39 @@ def _restore_best_checkpoint(model, optimizer, scheduler, checkpoint_dir: Path) 
     return state
 
 
-def _validate_epoch(*, rows, config, student_model, teacher_model, student_processor,
-                    teacher_processor, student_input_device, teacher_input_device,
-                    batch_size: int, epoch: int, global_step: int,
-                    best_val_loss: float, epochs_without_improvement: int) -> dict[str, Any]:
+def _validate_epoch(
+    *,
+    rows,
+    config,
+    student_model,
+    teacher_model,
+    student_processor,
+    teacher_processor,
+    student_input_device,
+    teacher_input_device,
+    batch_size: int,
+    epoch: int,
+    global_step: int,
+    best_val_loss: float,
+    epochs_without_improvement: int,
+) -> dict[str, Any]:
     """Evaluate the exact online Align DBiLD objective without touching gradients."""
     import torch
+
     dataset = OnlineAlignDataset(rows, config, student_processor)
     active, _rank, world_size = _distributed_state()
     sampler = None
     if active:
         import torch.utils.data.distributed
+
         sampler = torch.utils.data.distributed.DistributedSampler(
             dataset, num_replicas=world_size, rank=_rank, shuffle=False, drop_last=False
         )
     loader = torch.utils.data.DataLoader(
-        dataset, batch_size=batch_size, sampler=sampler, shuffle=False if sampler is not None else False,
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        shuffle=False if sampler is not None else False,
         collate_fn=OnlineAlignCollator(student_processor),
     )
     teacher_was_training = teacher_model.training
@@ -1669,36 +1917,68 @@ def _validate_epoch(*, rows, config, student_model, teacher_model, student_proce
     try:
         with torch.no_grad():
             for batch in loader:
-                teacher_inputs, teacher_labels = _build_teacher_inputs(batch, teacher_processor, config)
+                teacher_inputs, teacher_labels = _build_teacher_inputs(
+                    batch, teacher_processor, config
+                )
                 teacher_inputs = batch_to_device(teacher_inputs, teacher_input_device)
                 teacher_labels = teacher_labels.to(device=teacher_input_device)
                 student_batch = batch_to_device(
-                    {key: value for key, value in batch.items()
-                     if key not in {"sample_id", "image_path", "teacher_prompt", "target_text", "prompt_token_len"}},
+                    {
+                        key: value
+                        for key, value in batch.items()
+                        if key
+                        not in {
+                            "sample_id",
+                            "image_path",
+                            "teacher_prompt",
+                            "target_text",
+                            "prompt_token_len",
+                        }
+                    },
                     student_input_device,
                 )
                 labels = student_batch["labels"]
-                t_keep, t_len, t_labels, _ = _answer_logits_request_from_labels(teacher_labels, label_name="teacher_labels")
-                s_keep, s_len, s_labels, _ = _answer_logits_request_from_labels(labels, label_name="student_labels")
-                teacher_inputs_no_labels = {key: value for key, value in teacher_inputs.items() if key != "labels"}
-                student_inputs = {key: value for key, value in student_batch.items() if key != "labels"}
+                t_keep, t_len, t_labels, _ = _answer_logits_request_from_labels(
+                    teacher_labels, label_name="teacher_labels"
+                )
+                s_keep, s_len, s_labels, _ = _answer_logits_request_from_labels(
+                    labels, label_name="student_labels"
+                )
+                teacher_inputs_no_labels = {
+                    key: value for key, value in teacher_inputs.items() if key != "labels"
+                }
+                student_inputs = {
+                    key: value for key, value in student_batch.items() if key != "labels"
+                }
                 with _autocast_context(config.training.mixed_precision):
-                    teacher_logits = teacher_model(**teacher_inputs_no_labels, logits_to_keep=t_keep).logits[:, :t_len, :]
-                    student_logits = student_model(**student_inputs, logits_to_keep=s_keep).logits[:, :s_len, :]
+                    teacher_logits = teacher_model(
+                        **teacher_inputs_no_labels, logits_to_keep=t_keep
+                    ).logits[:, :t_len, :]
+                    student_logits = student_model(**student_inputs, logits_to_keep=s_keep).logits[
+                        :, :s_len, :
+                    ]
                     lm_loss = _answer_only_lm_loss(student_logits, s_labels)
-                    (teacher_logits, student_logits, mask, *_rest) = align_logits_to_supervised_positions(
-                        teacher_logits, student_logits, t_labels, s_labels
+                    (teacher_logits, student_logits, mask, *_rest) = (
+                        align_logits_to_supervised_positions(
+                            teacher_logits, student_logits, t_labels, s_labels
+                        )
                     )
                     dbild_loss = full_dynamic_bidirectional_logits_difference(
-                        reference_logits=teacher_logits, target_logits=student_logits,
-                        attention_mask=mask, temperature=config.distillation.kd_temperature,
-                        top_k=config.distillation.dbild_top_k, top_k_mode=config.distillation.dbild_top_k_mode,
+                        reference_logits=teacher_logits,
+                        target_logits=student_logits,
+                        attention_mask=mask,
+                        temperature=config.distillation.kd_temperature,
+                        top_k=config.distillation.dbild_top_k,
+                        top_k_mode=config.distillation.dbild_top_k_mode,
                         kneedle_candidate_k=config.distillation.dbild_kneedle_candidate_k,
-                        min_top_k=config.distillation.dbild_min_top_k, max_top_k=config.distillation.dbild_max_top_k,
+                        min_top_k=config.distillation.dbild_min_top_k,
+                        max_top_k=config.distillation.dbild_max_top_k,
                         kl_mode=config.distillation.dbild_kl_mode,
                     )
                     total_loss = _weighted_online_align_loss(
-                        lm_loss, dbild_loss, lm_loss_weight=config.distillation.lm_loss_weight,
+                        lm_loss,
+                        dbild_loss,
+                        lm_loss_weight=config.distillation.lm_loss_weight,
                         dbild_loss_weight=config.distillation.dbild_loss_weight,
                     )
                 sums["lm"] += float(lm_loss.detach().float().item())
@@ -1715,14 +1995,20 @@ def _validate_epoch(*, rows, config, student_model, teacher_model, student_proce
         raise ValueError("Validation manifest produced no batches.")
     values = {f"val_{key}_loss": reduced[key][0] / denominator for key in sums}
     next_best, next_bad, improved, _should_stop = _early_stopping_update(
-        values["val_total_loss"], best_val_loss, epochs_without_improvement,
+        values["val_total_loss"],
+        best_val_loss,
+        epochs_without_improvement,
         min_delta=config.training.early_stopping_min_delta,
         patience=config.training.early_stopping_patience,
     )
     return {
-        "epoch": epoch, "global_step": global_step, **values,
-        "best_val_loss": next_best, "epochs_without_improvement": next_bad,
-        "is_best": improved, "early_stopped": False,
+        "epoch": epoch,
+        "global_step": global_step,
+        **values,
+        "best_val_loss": next_best,
+        "epochs_without_improvement": next_bad,
+        "is_best": improved,
+        "early_stopped": False,
     }
 
 
@@ -1735,9 +2021,13 @@ def _gpu_mem_stats() -> tuple[int, int]:
 
 
 def _dtype_summary(model, predicate) -> str:
-    dtypes = sorted({str(parameter.dtype).replace("torch.", "")
-                     for name, parameter in model.named_parameters()
-                     if parameter.requires_grad and predicate(name)})
+    dtypes = sorted(
+        {
+            str(parameter.dtype).replace("torch.", "")
+            for name, parameter in model.named_parameters()
+            if parameter.requires_grad and predicate(name)
+        }
+    )
     return ",".join(dtypes) if dtypes else "none"
 
 
@@ -1746,17 +2036,21 @@ def _print_dry_run_summary(config, model) -> None:
     attention_modules = {
         name.lower().rsplit(".lora_", 1)[0]
         for name, parameter in model.named_parameters()
-        if parameter.requires_grad and ".lora_" in name.lower()
+        if parameter.requires_grad
+        and ".lora_" in name.lower()
         and any(f".{target}." in name.lower() for target in QWEN3_VL_ATTENTION_TARGETS)
     }
     mlp_modules = {
         name.lower().rsplit(".lora_", 1)[0]
         for name, parameter in model.named_parameters()
-        if parameter.requires_grad and ".lora_" in name.lower()
+        if parameter.requires_grad
+        and ".lora_" in name.lower()
         and any(f".{target}." in name.lower() for target in QWEN3_VL_MLP_TARGETS)
     }
-    projector_mode = "modules_to_save.default" if config.student.train_multimodal_projector else (
-        "projector_lora" if config.student.use_projector_lora else "none"
+    projector_mode = (
+        "modules_to_save.default"
+        if config.student.train_multimodal_projector
+        else ("projector_lora" if config.student.use_projector_lora else "none")
     )
     print("Dry-run startup summary")
     print(f"attention target modules = {len(attention_modules)}")
@@ -1777,15 +2071,22 @@ def _print_dry_run_summary(config, model) -> None:
     print(f"vision trainable = {groups['vision_encoder']}")
     print(f"base LM trainable = {groups['base_lm']}")
     print(f"other trainable = {groups['other']}")
-    is_attention = lambda name: any(f".{target}." in name.lower() for target in QWEN3_VL_ATTENTION_TARGETS)
-    is_mlp = lambda name: any(f".{target}." in name.lower() for target in QWEN3_VL_MLP_TARGETS)
-    is_projector = lambda name: parameter_matches_module_path(name, config.student.multimodal_projector_path)
+    def is_attention(name):
+        return any(f".{target}." in name.lower() for target in QWEN3_VL_ATTENTION_TARGETS)
+
+    def is_mlp(name):
+        return any(f".{target}." in name.lower() for target in QWEN3_VL_MLP_TARGETS)
+
+    def is_projector(name):
+        return parameter_matches_module_path(name, config.student.multimodal_projector_path)
     print(f"attention dtype summary = {_dtype_summary(model, is_attention)}")
     print(f"MLP dtype summary = {_dtype_summary(model, is_mlp)}")
     print(f"projector dtype summary = {_dtype_summary(model, is_projector)}")
     allocated, reserved = _gpu_mem_stats()
     print(f"GPU allocated/reserved memory = {allocated}/{reserved} bytes")
-    print("dry-run complete: optimizer=not_created forward=not_run backward=not_run checkpoint=not_written")
+    print(
+        "dry-run complete: optimizer=not_created forward=not_run backward=not_run checkpoint=not_written"
+    )
 
 
 def _optimizer_lr_summary(optimizer) -> dict[str, float]:
@@ -1813,8 +2114,7 @@ def _gpu_peak_memory_allocated() -> int:
     if not torch.cuda.is_available():
         return 0
     return sum(
-        int(torch.cuda.max_memory_allocated(index))
-        for index in range(torch.cuda.device_count())
+        int(torch.cuda.max_memory_allocated(index)) for index in range(torch.cuda.device_count())
     )
 
 
@@ -1822,7 +2122,7 @@ SMOKE_ADAPTER_DIR = Path("outputs/lora_ablation/smoke/stage1_a3_one_step/adapter
 
 
 def _format_gib(byte_count: int) -> str:
-    return f"{byte_count / (1024 ** 3):.3f} GiB"
+    return f"{byte_count / (1024**3):.3f} GiB"
 
 
 def _print_gpu_memory_stage(stage: str) -> None:
@@ -1845,7 +2145,9 @@ def _gradient_group(name: str, projector_path: str) -> str:
         if parameter_matches_module_path(name, projector_path):
             return "projector_lora"
         return "other"
-    if ".modules_to_save.default." in lowered and parameter_matches_module_path(name, projector_path):
+    if ".modules_to_save.default." in lowered and parameter_matches_module_path(
+        name, projector_path
+    ):
         return "full_projector"
     if any(term in lowered for term in ("visual", "vision_tower", "vision_model", "patch_embed")):
         return "vision_encoder"
@@ -1866,8 +2168,13 @@ def collect_gradient_contract(model, projector_path: str) -> dict[str, dict[str,
             "gradient_norm": 0.0,
         }
         for key in (
-            "attention_lora", "mlp_lora", "full_projector", "projector_lora",
-            "vision_encoder", "base_lm", "other",
+            "attention_lora",
+            "mlp_lora",
+            "full_projector",
+            "projector_lora",
+            "vision_encoder",
+            "base_lm",
+            "other",
         )
     }
     import torch
@@ -1893,32 +2200,42 @@ def collect_gradient_contract(model, projector_path: str) -> dict[str, dict[str,
     return groups
 
 
-def validate_smoke_gradient_contract(model, projector_path: str) -> dict[str, dict[str, float | int]]:
+def validate_smoke_gradient_contract(
+    model, projector_path: str
+) -> dict[str, dict[str, float | int]]:
     groups = collect_gradient_contract(model, projector_path)
     for name, stats in groups.items():
         print(f"gradient_group={name} {stats}")
     for name in ("attention_lora", "mlp_lora", "full_projector"):
         stats = groups[name]
         if stats["parameter_count"] <= 0:
-            raise RuntimeError(f"Smoke gradient contract failed: {name} has no trainable parameters.")
+            raise RuntimeError(
+                f"Smoke gradient contract failed: {name} has no trainable parameters."
+            )
         if stats["tensors_with_grad"] <= 0:
             raise RuntimeError(f"Smoke gradient contract failed: {name} has no gradient tensors.")
         if stats["nonfinite_gradient_tensors"]:
-            raise FloatingPointError(f"Smoke gradient contract failed: {name} has non-finite gradients.")
+            raise FloatingPointError(
+                f"Smoke gradient contract failed: {name} has non-finite gradients."
+            )
         if stats["gradient_norm"] <= 0.0:
             raise RuntimeError(f"Smoke gradient contract failed: {name} gradient norm is zero.")
     if groups["projector_lora"]["parameter_count"] != 0:
         raise RuntimeError("Smoke gradient contract failed: projector LoRA is trainable.")
     for name in ("vision_encoder", "base_lm", "other"):
         if groups[name]["parameter_count"] or groups[name]["tensors_with_grad"]:
-            raise RuntimeError(f"Smoke gradient contract failed: unexpected trainable group {name}.")
+            raise RuntimeError(
+                f"Smoke gradient contract failed: unexpected trainable group {name}."
+            )
     return groups
 
 
 def validate_smoke_losses(lm_loss, dbild_loss, vsd_loss, total_loss) -> None:
     import torch
 
-    values = torch.stack(tuple(value.detach().float() for value in (lm_loss, dbild_loss, vsd_loss, total_loss)))
+    values = torch.stack(
+        tuple(value.detach().float() for value in (lm_loss, dbild_loss, vsd_loss, total_loss))
+    )
     if not torch.isfinite(values).all().item():
         raise FloatingPointError("Smoke loss contract failed: loss is non-finite.")
     if float(total_loss.detach().float().item()) <= 0.0:
@@ -1944,9 +2261,9 @@ def _normalize_peft_module_path(path: str) -> str:
     """Normalize PEFT's model prefixes while preserving exact module boundaries."""
     normalized = ".".join(part for part in str(path).strip(".").split(".") if part)
     while normalized.startswith("base_model.model."):
-        normalized = normalized[len("base_model.model."):]
+        normalized = normalized[len("base_model.model.") :]
     if normalized.startswith("model."):
-        normalized = normalized[len("model."):]
+        normalized = normalized[len("model.") :]
     return normalized
 
 
@@ -1957,12 +2274,14 @@ def is_saved_full_projector_key(key: str, projector_path: str) -> bool:
     prefix = f"{normalized_projector}."
     if not normalized_key.startswith(prefix):
         return False
-    suffix = normalized_key[len(prefix):]
+    suffix = normalized_key[len(prefix) :]
     return suffix in _FULL_PROJECTOR_TENSOR_SUFFIXES
 
 
 def _is_key_under_module(key: str, module_path: str) -> bool:
-    return _normalize_peft_module_path(key).startswith(f"{_normalize_peft_module_path(module_path)}.")
+    return _normalize_peft_module_path(key).startswith(
+        f"{_normalize_peft_module_path(module_path)}."
+    )
 
 
 def _validate_smoke_adapter_checkpoint(
@@ -1973,7 +2292,9 @@ def _validate_smoke_adapter_checkpoint(
     config_path = adapter_dir / "adapter_config.json"
     weights_path = adapter_dir / "adapter_model.safetensors"
     if not config_path.is_file() or not weights_path.is_file():
-        raise RuntimeError(f"Smoke adapter is incomplete: expected {config_path} and {weights_path}.")
+        raise RuntimeError(
+            f"Smoke adapter is incomplete: expected {config_path} and {weights_path}."
+        )
     with config_path.open(encoding="utf-8") as handle:
         adapter_config = json.load(handle)
     modules_to_save = adapter_config.get("modules_to_save")
@@ -2013,7 +2334,9 @@ def _validate_smoke_adapter_checkpoint(
         set(required_projector_tensors) - set(_FULL_PROJECTOR_TENSOR_SUFFIXES)
     )
     if invalid_required_projector_tensors:
-        raise ValueError(f"Unknown required projector tensors: {invalid_required_projector_tensors!r}")
+        raise ValueError(
+            f"Unknown required projector tensors: {invalid_required_projector_tensors!r}"
+        )
     missing_projector_tensors = sorted(required_projector_tensors - saved_projector_suffixes)
     print(f"adapter_config modules_to_save={modules_to_save!r}")
     print(f"projector-related keys={sorted(projector_related_keys)!r}")
@@ -2048,7 +2371,9 @@ def _validate_smoke_adapter_checkpoint(
     print(f"Smoke adapter checkpoint validation passed: path={adapter_dir}")
 
 
-def validate_adapter_checkpoint(adapter_dir: Path, config, projector_path: str | None = None) -> None:
+def validate_adapter_checkpoint(
+    adapter_dir: Path, config, projector_path: str | None = None
+) -> None:
     """Validate an adapter against the A0/A1/A2/A3 contract in *config*.
 
     The one-step smoke checkpoint is deliberately A3-shaped, but a normal
@@ -2067,7 +2392,8 @@ def validate_adapter_checkpoint(adapter_dir: Path, config, projector_path: str |
     configured_lm_targets = set(student.target_modules or [])
     expected_projector_targets = (
         {f"{projector_path}.linear_fc1", f"{projector_path}.linear_fc2"}
-        if student.use_projector_lora else set()
+        if student.use_projector_lora
+        else set()
     )
     expected_targets = configured_lm_targets | expected_projector_targets
     actual_targets = set(adapter_config.get("target_modules", []))
@@ -2094,9 +2420,11 @@ def validate_adapter_checkpoint(adapter_dir: Path, config, projector_path: str |
         raise RuntimeError("A0/A2 validation failed: modules_to_save projector is not allowed")
 
     from safetensors.torch import load_file
+
     keys = list(load_file(str(weights_path), device="cpu"))
     projector_lora_keys = [
-        key for key in keys
+        key
+        for key in keys
         if _is_key_under_module(key, projector_path)
         and ("lora_a" in key.lower() or "lora_b" in key.lower())
     ]
@@ -2108,7 +2436,9 @@ def validate_adapter_checkpoint(adapter_dir: Path, config, projector_path: str |
             not any(_normalize_peft_module_path(key).startswith(f"{path}.") for path in allowed)
             for key in projector_lora_keys
         ):
-            raise RuntimeError("A2 validation failed: projector LoRA targets must be the two main merger linears")
+            raise RuntimeError(
+                "A2 validation failed: projector LoRA targets must be the two main merger linears"
+            )
     elif projector_lora_keys:
         mode = "A1" if wants_full_projector else "A0"
         raise RuntimeError(f"{mode} validation failed: projector LoRA is not allowed")
@@ -2116,22 +2446,30 @@ def validate_adapter_checkpoint(adapter_dir: Path, config, projector_path: str |
     if wants_full_projector:
         saved_projector_suffixes = {
             _normalize_peft_module_path(key).split(f"{normalized_projector}.", 1)[1]
-            for key in keys if is_saved_full_projector_key(key, projector_path)
+            for key in keys
+            if is_saved_full_projector_key(key, projector_path)
         }
         missing = sorted(_REQUIRED_FULL_PROJECTOR_TENSOR_SUFFIXES - saved_projector_suffixes)
         if missing:
-            raise RuntimeError(f"A1/A3 validation failed: missing full projector tensors={missing!r}")
+            raise RuntimeError(
+                f"A1/A3 validation failed: missing full projector tensors={missing!r}"
+            )
     elif normalized_modules:
-        raise RuntimeError(f"A0/A2 validation failed: unexpected modules_to_save={sorted(normalized_modules)!r}")
+        raise RuntimeError(
+            f"A0/A2 validation failed: unexpected modules_to_save={sorted(normalized_modules)!r}"
+        )
 
     if not set(QWEN3_VL_MLP_TARGETS) & configured_lm_targets:
         illegal_mlp_keys = [
-            key for key in keys
+            key
+            for key in keys
             if any(target in key.split(".") for target in QWEN3_VL_MLP_TARGETS)
             and ("lora_a" in key.lower() or "lora_b" in key.lower())
         ]
         if illegal_mlp_keys:
-            raise RuntimeError(f"A0/A1/A2 validation failed: unexpected LM MLP LoRA keys={sorted(illegal_mlp_keys)!r}")
+            raise RuntimeError(
+                f"A0/A1/A2 validation failed: unexpected LM MLP LoRA keys={sorted(illegal_mlp_keys)!r}"
+            )
     if any("deepstack_merger" in key for key in keys):
         raise RuntimeError("Adapter validation failed: deepstack merger LoRA is not allowed")
     print(f"Adapter validation passed: path={adapter_dir}")
@@ -2184,7 +2522,10 @@ def _format_device_map_summary(device_map: Any) -> str:
 
 
 def run_training(
-    config, *, max_steps_override: int | None = None, dry_run: bool = False,
+    config,
+    *,
+    max_steps_override: int | None = None,
+    dry_run: bool = False,
     smoke_test: bool = False,
 ) -> Path | None:
     import torch
@@ -2218,7 +2559,9 @@ def run_training(
     # require labeled data files.
     if dry_run:
         print("dry_run=true")
-        student_model, _student_processor, student_model_path, _student_device_map = _load_student(config)
+        student_model, _student_processor, student_model_path, _student_device_map = _load_student(
+            config
+        )
         student_model, trainable_summary = _apply_student_train_setup(
             config, student_model, dry_run=True
         )
@@ -2243,19 +2586,25 @@ def run_training(
         if not bool(getattr(config.training, "validation_leakage_check_enabled", True)):
             warnings.warn(
                 "WARNING: validation leakage preflight is disabled; training/validation isolation is not verified.",
-                UserWarning, stacklevel=2,
+                UserWarning,
+                stacklevel=2,
             )
         else:
             _validate_labeled_split_metadata(
-                config, rows, validation_rows,
+                config,
+                rows,
+                validation_rows,
                 training_label_path=resolve_label_path(config.data),
                 validation_label_path=validation_path,
             )
             isolation_counts = _validate_train_validation_isolation(
-                rows, validation_rows,
+                rows,
+                validation_rows,
                 training_label_path=resolve_label_path(config.data),
                 validation_label_path=validation_path,
-                hash_images=bool(getattr(config.training, "validation_leakage_check_hash_images", False)),
+                hash_images=bool(
+                    getattr(config.training, "validation_leakage_check_hash_images", False)
+                ),
             )
             _print_dataset_isolation_summary(isolation_counts)
             for row in rows:
@@ -2273,15 +2622,25 @@ def run_training(
         effective_grad_accum_steps = 1
         total_target_steps = 1
         adapter_dir = SMOKE_ADAPTER_DIR
-        print("smoke_test=true (effective max_samples=1 epochs=1 batch_size=1 gradient_accumulation_steps=1 max_optimizer_steps=1)")
+        print(
+            "smoke_test=true (effective max_samples=1 epochs=1 batch_size=1 gradient_accumulation_steps=1 max_optimizer_steps=1)"
+        )
     else:
         effective_epochs = int(config.training.epochs)
         effective_batch_size = int(config.training.batch_size)
         effective_grad_accum_steps = int(config.training.gradient_accumulation_steps)
         adapter_dir = config.student.adapter_dir
-        max_steps = max_steps_override if max_steps_override is not None else config.training.max_steps
+        max_steps = (
+            max_steps_override if max_steps_override is not None else config.training.max_steps
+        )
         total_target_steps = int(max_steps) if max_steps is not None else None
-    teacher_model, teacher_processor, teacher_model_path, _teacher_device_map, teacher_input_device = _load_teacher(config)
+    (
+        teacher_model,
+        teacher_processor,
+        teacher_model_path,
+        _teacher_device_map,
+        teacher_input_device,
+    ) = _load_teacher(config)
     _print_gpu_memory_stage("teacher_loaded")
     _check_no_quantized_cpu_offload(
         teacher_model,
@@ -2290,7 +2649,9 @@ def run_training(
         resolved_device_map=_teacher_device_map,
         input_device=teacher_input_device,
     )
-    student_model, student_processor, student_model_path, _student_device_map = _load_student(config)
+    student_model, student_processor, student_model_path, _student_device_map = _load_student(
+        config
+    )
     print("student loaded")
     _print_gpu_memory_stage("student_loaded")
     _validate_online_dbild_token_alignment_rows(
@@ -2301,7 +2662,12 @@ def run_training(
     student_model, trainable_summary = _apply_student_train_setup(config, student_model)
     lora_target_summary = None
     if config.student.use_lora:
-        configured_targets = config.student.target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
+        configured_targets = config.student.target_modules or [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+        ]
         lora_target_summary = summarize_trainable_lora_targets(student_model, configured_targets)
         _print_lora_target_summary(lora_target_summary)
         if lora_target_summary.missing_targets:
@@ -2351,7 +2717,9 @@ def run_training(
     print(f"teacher_quantization={config.teacher.quantization}")
     print(f"student_quantization={config.student.quantization}")
     print(f"teacher_resolved_device_map={_teacher_device_map}")
-    print(f"teacher_hf_device_map={_format_device_map_summary(getattr(teacher_model, 'hf_device_map', None))}")
+    print(
+        f"teacher_hf_device_map={_format_device_map_summary(getattr(teacher_model, 'hf_device_map', None))}"
+    )
     print(f"teacher_input_device={teacher_input_device}")
     print(f"mixed_precision={config.training.mixed_precision}")
     print(f"trainable_param_count={trainable_summary.count}")
@@ -2371,15 +2739,20 @@ def run_training(
             teacher_inputs = batch_to_device(teacher_inputs, teacher_input_device)
             teacher_labels = teacher_labels.to(device=teacher_input_device)
             teacher_forward_inputs = {
-                key: value
-                for key, value in teacher_inputs.items()
-                if key != "labels"
+                key: value for key, value in teacher_inputs.items() if key != "labels"
             }
 
             student_batch = {
                 key: value
                 for key, value in batch.items()
-                if key not in {"sample_id", "image_path", "teacher_prompt", "target_text", "prompt_token_len"}
+                if key
+                not in {
+                    "sample_id",
+                    "image_path",
+                    "teacher_prompt",
+                    "target_text",
+                    "prompt_token_len",
+                }
             }
             student_batch = batch_to_device(student_batch, student_input_device)
             labels = student_batch["labels"]
@@ -2388,17 +2761,13 @@ def run_training(
                 teacher_answer_length,
                 teacher_answer_labels,
                 teacher_trailing_logit_count,
-            ) = _answer_logits_request_from_labels(
-                teacher_labels, label_name="teacher_labels"
-            )
+            ) = _answer_logits_request_from_labels(teacher_labels, label_name="teacher_labels")
             (
                 student_logits_to_keep_count,
                 student_answer_length,
                 student_answer_labels,
                 student_trailing_logit_count,
-            ) = _answer_logits_request_from_labels(
-                labels, label_name="student_labels"
-            )
+            ) = _answer_logits_request_from_labels(labels, label_name="student_labels")
             assert isinstance(teacher_logits_to_keep_count, int)
             assert isinstance(student_logits_to_keep_count, int)
             if teacher_logits_to_keep_count < teacher_answer_length:
@@ -2429,9 +2798,7 @@ def run_training(
                     for i in range(student_batch["labels"].shape[0])
                 ]
             student_forward_inputs = {
-                key: value
-                for key, value in student_batch.items()
-                if key != "labels"
+                key: value for key, value in student_batch.items() if key != "labels"
             }
 
             teacher_forward_started = time.perf_counter()
@@ -2522,7 +2889,11 @@ def run_training(
             if smoke_test:
                 _print_gpu_memory_stage("after_forward")
                 validate_smoke_losses(lm_loss, align_loss, vsd_loss, total_loss)
-            elif not torch.isfinite(torch.stack((lm_loss.detach(), align_loss.detach(), vsd_loss.detach(), total_loss.detach()))).all():
+            elif not torch.isfinite(
+                torch.stack(
+                    (lm_loss.detach(), align_loss.detach(), vsd_loss.detach(), total_loss.detach())
+                )
+            ).all():
                 raise FloatingPointError(
                     f"Online DBiLD produced non-finite loss for sample_id={batch.get('sample_id')}"
                 )
@@ -2603,7 +2974,9 @@ def run_training(
             _synchronize_for_timing(student_input_device)
             backward_seconds = time.perf_counter() - backward_started
             if smoke_test and global_step == 0:
-                validate_smoke_gradient_contract(student_model, config.student.multimodal_projector_path)
+                validate_smoke_gradient_contract(
+                    student_model, config.student.multimodal_projector_path
+                )
                 _print_gpu_memory_stage("after_backward")
             print(
                 "Online DBiLD micro_batch "
@@ -2637,7 +3010,9 @@ def run_training(
                         f" student_supervised_count={last_step_log_values['student_supervised_count']}"
                     )
                 if last_step_log_values["vocab_prefix_alignment_used"]:
-                    step_message += f" shared_vocab_size={last_step_log_values['shared_vocab_size']}"
+                    step_message += (
+                        f" shared_vocab_size={last_step_log_values['shared_vocab_size']}"
+                    )
                 step_message += f" {_format_optimizer_lr_summary(optimizer)}"
                 print(step_message)
                 print(f"optimizer step {global_step} completed")
@@ -2645,8 +3020,10 @@ def run_training(
                 if total_target_steps is not None and global_step >= total_target_steps:
                     break
 
-        if micro_step > 0 and micro_step % grad_accum_steps != 0 and (
-            total_target_steps is None or global_step < total_target_steps
+        if (
+            micro_step > 0
+            and micro_step % grad_accum_steps != 0
+            and (total_target_steps is None or global_step < total_target_steps)
         ):
             _scale_partial_accumulation_gradients(
                 student_model,
@@ -2675,14 +3052,23 @@ def run_training(
             print(step_message)
             print(f"optimizer step {global_step} completed")
 
-        should_validate = validation_enabled and ((epoch + 1) % int(config.training.validation_every_epochs) == 0)
+        should_validate = validation_enabled and (
+            (epoch + 1) % int(config.training.validation_every_epochs) == 0
+        )
         if should_validate and validation_rows is not None:
             summary = _validate_epoch(
-                rows=validation_rows, config=config, student_model=student_model,
-                teacher_model=teacher_model, student_processor=student_processor,
-                teacher_processor=teacher_processor, student_input_device=student_input_device,
-                teacher_input_device=teacher_input_device, batch_size=effective_batch_size,
-                epoch=epoch + 1, global_step=global_step, best_val_loss=best_val_loss,
+                rows=validation_rows,
+                config=config,
+                student_model=student_model,
+                teacher_model=teacher_model,
+                student_processor=student_processor,
+                teacher_processor=teacher_processor,
+                student_input_device=student_input_device,
+                teacher_input_device=teacher_input_device,
+                batch_size=effective_batch_size,
+                epoch=epoch + 1,
+                global_step=global_step,
+                best_val_loss=best_val_loss,
                 epochs_without_improvement=epochs_without_improvement,
             )
             best_val_loss = float(summary["best_val_loss"])
@@ -2698,14 +3084,21 @@ def run_training(
                 print("validation " + json.dumps(summary, ensure_ascii=False, sort_keys=True))
                 if summary["is_best"]:
                     _save_best_checkpoint(
-                        student_model, student_processor, optimizer, scheduler,
-                        checkpoint_dir=best_checkpoint_dir, epoch=epoch + 1,
-                        global_step=global_step, best_val_loss=best_val_loss,
-                        epochs_without_improvement=epochs_without_improvement, config=config,
+                        student_model,
+                        student_processor,
+                        optimizer,
+                        scheduler,
+                        checkpoint_dir=best_checkpoint_dir,
+                        epoch=epoch + 1,
+                        global_step=global_step,
+                        best_val_loss=best_val_loss,
+                        epochs_without_improvement=epochs_without_improvement,
+                        config=config,
                     )
             early_stop_requested = _broadcast_early_stop(early_stop_requested)
             if distributed:
                 import torch.distributed as dist
+
                 dist.barrier()
             if early_stop_requested:
                 break
@@ -2715,6 +3108,7 @@ def run_training(
     if validation_enabled and config.training.restore_best_model and best_checkpoint_dir.exists():
         if distributed:
             import torch.distributed as dist
+
             dist.barrier()
         _restore_best_checkpoint(student_model, optimizer, scheduler, best_checkpoint_dir)
         print(f"restored_best_checkpoint={best_checkpoint_dir}")
@@ -2723,9 +3117,13 @@ def run_training(
         student_model.save_pretrained(adapter_dir)
         student_processor.save_pretrained(adapter_dir)
         adapter_metadata = {
-            "base_projector_checksum_before_lora": getattr(student_model, "_main_merger_base_checksum", None),
+            "base_projector_checksum_before_lora": getattr(
+                student_model, "_main_merger_base_checksum", None
+            ),
             "base_projector_dtype_map": getattr(student_model, "_main_merger_dtype_map", None),
-            "mixed_precision_source": getattr(student_model, "_mixed_precision_source", "load_time_exclusion"),
+            "mixed_precision_source": getattr(
+                student_model, "_mixed_precision_source", "load_time_exclusion"
+            ),
             "main_merger_quantized_before_peft": False,
             "merger_norm_dtype": "torch.float32",
         }
@@ -2736,6 +3134,7 @@ def run_training(
             _validate_smoke_adapter_checkpoint(adapter_dir)
     if distributed:
         import torch.distributed as dist
+
         dist.barrier()
     print(f"peak_vram_allocated_bytes={_gpu_peak_memory_allocated()}")
     print(f"OK online DBiLD training completed: optimizer_steps={global_step}")

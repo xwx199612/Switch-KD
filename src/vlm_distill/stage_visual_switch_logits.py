@@ -317,7 +317,6 @@ class VisualSwitchDistiller:
             task=sample.task,
         )
         text_prompt_len = max(1, len(prompt.split()))
-        visual_token_count = int((base_row or {}).get("visual_token_count") or 0)
         teacher_tokens = _extract_teacher_tokens(base_row or {})
         answer_len = len(teacher_tokens) if teacher_tokens else max(2, min(6, text_prompt_len // 2))
         vocab_size = 32

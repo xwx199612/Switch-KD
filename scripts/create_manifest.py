@@ -35,7 +35,7 @@ def build_manifest(
                 + "\n"
             )
 
-    print(f"Created manifest:")
+    print("Created manifest:")
     print(output_path)
     print(f"Samples: {len(images)}")
 

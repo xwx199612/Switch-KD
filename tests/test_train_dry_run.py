@@ -6,13 +6,13 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from vlm_distill.train_online_align_dbild import (
+from vlm_distill.train_online_align_dbild import (  # noqa: E402
     TrainableSummary,
     _print_dry_run_summary,
     run_training,
 )
 
-from .test_stage1_a3_attn_mlp_projector import _FakeQwen3VL
+from .test_stage1_a3_attn_mlp_projector import _FakeQwen3VL  # noqa: E402
 
 
 def _a3_config():

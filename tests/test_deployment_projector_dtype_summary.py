@@ -5,10 +5,9 @@ from types import SimpleNamespace
 import pytest
 
 torch = pytest.importorskip("torch")
-from torch import nn
+from torch import nn  # noqa: E402
 
-from vlm_distill import deployment_loader
-from vlm_distill.deployment_loader import _summary, validate_high_fidelity_deployment
+from vlm_distill.deployment_loader import _summary, validate_high_fidelity_deployment  # noqa: E402
 
 
 class _ToyDeployment(nn.Module):

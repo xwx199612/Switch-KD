@@ -425,7 +425,7 @@ def validate_high_fidelity_deployment(model: Any, config: Any = None, *, smoke_i
         raise RuntimeError("deployment validation failed: no attention LoRA modules found")
     if summary["vision_trainable"]:
         raise RuntimeError("deployment validation failed: vision encoder has trainable parameters")
-    if not model.training is False:
+    if model.training is not False:
         raise RuntimeError("deployment validation failed: model must be eval mode")
     if hasattr(model, "active_adapter") and not getattr(model, "active_adapter"):
         raise RuntimeError("deployment validation failed: PEFT adapter is not active")

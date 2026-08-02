@@ -22,8 +22,6 @@ from .config_schema import (
 )
 from .data_manifest import VlmSample, read_jsonl, validate_manifest
 from .device_utils import (
-    batch_to_device,
-    get_module_by_path,
     ensure_stage_uses_cuda,
     print_stage_model_debug,
     resolve_requested_device_map,

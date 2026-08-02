@@ -9,7 +9,6 @@ import pytest
 from vlm_distill.config_schema import load_config
 from vlm_distill.student_trainability import (
     dequantize_trainable_projector,
-    summarize_trainable_groups,
 )
 from vlm_distill.train_online_align_dbild import freeze_student_vision_keep_merger_lm_trainable
 
@@ -208,7 +207,7 @@ def test_exact_freezer_keeps_projector_and_vision_encoder_separate():
 
 
 def test_a0_default_projector_is_frozen():
-    torch = pytest.importorskip("torch")
+    pytest.importorskip("torch")
     from torch import nn
 
     class M(nn.Module):
