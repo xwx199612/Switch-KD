@@ -25,6 +25,7 @@ from .stage_merge_adapter import merge_student_adapter
 from .stage_package_adapter_deployment import package_high_fidelity_adapter_deployment
 from .adapter_merger import merge_adapter_artifact
 from .stage_prediction_evaluation import evaluate_predictions
+from .stage_experiment_evaluation import evaluate_experiments
 from .stage_student_prediction import create_student_predictions
 from .stage_teacher_precompute import create_label_dataset
 from .train_online_align_dbild import run_training, validate_adapter_checkpoint
@@ -81,6 +82,7 @@ def main() -> None:
         "package-adapter",
         "evaluate",
         "evaluate-predictions",
+        "evaluate-experiments",
     ):
         command_parser = subparsers.add_parser(command)
         command_parser.add_argument("--config", type=Path, required=True)
@@ -221,6 +223,11 @@ def main() -> None:
         config = load_config(args.config)
         adapter_path = args.adapter_path or config.student.adapter_dir
         validate_adapter_checkpoint(adapter_path, config, args.projector_path)
+        return
+
+    if args.command == "evaluate-experiments":
+        output_dir, summary_path = evaluate_experiments(args.config)
+        print(f"OK experiment evaluation written: {output_dir} summary={summary_path}")
         return
 
     config = load_config(args.config)

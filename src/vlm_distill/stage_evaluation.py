@@ -37,6 +37,11 @@ def token_f1(prediction: str, target: str) -> float:
 def evaluate(config: PipelineConfig) -> Path:
     eval_path = resolve_label_path(config.data) if config.data.eval_path is None else config.data.eval_path
     rows = read_jsonl(eval_path, max_samples=config.data.max_samples)
+    if any(row.get("task", "parsing") == "parsing" for row in rows):
+        raise ValueError(
+            "Parsing evaluation requires separate prediction and reference files. "
+            "Use `vlm-distill evaluate-predictions`."
+        )
     predictions = []
 
     for row in rows:

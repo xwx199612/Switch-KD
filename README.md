@@ -282,6 +282,49 @@ vlm-distill evaluate-predictions \
 
 This compares `data.prediction_path` against `data.eval_path` when set, otherwise `data.label_path` / `data.distill_path`.
 
+For parsing experiments, use a separate 32B Teacher prediction file as the common reference:
+
+```yaml
+data:
+  prediction_path: outputs/experiment/student_predictions.jsonl
+  reference_path: outputs/qwen3_vl_32b_teacher/student_predictions.jsonl
+
+evaluation:
+  output_path: outputs/evaluation/experiment_eval_report.json
+```
+
+Reference selection is `reference_path > eval_path > label_path`. Parsing evaluation uses exact
+normalized text matching (lowercase and collapsed whitespace). Duplicate text elements are matched
+one-to-one using greedy descending BBox IoU; IoU never acts as a TP threshold. Reports contain
+`element_tp`, `element_fp`, `element_fn`, micro `element_precision`, micro `element_recall`,
+`element_f1`, and BBox IoU weighted by matched element-pair count, plus per-image samples and
+alignment diagnostics. Prediction and reference paths must be different.
+
+The legacy parsing form of `vlm-distill evaluate` is rejected with an instruction to use
+`vlm-distill evaluate-predictions`; non-parsing/VQA evaluation remains available there.
+
+Batch evaluation uses one reference for multiple Student/LoRA experiments:
+
+```yaml
+reference_path: outputs/qwen3_vl_32b_teacher/student_predictions.jsonl
+output_dir: outputs/evaluation
+include_reference: true
+experiments:
+  - name: A0_R16_Mixed
+    prediction_path: outputs/mixed_precision/a0_r16/student_predictions.jsonl
+  - name: A3_R32_BNB4
+    prediction_path: outputs/bnb4/a3_r32/student_predictions.jsonl
+```
+
+Run it with:
+
+```powershell
+vlm-distill evaluate-experiments --config configs/evaluate_experiments.yaml
+```
+
+This writes one `*_eval_report.json` per experiment and `experiment_summary.csv` containing
+the configured experiment order and the aggregate metrics.
+
 ---
 
 # Screen Parsing Workflow

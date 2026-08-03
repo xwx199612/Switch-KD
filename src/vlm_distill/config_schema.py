@@ -16,6 +16,7 @@ class DataConfig:
     label_path: Path | None = None
     full_label_path: Path | None = None
     prediction_path: Path | None = None
+    reference_path: Path | None = None
     teacher_logits_path: Path | None = None
     switch_logits_path: Path | None = None
     eval_path: Path | None = None
@@ -346,6 +347,7 @@ def _build_data_config(raw: dict[str, Any]) -> DataConfig:
         "inference_manifest_path",
         "label_path",
         "prediction_path",
+        "reference_path",
         "teacher_logits_path",
         "switch_logits_path",
         "eval_path",
