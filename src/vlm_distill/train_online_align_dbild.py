@@ -95,7 +95,7 @@ def _decode_answer_tokens(processor, token_ids: list[int]) -> str:
 
 
 def _target_text_for_row(row: dict[str, Any]) -> str:
-    if str(row.get("task") or "").strip() == "parsing":
+    if isinstance(row.get("elements"), list):
         elements = row.get("elements")
         if not isinstance(elements, list) or not elements:
             raise ValueError(f"Parsing row {row.get('id')!r} is missing non-empty elements.")
@@ -122,7 +122,7 @@ def _validate_teacher_token_identity(
     cached_tokens = [int(token_id) for token_id in row.get("teacher_tokens") or []]
     encoded_tokens = _encode_answer_without_special_tokens(teacher_processor, answer)
 
-    if str(row.get("task") or "").strip() == "parsing":
+    if isinstance(row.get("elements"), list):
         cached_tokens = encoded_tokens
 
     if cached_tokens != encoded_tokens:
@@ -185,8 +185,6 @@ def _validate_online_dbild_token_alignment_rows(
 ) -> None:
     checked = 0
     for row in rows:
-        if row.get("task", "parsing") != "parsing":
-            continue
         _validate_teacher_token_identity(
             row=row,
             teacher_processor=teacher_processor,
@@ -400,7 +398,7 @@ class OnlineAlignDataset(VlmTrainingDataset):
         prompt = format_prompt(
             self.config.distillation.prompt_template,
             query=row.get("query") or metadata.get("query"),
-            task=row.get("task", "vqa"),
+            output_mode=self.config.pipeline.output_mode,
         )
         target = _target_text_for_row(row)
         encoded = encode_vlm_training_sample(
@@ -1066,7 +1064,7 @@ def _validate_rows(config, *, path: Path | None = None) -> list[dict[str, Any]]:
         target_text = _target_text_for_row(row)
         if not target_text:
             raise ValueError(f"{path}:{index} missing required target text")
-        if str(row.get("task") or "").strip() != "parsing" and row.get("teacher_tokens") is None:
+        if not isinstance(row.get("elements"), list) and row.get("teacher_tokens") is None:
             raise ValueError(f"{path}:{index} missing required teacher_tokens")
         if any(field in row for field in offline_fields):
             raise ValueError(

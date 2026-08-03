@@ -162,7 +162,6 @@ def _build_output_row(
 ) -> dict[str, Any]:
     output_row = {
         "image": row.get("image"),
-        "task": row.get("task"),
         "unique_element_count_by_profile": {
             profile: len(labels)
             for profile, labels in unique_labels_by_profile.items()

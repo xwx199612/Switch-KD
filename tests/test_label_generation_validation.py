@@ -28,7 +28,6 @@ def _sample() -> VlmSample:
     return VlmSample(
         id="screen-1",
         image="screen.jpg",
-        task="parsing",
         query="List all visible UI elements.",
     )
 
@@ -69,5 +68,5 @@ def test_label_sample_returns_elements_only_parsing_row() -> None:
     row = _label_sample(_Config(), _Teacher(answer), _sample())
 
     assert row is not None
-    assert set(row.keys()) == {"id", "image", "task", "query", "elements", "coordinate_system"}
+    assert set(row.keys()) == {"id", "image", "query", "elements", "coordinate_system"}
     assert row["elements"] == [{"text": "Search", "bbox_norm": [1, 2, 3, 4], "focused": False}]

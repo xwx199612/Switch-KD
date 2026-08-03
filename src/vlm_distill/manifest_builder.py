@@ -19,18 +19,7 @@ from .config_schema import (
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 DEFAULT_IMAGE_DIR = Path("data/images")
 DEFAULT_OUTPUT_DIR = remap_output_path(Path("outputs"))
-TASK_DEFAULTS = {
-    "parsing": {"query": "List all visible interactive UI elements on this screen."},
-}
-
-
-def infer_manifest_task_from_config_path(config_path: Path) -> str:
-    stem = config_path.stem.casefold()
-    if "parsing" in stem:
-        return "parsing"
-    raise ValueError(
-        "Could not infer manifest task from config filename. Include 'parsing' in the config filename."
-    )
+DEFAULT_QUERY = "List all visible interactive UI elements on this screen."
 
 
 def _image_paths(image_dir: Path, recursive: bool) -> list[Path]:
@@ -54,8 +43,7 @@ def _parsing_row(index: int, image_path: Path) -> dict[str, Any]:
     return {
         "id": f"parsing-{index:06d}",
         "image": _manifest_image_path(image_path),
-        "task": "parsing",
-        "query": TASK_DEFAULTS["parsing"]["query"],
+        "query": DEFAULT_QUERY,
     }
 
 
@@ -77,14 +65,11 @@ def _write_jsonl_atomic(path: Path, rows: list[dict[str, Any]]) -> Path:
 
 def create_manifest_from_config(
     config: PipelineConfig,
-    task: str,
     split: str,
     recursive: bool = False,
     dry_run: bool = False,
     overwrite: bool = False,
 ) -> Path:
-    if task not in TASK_DEFAULTS:
-        raise ValueError(f"Unsupported task: {task}. Available tasks: {sorted(TASK_DEFAULTS)}")
     if split == "inference":
         image_dir = resolve_inference_image_dir(config.data) or DEFAULT_IMAGE_DIR
         return create_parsing_manifest(image_dir, resolve_inference_manifest_path(config.data), split, recursive)

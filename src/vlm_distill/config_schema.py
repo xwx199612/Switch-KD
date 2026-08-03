@@ -176,6 +176,11 @@ class PredictionConfig:
 
 
 @dataclass
+class PipelineOutputConfig:
+    output_mode: str = "parsing"
+
+
+@dataclass
 class PipelineConfig:
     data: DataConfig
     teacher: TeacherConfig
@@ -185,6 +190,7 @@ class PipelineConfig:
     distillation: DistillationConfig = field(default_factory=DistillationConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     prediction: PredictionConfig = field(default_factory=PredictionConfig)
+    pipeline: PipelineOutputConfig = field(default_factory=PipelineOutputConfig)
 
 
 OUTPUT_ROOT_ENV_VARS = (
@@ -203,6 +209,20 @@ def load_config(path: str | Path) -> PipelineConfig:
     config_path = Path(path)
     raw = _load_raw_config(config_path)
     raw = _apply_config_options(raw)
+    pipeline_values = dict(raw.get("pipeline", {}))
+    legacy_modes = []
+    for section_name in ("teacher", "prediction", "evaluation"):
+        section = raw.get(section_name, {})
+        if isinstance(section, dict) and "output_mode" in section:
+            legacy_modes.append((section_name, section.pop("output_mode")))
+    pipeline = PipelineOutputConfig(**pipeline_values)
+    _validate_output_mode(pipeline.output_mode)
+    mismatches = [(name, mode) for name, mode in legacy_modes if mode != pipeline.output_mode]
+    if mismatches:
+        raise ValueError(
+            "output_mode must be configured once under pipeline; conflicting legacy values: "
+            + ", ".join(f"{name}={mode!r}" for name, mode in mismatches)
+        )
     config = PipelineConfig(
         seed=raw.get("seed", 42),
         data=_build_data_config(raw["data"]),
@@ -210,12 +230,18 @@ def load_config(path: str | Path) -> PipelineConfig:
         student=_build_student_config(raw["student"]),
         training=_build_training_config(raw.get("training", {})),
         distillation=_build_distillation_config(raw.get("distillation", {})),
-        evaluation=_build_evaluation_config(raw.get("evaluation", {})),
-        prediction=PredictionConfig(**raw.get("prediction", {})),
+        evaluation=_build_evaluation_config(raw.get("evaluation") or {}),
+        prediction=PredictionConfig(**(raw.get("prediction") or {})),
+        pipeline=pipeline,
     )
     _validate_projector_learning_rate_config(config)
     _validate_training_validation_config(config)
     return config
+
+
+def _validate_output_mode(mode: str) -> None:
+    if mode not in {"text", "parsing"}:
+        raise ValueError("pipeline.output_mode must be one of: text, parsing")
 
 
 def _validate_projector_learning_rate_config(config: PipelineConfig) -> None:
@@ -597,8 +623,6 @@ def _apply_config_options(raw: dict[str, Any]) -> dict[str, Any]:
         or options.get("teacher_label_quantization")
     )
     student_quantization = options.get("student_quantization")
-    task_name = options.get("task_name", "parsing")
-
     if teacher_quantization:
         options.setdefault("teacher_quantization", teacher_quantization)
         options.setdefault("teacher_label_quantization", teacher_quantization)
@@ -612,8 +636,6 @@ def _apply_config_options(raw: dict[str, Any]) -> dict[str, Any]:
         )
     elif quality and teacher_quantization:
         options.setdefault("response_profile", f"{quality}_{teacher_quantization}")
-    options.setdefault("task_name", task_name)
-
     return _interpolate_config_values(values, options)
 
 
@@ -645,7 +667,7 @@ def build_prompt_context(
     query: str | None = None,
     target_label: str | None = None,
     target_type: str | None = None,
-    task: str | None = None,
+    output_mode: str | None = None,
 ) -> dict[str, str]:
     query_text = query or ""
     return {
@@ -653,7 +675,7 @@ def build_prompt_context(
         "question": query_text,
         "target_label": target_label or "",
         "target_type": target_type or "",
-        "task": task or "",
+        "output_mode": output_mode or "",
     }
 
 
@@ -663,14 +685,14 @@ def format_prompt(
     query: str | None = None,
     target_label: str | None = None,
     target_type: str | None = None,
-    task: str | None = None,
+    output_mode: str | None = None,
 ) -> str:
     return template.format(
         **build_prompt_context(
             query=query,
             target_label=target_label,
             target_type=target_type,
-            task=task,
+            output_mode=output_mode,
         )
     )
 

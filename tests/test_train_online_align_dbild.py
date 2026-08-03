@@ -64,7 +64,6 @@ def _config(tmp_path: Path) -> PipelineConfig:
 def test_target_text_for_row_serializes_parsing_elements():
     row = {
         "id": "row-1",
-        "task": "parsing",
         "elements": [{"text": "Home", "bbox_norm": [1, 2, 3, 4], "focused": False}],
         "coordinate_system": "normalized_0_1000",
     }
@@ -74,7 +73,7 @@ def test_target_text_for_row_serializes_parsing_elements():
 
 def test_target_text_for_row_rejects_missing_parsing_elements():
     with pytest.raises(ValueError, match="missing non-empty elements"):
-        _target_text_for_row({"id": "row-1", "task": "parsing", "elements": []})
+        _target_text_for_row({"id": "row-1", "elements": []})
 
 
 def test_online_align_dataset_uses_serialized_parsing_target_without_teacher_fields(
@@ -84,7 +83,6 @@ def test_online_align_dataset_uses_serialized_parsing_target_without_teacher_fie
     row = {
         "id": "row-1",
         "image": "screen.png",
-        "task": "parsing",
         "query": "List UI elements",
         "elements": [{"text": "Home", "bbox_norm": [1, 2, 3, 4], "focused": False}],
         "coordinate_system": "normalized_0_1000",
@@ -138,7 +136,7 @@ def test_online_align_collator_uses_target_text_metadata():
 def test_validate_rows_accepts_parsing_rows_without_teacher_fields(tmp_path: Path):
     config = _config(tmp_path)
     config.data.distill_path.write_text(
-        '{"id":"row-1","image":"screen.png","task":"parsing","query":"q","elements":[{"text":"Home","bbox_norm":[1,2,3,4],"focused":false}],"coordinate_system":"normalized_0_1000"}\n',
+        '{"id":"row-1","image":"screen.png","query":"q","elements":[{"text":"Home","bbox_norm":[1,2,3,4],"focused":false}],"coordinate_system":"normalized_0_1000"}\n',
         encoding="utf-8",
     )
 

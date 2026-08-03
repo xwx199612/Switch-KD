@@ -8,6 +8,7 @@ from PIL import Image
 from vlm_distill.config_schema import (
     DataConfig,
     EvaluationConfig,
+    PipelineOutputConfig,
     PipelineConfig,
     StudentConfig,
     TeacherConfig,
@@ -31,7 +32,6 @@ def test_create_student_predictions_writes_mock_predictions(tmp_path: Path):
             {
                 "id": "sample-1",
                 "image": "sample.jpg",
-                "task": "parsing",
                 "query": "List all visible UI elements.",
             }
         )
@@ -59,6 +59,35 @@ def test_create_student_predictions_writes_mock_predictions(tmp_path: Path):
     assert rows[0]["coordinate_system"] == "normalized_0_1000"
 
 
+def test_create_student_predictions_text_mode_preserves_generic_answer(tmp_path: Path):
+    image_root = tmp_path / "images"
+    _make_image(image_root / "sample.jpg")
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(
+        json.dumps({"id": "sample-text", "image": "sample.jpg", "query": "What is shown?"}) + "\n",
+        encoding="utf-8",
+    )
+    sample = validate_manifest(manifest, image_root=image_root)[0]
+    config = PipelineConfig(
+        data=DataConfig(
+            training_manifest_path=tmp_path / "manifest.jsonl",
+            manifest_path=tmp_path / "manifest.jsonl",
+            distill_path=tmp_path / "distill.jsonl",
+            prediction_path=tmp_path / "predictions.jsonl",
+            image_root=image_root,
+        ),
+        teacher=TeacherConfig(model_name="mock-teacher"),
+        student=StudentConfig(model_name="mock-student", output_dir=tmp_path / "out", adapter_dir=tmp_path / "adapter"),
+        pipeline=PipelineOutputConfig(output_mode="text"),
+    )
+
+    row = read_jsonl(create_student_predictions(config, [sample]))[0]
+
+    assert row["student_answer"]
+    assert "elements" not in row
+    assert not (tmp_path / "json").exists()
+
+
 def test_evaluate_predictions_scores_against_eval_labels(tmp_path: Path):
     prediction_path = tmp_path / "predictions.jsonl"
     eval_path = tmp_path / "labels.jsonl"
@@ -69,7 +98,6 @@ def test_evaluate_predictions_scores_against_eval_labels(tmp_path: Path):
             {
                 "id": "sample-1",
                 "image": "sample.jpg",
-                "task": "vqa",
                 "student_answer": "a white square",
             }
         )
@@ -81,7 +109,6 @@ def test_evaluate_predictions_scores_against_eval_labels(tmp_path: Path):
             {
                 "id": "sample-1",
                 "image": "sample.jpg",
-                "task": "vqa",
                 "teacher_answer": "a white square",
             }
         )
@@ -100,6 +127,7 @@ def test_evaluate_predictions_scores_against_eval_labels(tmp_path: Path):
         teacher=TeacherConfig(model_name="mock-teacher"),
         student=StudentConfig(model_name="mock-student", output_dir=tmp_path / "out", adapter_dir=tmp_path / "adapter"),
         evaluation=EvaluationConfig(output_path=report_path),
+        pipeline=PipelineOutputConfig(output_mode="text"),
     )
 
     output_path = evaluate_predictions(config)
@@ -119,7 +147,6 @@ def test_create_student_predictions_writes_parsing_sidecars(tmp_path: Path):
             {
                 "id": "parsing-000001",
                 "image": "sample.jpg",
-                "task": "parsing",
                 "query": "List all visible UI elements.",
             }
         )

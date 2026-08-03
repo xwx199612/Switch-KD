@@ -23,7 +23,6 @@ def _config(tmp_path: Path) -> PipelineConfig:
 
 def test_target_text_serializes_parsing_elements():
     row = {
-        "task": "parsing",
         "elements": [{"text": "Home", "bbox_norm": [1, 2, 3, 4], "focused": False}],
         "coordinate_system": "normalized_0_1000",
     }
@@ -36,7 +35,7 @@ def test_target_text_serializes_parsing_elements():
 def test_load_switch_base_rows_reads_label_rows(tmp_path: Path):
     config = _config(tmp_path)
     config.data.distill_path.write_text(
-        '{"id":"row-1","image":"screen.png","task":"parsing","query":"q","elements":[{"text":"Home","bbox_norm":[1,2,3,4],"focused":false}],"coordinate_system":"normalized_0_1000"}\n',
+        '{"id":"row-1","image":"screen.png","query":"q","elements":[{"text":"Home","bbox_norm":[1,2,3,4],"focused":false}],"coordinate_system":"normalized_0_1000"}\n',
         encoding="utf-8",
     )
 

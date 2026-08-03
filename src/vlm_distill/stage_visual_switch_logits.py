@@ -228,7 +228,7 @@ class VisualSwitchDistiller:
         prompt = format_prompt(
             self.config.distillation.prompt_template,
             query=sample.query,
-            task=sample.task,
+            output_mode="parsing",
         )
         with torch.no_grad():
             student_inputs = self._student_image_inputs(image)
@@ -294,7 +294,7 @@ class VisualSwitchDistiller:
         prompt = format_prompt(
             self.config.distillation.prompt_template,
             query=sample.query,
-            task=sample.task,
+            output_mode="parsing",
         )
         with self._torch.no_grad():
             return self._generate_for_sample_from_student_visual(
@@ -314,7 +314,7 @@ class VisualSwitchDistiller:
         prompt = format_prompt(
             self.config.distillation.prompt_template,
             query=sample.query,
-            task=sample.task,
+            output_mode="parsing",
         )
         text_prompt_len = max(1, len(prompt.split()))
         teacher_tokens = _extract_teacher_tokens(base_row or {})
@@ -1033,11 +1033,10 @@ def _rewrite_valid_completed_rows(path: Path, *, field_name: str) -> None:
 
 
 def _extract_teacher_tokens(row: dict[str, Any]) -> list[int]:
-    if str(row.get("task") or "").strip() == "parsing":
-        for field_name in ("teacher_logits", "switch_logits"):
-            token_ids = row.get(f"{field_name}_answer_token_ids")
-            if token_ids is not None:
-                return coerce_token_ids(token_ids)
+    for field_name in ("teacher_logits", "switch_logits"):
+        token_ids = row.get(f"{field_name}_answer_token_ids")
+        if token_ids is not None:
+            return coerce_token_ids(token_ids)
     tokens = row.get("teacher_tokens")
     if isinstance(tokens, list) and (not tokens or not isinstance(tokens[0], list)):
         return [int(value) for value in tokens]
@@ -1052,7 +1051,7 @@ def _extract_teacher_tokens(row: dict[str, Any]) -> list[int]:
 
 
 def _target_text(row: dict[str, Any]) -> str:
-    if str(row.get("task") or "").strip() == "parsing":
+    if isinstance(row.get("elements"), list):
         return serialize_parsing_label(row)
     return str(row.get("teacher_answer") or "").strip()
 

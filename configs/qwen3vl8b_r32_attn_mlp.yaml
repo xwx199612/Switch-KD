@@ -1,7 +1,9 @@
+pipeline:
+  output_mode: parsing
+
 seed: 42
 
 options:
-  task_name: parsing
   quality: 1080p
   teacher_quantization: 4bit
   student_quantization: 4bit
@@ -14,14 +16,14 @@ options:
 # Do not add local_files_only / trust_remote_code here unless config_schema.py is updated.
 
 data:
-  training_manifest_path: outputs/lora_ablation/{task_name}_training_manifest.jsonl
-  inference_manifest_path: outputs/lora_ablation/{task_name}_inference_manifest.jsonl
-  distill_path: outputs/lora_ablation/{task_name}_online_dbild_{response_profile}.jsonl
+  training_manifest_path: outputs/lora_ablation/parsing_training_manifest.jsonl
+  inference_manifest_path: outputs/lora_ablation/parsing_inference_manifest.jsonl
+  distill_path: outputs/lora_ablation/parsing_online_dbild_{response_profile}.jsonl
   # Canonical teacher label output. Keep this JSONL schema strict:
-  # id, image, task, query, serialized parsing target, cached answer token ids, teacher_element_count.
-  label_path: outputs/lora_ablation/{task_name}_teacher_labels_{label_profile}.jsonl
-  eval_path: outputs/lora_ablation/{task_name}_online_dbild_{response_profile}.jsonl
-  prediction_path: outputs/lora_ablation/{task_name}_online_dbild_{response_profile}/student_predictions.jsonl
+  # id, image, query, serialized parsing target, cached answer token ids, teacher_element_count.
+  label_path: outputs/lora_ablation/parsing_teacher_labels_{label_profile}.jsonl
+  eval_path: outputs/lora_ablation/parsing_online_dbild_{response_profile}.jsonl
+  prediction_path: outputs/lora_ablation/parsing_online_dbild_{response_profile}/student_predictions.jsonl
   training_image_dir: /mnt/nvme0/vlm_distill/TV_data
   inference_image_dir: /mnt/nvme0/vlm_distill/validation_data
   image_root: .
@@ -44,7 +46,7 @@ student:
   output_dir: outputs/lora_ablation/r32_attn_mlp
   adapter_dir: outputs/lora_ablation/r32_attn_mlp/adapter
   merged_model_path: /mnt/nvme0/vlm_distill/models/r32_attn_mlp
-  #outputs/lora_ablation/{task_name}_switch_kd_{response_profile}/merged_model
+  #outputs/lora_ablation/parsing_switch_kd_{response_profile}/merged_model
 
   # Prediction-time model/adapter controls.
   # Leave inference_model_path empty to let predict prefer merged_model_path when it exists,
@@ -140,7 +142,7 @@ distillation:
 
     Important:
     Because Python .format() is used on prompt_template:
-    - Keep placeholders as single braces: {query}, {question}, {task}
+    - Keep placeholders as single braces: {query}, {question}, {output_mode}
     - Escape literal JSON braces as double braces: {{ and }}
     - Do not use unescaped JSON braces in YAML.
 
@@ -152,8 +154,10 @@ distillation:
   dbild_max_top_k: 128
   dbild_kl_mode: reverse
 
+prediction:
+
 evaluation:
-  output_path: outputs/lora_ablation/{task_name}_online_dbild_{response_profile}/eval_report.json
+  output_path: outputs/lora_ablation/parsing_online_dbild_{response_profile}/eval_report.json
   metrics:
     - exact_match
     - token_f1

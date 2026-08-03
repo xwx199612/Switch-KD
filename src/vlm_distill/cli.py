@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Any
-import yaml
 
 from . import teacher_validation
 from .config_schema import (
@@ -17,7 +15,7 @@ from .config_schema import (
 )
 from .data_manifest import validate_manifest
 from .hf_runtime import configure_hf_offline_mode
-from .manifest_builder import create_manifest_from_config, infer_manifest_task_from_config_path
+from .manifest_builder import create_manifest_from_config
 from .labeled_split import split_labeled_dataset
 from .model_output_artifacts import refresh_parsing_sidecar_reports
 from .stage_evaluation import evaluate
@@ -52,10 +50,6 @@ def main() -> None:
         "--split",
         choices=("training", "inference"),
         required=True,
-    )
-    create_manifest_parser.add_argument(
-        "--task",
-        choices=("parsing",),
     )
     create_manifest_parser.add_argument("--recursive", action="store_true")
     create_manifest_parser.add_argument(
@@ -174,14 +168,8 @@ def main() -> None:
         print("create-manifest config:")
         for key, value in {"training_manifest": resolve_training_manifest_path(config.data), "validation_enabled": config.training.validation_enabled, "full_label_path": resolve_full_label_path(config.data), "training_label_path": resolve_label_path(config.data), "validation_label_path": config.training.validation_label_path}.items():
             print(f"{key}={value}")
-        task = _resolve_create_manifest_task(
-            config_path=args.config,
-            cli_task=args.task,
-        )
-
         output_path = create_manifest_from_config(
             config=config,
-            task=task,
             split=args.split,
             recursive=args.recursive,
             dry_run=args.dry_run,
@@ -263,6 +251,7 @@ def main() -> None:
             teacher_path,
             max_samples=config.data.max_samples,
             decode_tokens=decoder,
+            output_mode=config.pipeline.output_mode,
         )
         _print_teacher_validation_summary(summary)
         if summary["invalid_rows"]:
@@ -412,43 +401,6 @@ def _print_teacher_validation_summary(summary: dict[str, object]) -> None:
         print("first_bad_rows:")
         for bad_row in bad_rows:
             print(f"  id={bad_row['id']} reason={bad_row['reason']}")
-
-
-def _resolve_create_manifest_task(
-    *,
-    config_path: Path,
-    cli_task: str | None,
-) -> str:
-    raw_config_task = _read_raw_config_task_name(config_path)
-    task = cli_task or raw_config_task
-    if task is None:
-        task = infer_manifest_task_from_config_path(config_path)
-
-    allowed_tasks = ("parsing",)
-    normalized_task = str(task).strip().casefold()
-    if normalized_task not in allowed_tasks:
-        raise ValueError(
-            "Invalid create-manifest task resolution. "
-            f"resolved task={task!r} config path={config_path} "
-            f"allowed tasks={list(allowed_tasks)}"
-        )
-    return normalized_task
-
-
-def _read_raw_config_task_name(config_path: Path) -> str | None:
-    with config_path.open("r", encoding="utf-8") as handle:
-        loaded: Any = yaml.safe_load(handle)
-
-    if not isinstance(loaded, dict):
-        return None
-    options = loaded.get("options")
-    if not isinstance(options, dict):
-        return None
-    task_name = options.get("task_name")
-    if task_name is None:
-        return None
-    task_text = str(task_name).strip()
-    return task_text or None
 
 
 def _print_switch_logits_validation_summary(summary: dict[str, object]) -> None:

@@ -17,6 +17,7 @@ def validate_teacher_output_file(
     require_teacher_logits: bool = False,
     bad_limit: int = 5,
     logits_field: str = "teacher_logits",
+    output_mode: str = "parsing",
 ) -> dict[str, Any]:
     del decode_tokens, require_teacher_logits, logits_field
     rows = read_jsonl(path, max_samples=max_samples)
@@ -33,7 +34,7 @@ def validate_teacher_output_file(
     bad_rows: list[dict[str, str]] = []
     for index, row in enumerate(rows, start=1):
         row_id = str(row.get("id") or index)
-        valid, reason = validate_teacher_row(row)
+        valid, reason = validate_teacher_row(row, output_mode=output_mode)
         if valid:
             summary["valid_rows"] += 1
         else:
@@ -51,6 +52,7 @@ def validate_teacher_row(
     require_teacher_logits: bool = False,
     decode_tokens: DecodeTokens | None = None,
     logits_field: str = "teacher_logits",
+    output_mode: str = "parsing",
 ) -> tuple[bool, str | None]:
     del require_teacher_logits, decode_tokens, logits_field
 
@@ -61,7 +63,7 @@ def validate_teacher_row(
         return False, "image is missing"
     if "query" not in row:
         return False, "query is missing"
-    if str(row.get("task") or "").strip() == "parsing":
+    if output_mode == "parsing":
         elements = row.get("elements")
         if not isinstance(elements, list) or not elements:
             return False, "elements is missing or empty"

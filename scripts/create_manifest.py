@@ -6,7 +6,6 @@ import json
 def build_manifest(
     image_dir: Path,
     output_path: Path,
-    task: str,
     query: str,
 ):
     image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -21,9 +20,8 @@ def build_manifest(
     with output_path.open("w", encoding="utf-8") as f:
         for idx, image_path in enumerate(images, start=1):
             row = {
-                "id": f"{task}-{idx:06d}",
+                "id": f"sample-{idx:06d}",
                 "image": str(image_path).replace("\\", "/"),
-                "task": task,
                 "query": query,
             }
 
@@ -54,11 +52,6 @@ def main():
     )
 
     parser.add_argument(
-        "--task",
-        required=True,
-    )
-
-    parser.add_argument(
         "--query",
         required=True,
     )
@@ -68,7 +61,6 @@ def main():
     build_manifest(
         image_dir=Path(args.image_dir),
         output_path=Path(args.output),
-        task=args.task,
         query=args.query,
     )
 

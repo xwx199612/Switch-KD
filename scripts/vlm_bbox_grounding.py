@@ -84,7 +84,7 @@ Rules:
 
 Important:
 Because Python .format() is used on prompt_template:
-- Keep placeholders as single braces: {{query}}, {{question}}, {{task}}
+- Keep placeholders as single braces: {{query}}, {{question}}, {{output_mode}}
 - Escape literal JSON braces as double braces: {{{{ and }}}}
 - Do not use unescaped JSON braces in YAML."""
 
@@ -277,10 +277,10 @@ def main() -> None:
     max_new_tokens = args.max_new_tokens
     if config is not None:
         template = config.distillation.prompt_template
-        prompt = template.format(query=query, question=query, task="parsing")
+        prompt = template.format(query=query, question=query, output_mode="parsing")
         max_new_tokens = config.teacher.max_new_tokens
     else:
-        prompt = TRAINING_JSON_PROMPT_TEMPLATE.format(query=query, question=query, task="parsing")
+        prompt = TRAINING_JSON_PROMPT_TEMPLATE.format(query=query, question=query, output_mode="parsing")
     output_dir = ensure_dir(args.output_dir)
     raw_dir = ensure_dir(output_dir / "raw")
     json_dir = ensure_dir(output_dir / "json")

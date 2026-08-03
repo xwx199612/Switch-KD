@@ -51,7 +51,7 @@ def main() -> None:
         query=sample.query,
         target_label=sample.target_label,
         target_type=sample.target_type,
-        task=sample.task,
+        output_mode=config.pipeline.output_mode,
     )
 
     student_inputs = distiller._student_image_inputs(image)

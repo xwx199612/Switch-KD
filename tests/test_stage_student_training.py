@@ -291,7 +291,6 @@ def test_student_label_validation_fails_when_supervised_labels_differ(monkeypatc
         {
             "id": "sample-1",
             "image": "screen.png",
-            "task": "parsing",
             "query": "hello",
             "elements": [{"text": "Home", "bbox_norm": [1, 2, 3, 4], "focused": False}],
             "coordinate_system": "normalized_0_1000",
@@ -340,7 +339,6 @@ def test_student_dataset_accepts_canonical_teacher_answer_span(monkeypatch, tmp_
         {
             "id": "sample-1",
             "image": "screen.png",
-            "task": "parsing",
             "query": "hello",
             "elements": [{"text": "Home", "bbox_norm": [1, 2, 3, 4], "focused": False}],
             "coordinate_system": "normalized_0_1000",

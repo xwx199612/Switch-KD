@@ -12,11 +12,12 @@ from .data_manifest import VlmSample, read_jsonl
 from .model_loading import resolve_model_path
 from .bbox_grounding_inference import BBoxGroundingInferenceEngine
 from .model_output_artifacts import refresh_parsing_sidecar_reports, write_parsing_sidecar
+from .output_processors import OutputProcessor, build_output_processor
 from .stage_teacher_precompute import (
     _format_prompt as _format_teacher_prompt,
     _load_teacher_image,
 )
-from .parsing_output_parser import COORDINATE_SYSTEM_NORMALIZED_0_1000, parse_parsing_answer
+from .parsing_output_parser import COORDINATE_SYSTEM_NORMALIZED_0_1000
 
 
 class StudentBackend(Protocol):
@@ -25,6 +26,9 @@ class StudentBackend(Protocol):
 
 
 class MockStudent:
+    def __init__(self, output_mode: str = "parsing"):
+        self.output_mode = output_mode
+
     def answer(self, sample: VlmSample) -> dict:
         seed = f"{sample.id}:{sample.query}:{sample.answer or ''}"
         digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
@@ -32,7 +36,7 @@ class MockStudent:
 
         if sample.answer:
             student_answer = sample.answer
-        elif sample.task == "parsing":
+        elif self.output_mode == "parsing":
             student_answer = json.dumps(
                 {
                     "elements": [
@@ -44,7 +48,7 @@ class MockStudent:
                 ensure_ascii=False,
             )
         else:
-            student_answer = f"mock answer for {sample.task}"
+            student_answer = "mock answer"
 
         return {
             "student_answer": student_answer,
@@ -60,7 +64,9 @@ class HuggingFaceStudent:
         self.model, self.processor = self.engine.model, self.engine.processor
 
     def answer(self, sample: VlmSample) -> dict:
-        prompt = _format_teacher_prompt(self.config, sample)
+        prompt = _format_teacher_prompt(
+            self.config, sample, output_mode=self.config.pipeline.output_mode
+        )
         image_path = self.config.data.image_root / sample.image
         image = _load_teacher_image(image_path, self.config.training.image_resize)
 
@@ -86,7 +92,7 @@ class HuggingFaceStudent:
 
 def build_student_backend(config: PipelineConfig) -> StudentBackend:
     if config.student.model_name.startswith("mock-"):
-        return MockStudent()
+        return MockStudent(config.pipeline.output_mode)
     return HuggingFaceStudent(config)
 
 
@@ -172,17 +178,23 @@ def create_student_predictions(config: PipelineConfig, samples: list[VlmSample])
     )
 
     if not pending_samples:
-        refresh_parsing_sidecar_reports(output_root=output_path.parent, role="student")
+        if config.pipeline.output_mode == "parsing":
+            refresh_parsing_sidecar_reports(output_root=output_path.parent, role="student")
         print("No pending samples. Existing prediction output is already complete for this manifest.")
         return output_path
 
     student = build_student_backend(config)
+    output_processor = build_output_processor(config.pipeline.output_mode)
     completed_now = 0
     with output_path.open("a", encoding="utf-8") as handle:
         for index, sample in enumerate(pending_samples, start=1):
             started = time.perf_counter()
-            row, raw_model_output = _predict_sample(student, sample)
-            if sample.task == "parsing":
+            row, raw_model_output = _predict_sample(
+                student,
+                sample,
+                output_processor=output_processor,
+            )
+            if output_processor.mode == "parsing":
                 parsed = write_parsing_sidecar(
                     row=_base_prediction_row(sample),
                     output_root=output_path.parent,
@@ -208,7 +220,8 @@ def create_student_predictions(config: PipelineConfig, samples: list[VlmSample])
                 f"id={sample.id} elapsed={elapsed:.2f}s"
             )
 
-    refresh_parsing_sidecar_reports(output_root=output_path.parent, role="student")
+    if output_processor.mode == "parsing":
+        refresh_parsing_sidecar_reports(output_root=output_path.parent, role="student")
     return output_path
 
 
@@ -216,29 +229,38 @@ def _base_prediction_row(sample: VlmSample) -> dict:
     return {
         "id": sample.id,
         "image": sample.image,
-        "task": sample.task,
         "query": sample.query,
     }
 
 
-def _predict_sample(student: StudentBackend, sample: VlmSample) -> tuple[dict | None, str]:
+def _predict_sample(
+    student: StudentBackend,
+    sample: VlmSample,
+    *,
+    output_processor: OutputProcessor,
+) -> tuple[dict | None, str]:
     prediction = student.answer(sample)
     raw_model_output = str(prediction["student_answer"]).strip()
-    if sample.task != "parsing":
-        return {
-            **_base_prediction_row(sample),
-            "student_answer": raw_model_output,
-        }, raw_model_output
-    parsed = parse_parsing_answer(raw_model_output)
-    if not parsed.get("usable"):
+    processed = output_processor.process(
+        sample=sample,
+        raw_output=raw_model_output,
+        backend_result=prediction,
+    )
+    if not processed.get("usable"):
         return None, raw_model_output
-    result = {
-        **_base_prediction_row(sample),
-        "elements": parsed["elements"],
-        "coordinate_system": COORDINATE_SYSTEM_NORMALIZED_0_1000,
-    }
-    if prediction.get("inference_debug"):
-        result["inference_debug"] = prediction["inference_debug"]
+    if output_processor.mode == "text":
+        result = {
+            **_base_prediction_row(sample),
+            "student_answer": processed["answer"],
+        }
+    else:
+        result = {
+            **_base_prediction_row(sample),
+            "elements": processed["elements"],
+            "coordinate_system": processed["coordinate_system"],
+        }
+    if processed.get("inference_debug"):
+        result["inference_debug"] = processed["inference_debug"]
     return result, raw_model_output
 
 

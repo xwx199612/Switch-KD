@@ -55,7 +55,6 @@ def build_teacher_student_unique_rows(
             {
                 "id": base_row.get("id"),
                 "image": base_row.get("image"),
-                "task": base_row.get("task"),
                 "teacher_name": teacher_name,
                 "student_name": student_name,
                 "teacher_element_count": len(teacher_labels),

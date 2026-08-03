@@ -1,7 +1,9 @@
+pipeline:
+  output_mode: parsing
+
 seed: 42
 
 options:
-  task_name: parsing
   quality: 480p
   teacher_quantization: 8bit
   student_quantization: 4bit
@@ -10,9 +12,9 @@ options:
   # response_profile = {quality}_{teacher_quantization}_student_{student_quantization}
 
 data:
-  manifest_path: D:/TV_data/teacher_parsing/{task_name}_manifest.jsonl
-  distill_path: D:/TV_data/teacher_parsing/{task_name}_teacher_labels_{label_profile}.jsonl
-  eval_path: D:/TV_data/teacher_parsing/{task_name}_teacher_labels_{label_profile}.jsonl
+  manifest_path: D:/TV_data/teacher_parsing/parsing_manifest.jsonl
+  distill_path: D:/TV_data/teacher_parsing/parsing_teacher_labels_{label_profile}.jsonl
+  eval_path: D:/TV_data/teacher_parsing/parsing_teacher_labels_{label_profile}.jsonl
   image_root: .
   max_samples:
 
@@ -27,8 +29,8 @@ teacher:
 
 student:
   model_name: Qwen/Qwen2.5-VL-3B-Instruct
-  output_dir: outputs/{task_name}_response_{response_profile}
-  adapter_dir: outputs/{task_name}_response_{response_profile}/adapter
+  output_dir: outputs/parsing_response_{response_profile}
+  adapter_dir: outputs/parsing_response_{response_profile}/adapter
   use_lora: true
   lora_rank: 32
   lora_alpha: 64
@@ -105,12 +107,14 @@ distillation:
 
     Important:
     Because Python .format() is used on prompt_template:
-    - Keep placeholders as single braces: {query}, {question}, {task}
+    - Keep placeholders as single braces: {query}, {question}, {output_mode}
     - Escape literal JSON braces as double braces: {{ and }}
     - Do not use unescaped JSON braces in YAML.
 
+prediction:
+
 evaluation:
-  output_path: outputs/{task_name}_response_{response_profile}/eval_report.json
+  output_path: outputs/parsing_response_{response_profile}/eval_report.json
   metrics:
     - exact_match
     - token_f1

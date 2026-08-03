@@ -15,7 +15,6 @@ def test_summarize_teacher_label_file_reports_elements_only_counts(tmp_path: Pat
                     {
                         "id": "row-1",
                         "image": "a.png",
-                        "task": "parsing",
                         "query": "q",
                         "elements": [
                             {"text": "focused", "bbox_norm": [1, 2, 3, 4], "focused": False},
@@ -31,14 +30,13 @@ def test_summarize_teacher_label_file_reports_elements_only_counts(tmp_path: Pat
                     {
                         "id": "row-2",
                         "image": "b.png",
-                        "task": "parsing",
                         "query": "q",
                         "elements": [],
                         "coordinate_system": "normalized_0_1000",
                     }
                 )
                 + "\n",
-                json.dumps({"id": "row-3", "image": "c.png", "task": "parsing", "query": "q"}) + "\n",
+                json.dumps({"id": "row-3", "image": "c.png", "query": "q"}) + "\n",
             ]
         ),
         encoding="utf-8",

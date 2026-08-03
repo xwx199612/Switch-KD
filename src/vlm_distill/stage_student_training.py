@@ -107,7 +107,7 @@ class VlmTrainingDataset:
         prompt = format_prompt(
             self.config.distillation.prompt_template,
             query=example.get("query") or metadata.get("query"),
-            task=example.get("task", "vqa"),
+            output_mode=self.config.pipeline.output_mode,
         )
         target = _training_target_text(example)
         encoded = encode_vlm_training_sample(
@@ -1141,7 +1141,7 @@ def _cached_logits_seq_len(payload: Any) -> int | None:
 
 
 def _training_target_text(row: dict[str, Any]) -> str:
-    if str(row.get("task") or "").strip() == "parsing":
+    if isinstance(row.get("elements"), list):
         return serialize_parsing_label(row)
     return str(row.get("teacher_answer") or "")
 
@@ -1156,7 +1156,7 @@ def _row_tokenizer(processor):
 
 
 def _extract_teacher_tokens(row: dict[str, Any], tokenizer=None) -> list[int]:
-    if str(row.get("task") or "").strip() == "parsing":
+    if isinstance(row.get("elements"), list):
         if callable(tokenizer):
             try:
                 input_ids = tokenizer(_training_target_text(row), add_special_tokens=False)["input_ids"]
@@ -1238,7 +1238,7 @@ def _prepare_training_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     dropped_unusable = 0
 
     for row in rows:
-        if str(row.get("task") or "").strip() != "parsing":
+        if not isinstance(row.get("elements"), list):
             prepared.append(row)
             continue
 

@@ -106,7 +106,6 @@ def create_parsing_manifest_with_query(
             row = {
                 "id": f"parsing-{index:06d}",
                 "image": str(image_path).replace("\\", "/"),
-                "task": "parsing",
                 "query": query,
             }
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")

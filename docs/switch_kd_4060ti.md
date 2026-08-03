@@ -15,7 +15,6 @@ Label generation writes rows like:
 {
   "id": "sample-001",
   "image": "data/images/001.jpg",
-  "task": "parsing",
   "query": "List the visible UI elements.",
   "serialized parsing target": "Picture | 145,238,276,292 | false",
   "cached answer token ids": [1, 2, 3],

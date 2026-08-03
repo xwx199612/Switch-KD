@@ -1,7 +1,9 @@
+pipeline:
+  output_mode: parsing
+
 seed: 42
 
 options:
-  task_name: parsing
   quality: 1080p
   teacher_quantization: 4bit
   student_quantization: 4bit
@@ -14,16 +16,16 @@ options:
 # Do not add local_files_only / trust_remote_code here unless config_schema.py is updated.
 
 data:
-  manifest_path: outputs/switch-kd/{task_name}_infer_manifest.jsonl
-  distill_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}.jsonl
+  manifest_path: outputs/switch-kd/parsing_infer_manifest.jsonl
+  distill_path: outputs/switch-kd/parsing_switch_kd_{response_profile}.jsonl
   # Canonical unified teacher output. Rows contain serialized parsing target,
   # cached answer token ids, and teacher_logits when distillation.teacher_logits=true.
-  label_path: outputs/switch-kd/{task_name}_teacher_labels_{label_profile}.jsonl
+  label_path: outputs/switch-kd/parsing_teacher_labels_{label_profile}.jsonl
   # Deprecated: teacher_logits_path is intentionally omitted from this workflow.
   # Legacy configs may still set it, but Switch-KD now reads teacher logits from label_path.
-  switch_logits_path: outputs/switch-kd/{task_name}_switch_logits_{response_profile}.jsonl
-  eval_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}.jsonl
-  prediction_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/student_predictions.jsonl
+  switch_logits_path: outputs/switch-kd/parsing_switch_logits_{response_profile}.jsonl
+  eval_path: outputs/switch-kd/parsing_switch_kd_{response_profile}.jsonl
+  prediction_path: outputs/switch-kd/parsing_switch_kd_{response_profile}/student_predictions.jsonl
   image_dir: /home/phison/vlm_distill/validation_data
   image_root: .
   # Keep this small for the first smoke test. Set to empty/null for full training.
@@ -42,13 +44,13 @@ teacher:
 
 student:
   model_name: /home/phison/vlm_distill/models/Qwen3-VL-8B-Instruct
-  output_dir: outputs/switch-kd/{task_name}_switch_kd_{response_profile}
-  adapter_dir: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/adapter
+  output_dir: outputs/switch-kd/parsing_switch_kd_{response_profile}
+  adapter_dir: outputs/switch-kd/parsing_switch_kd_{response_profile}/adapter
 
   # Prediction-time model/adapter controls.
   # Leave inference_model_path empty to load the base model from model_name.
-  inference_model_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/merged_model
-  inference_adapter_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/adapter
+  inference_model_path: outputs/switch-kd/parsing_switch_kd_{response_profile}/merged_model
+  inference_adapter_path: outputs/switch-kd/parsing_switch_kd_{response_profile}/adapter
   load_adapter: true
   merge_adapter: true
 
@@ -135,7 +137,7 @@ distillation:
 
     Important:
     Because Python .format() is used on prompt_template:
-    - Keep placeholders as single braces: {query}, {question}, {task}
+    - Keep placeholders as single braces: {query}, {question}, {output_mode}
     - Escape literal JSON braces as double braces: {{ and }}
     - Do not use unescaped JSON braces in YAML.
   lm_loss_weight: 1.0
@@ -158,7 +160,7 @@ distillation:
   teacher_token_embedding_path: model.language_model.embed_tokens
   teacher_lm_head_path: lm_head
   switch_cache_student_visual: true
-  student_visual_cache_dir: outputs/switch-kd/{task_name}_student_visual_cache_{response_profile}
+  student_visual_cache_dir: outputs/switch-kd/parsing_student_visual_cache_{response_profile}
   keep_student_visual_cache_on_cpu: true
   visual_token_placeholder: "<|image_pad|>"
   max_cached_logits_vocab: 4096
@@ -171,8 +173,10 @@ distillation:
       teacher_projector: native
       allow_fallback_adapter: false
 
+prediction:
+
 evaluation:
-  output_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/eval_report.json
+  output_path: outputs/switch-kd/parsing_switch_kd_{response_profile}/eval_report.json
   metrics:
     - exact_match
     - token_f1

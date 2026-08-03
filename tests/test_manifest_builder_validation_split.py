@@ -43,7 +43,6 @@ def _labeled(path: Path, image_dir: Path, names: list[str]) -> None:
             {
                 "id": f"id-{i}",
                 "image": str(image_dir / name),
-                "task": "parsing",
                 "query": "列出元件",
                 "elements": [{"text": "按鈕", "bbox_norm": [0, 0, 10, 10], "focused": False}],
                 "coordinate_system": "normalized_0_1000",
@@ -61,10 +60,10 @@ def _labeled(path: Path, image_dir: Path, names: list[str]) -> None:
 def test_create_manifest_only_writes_full_raw_manifest(tmp_path: Path):
     config = _config(tmp_path)
     _images(config.data.training_image_dir, ["app/home/a.png", "b.png"])
-    create_manifest_from_config(config, "parsing", "training", recursive=True)
+    create_manifest_from_config(config, "training", recursive=True)
     rows = _rows(config.data.training_manifest_path)
     assert len(rows) == 2
-    assert all(set(row) == {"id", "image", "task", "query"} for row in rows)
+    assert all(set(row) == {"id", "image", "query"} for row in rows)
     assert not (tmp_path / "validation").exists()
 
 

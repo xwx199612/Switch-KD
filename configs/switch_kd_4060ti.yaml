@@ -1,3 +1,6 @@
+pipeline:
+  output_mode: parsing
+
 seed: 42
 
 data:
@@ -84,6 +87,8 @@ distillation:
       teacher_projector: native
       allow_fallback_adapter: true
       adapter_path: model.connector
+
+prediction:
 
 evaluation:
   output_path: outputs/switch_kd_eval_report.json

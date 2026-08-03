@@ -353,7 +353,6 @@ Example:
 {
   "id":"parsing-000001",
   "image":"D:/TV_data/test_data/example.png",
-  "task":"parsing",
   "query":"List all visible interactive UI elements on this screen."
 }
 ```
@@ -444,7 +443,6 @@ Example manifest row:
 {
   "id":"parsing-000001",
   "image":"...",
-  "task":"parsing",
   "query":"List all visible interactive UI elements on this screen."
 }
 ```
@@ -542,7 +540,6 @@ Example teacher row:
 {
   "id": "parsing-000001",
   "image": "D:/TV_data/test_data/example.png",
-  "task": "parsing",
   "query": "List all visible interactive UI elements on this screen.",
   "serialized parsing target": "{\"elements\": [\"YouTube\", \"Search\"]}",
   "teacher_confidence": 1.0
@@ -710,9 +707,9 @@ Recommended single-YAML student section:
 ```yaml
 student:
   model_name: /home/phison/vlm_distill/models/Qwen3-VL-8B-Instruct
-  output_dir: outputs/switch-kd/{task_name}_switch_kd_{response_profile}
-  adapter_dir: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/adapter
-  merged_model_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/merged_model
+  output_dir: outputs/switch-kd/parsing_switch_kd_{response_profile}
+  adapter_dir: outputs/switch-kd/parsing_switch_kd_{response_profile}/adapter
+  merged_model_path: outputs/switch-kd/parsing_switch_kd_{response_profile}/merged_model
   inference_model_path:
   inference_adapter_path:
   load_adapter: true

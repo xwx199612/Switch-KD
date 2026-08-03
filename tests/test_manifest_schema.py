@@ -18,7 +18,6 @@ from vlm_distill.config_schema import (
     resolve_teacher_logits_path,
 )
 from vlm_distill.data_manifest import VlmSample, validate_manifest
-from vlm_distill.manifest_builder import infer_manifest_task_from_config_path
 from vlm_distill.stage_teacher_precompute import _load_completed_ids, create_label_dataset
 
 
@@ -36,7 +35,6 @@ def test_parsing_manifest_validates_without_question(tmp_path: Path):
             {
                 "id": "screen-1",
                 "image": "screen.jpg",
-                "task": "parsing",
                 "query": "List all visible UI elements.",
             }
         )
@@ -48,6 +46,24 @@ def test_parsing_manifest_validates_without_question(tmp_path: Path):
     assert len(samples) == 1
     assert samples[0].query == "List all visible UI elements."
     assert samples[0].target_label is None
+
+
+def test_legacy_manifest_task_is_discarded(tmp_path: Path):
+    image_root = tmp_path / "images"
+    _make_image(image_root / "screen.jpg")
+    rows = [
+        {"id": "none", "image": "screen.jpg", "query": "List UI elements."},
+        {"id": "legacy", "image": "screen.jpg", "query": "List UI elements."},
+        {"id": "other", "image": "screen.jpg", "query": "List UI elements."},
+    ]
+    rows[1]["t" + "ask"] = "parsing"
+    rows[2]["t" + "ask"] = "visual_qa"
+    manifest = tmp_path / "screen.jsonl"
+    manifest.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    samples = validate_manifest(manifest, image_root=image_root)
+
+    assert all(not hasattr(sample, "task") for sample in samples)
 
 
 def test_load_config_accepts_legacy_target_field(tmp_path: Path):
@@ -79,25 +95,24 @@ def test_load_config_interpolates_response_options(tmp_path: Path):
     config_path.write_text(
         """
 options:
-  task_name: parsing
   quality: 480p
   teacher_quantization: 8bit
   student_quantization: 4bit
 data:
-  manifest_path: D:/TV_data/teacher_parsing/{task_name}_manifest.jsonl
-  distill_path: D:/TV_data/teacher_parsing/{task_name}_teacher_labels_{label_profile}.jsonl
+  manifest_path: D:/TV_data/teacher_parsing/parsing_manifest.jsonl
+  distill_path: D:/TV_data/teacher_parsing/parsing_teacher_labels_{label_profile}.jsonl
 teacher:
   model_name: mock-teacher
 student:
   model_name: mock-student
-  output_dir: outputs/{task_name}_response_{response_profile}
-  adapter_dir: outputs/{task_name}_response_{response_profile}/adapter
+  output_dir: outputs/parsing_response_{response_profile}
+  adapter_dir: outputs/parsing_response_{response_profile}/adapter
   quantization: "{student_quantization}"
 distillation:
   method: response
   prompt_template: "query: {query}\\nAnswer:"
 evaluation:
-  output_path: outputs/{task_name}_response_{response_profile}/eval_report.json
+  output_path: outputs/parsing_response_{response_profile}/eval_report.json
 """.strip(),
         encoding="utf-8",
     )
@@ -114,16 +129,15 @@ def test_load_config_interpolates_split_distillation_paths(tmp_path: Path):
     config_path.write_text(
         """
 options:
-  task_name: parsing
   quality: 480p
   teacher_quantization: 8bit
   student_quantization: 4bit
 data:
-  manifest_path: D:/TV_data/teacher_parsing/{task_name}_manifest.jsonl
-  distill_path: outputs/{task_name}_switch_kd_{response_profile}.jsonl
-  label_path: D:/TV_data/teacher_parsing/{task_name}_teacher_labels_{label_profile}.jsonl
-  teacher_logits_path: outputs/{task_name}_teacher_logits_{label_profile}.jsonl
-  switch_logits_path: outputs/{task_name}_switch_logits_{response_profile}.jsonl
+  manifest_path: D:/TV_data/teacher_parsing/parsing_manifest.jsonl
+  distill_path: outputs/parsing_switch_kd_{response_profile}.jsonl
+  label_path: D:/TV_data/teacher_parsing/parsing_teacher_labels_{label_profile}.jsonl
+  teacher_logits_path: outputs/parsing_teacher_logits_{label_profile}.jsonl
+  switch_logits_path: outputs/parsing_switch_logits_{response_profile}.jsonl
 teacher:
   model_name: mock-teacher
 student:
@@ -145,13 +159,12 @@ def test_load_config_interpolates_prediction_path(tmp_path: Path):
     config_path.write_text(
         """
 options:
-  task_name: parsing
   quality: 480p
   teacher_quantization: 8bit
 data:
-  manifest_path: D:/TV_data/teacher_parsing/{task_name}_manifest.jsonl
-  distill_path: D:/TV_data/teacher_parsing/{task_name}_teacher_labels_{label_profile}.jsonl
-  prediction_path: outputs/{task_name}_merged_predictions_{label_profile}.jsonl
+  manifest_path: D:/TV_data/teacher_parsing/parsing_manifest.jsonl
+  distill_path: D:/TV_data/teacher_parsing/parsing_teacher_labels_{label_profile}.jsonl
+  prediction_path: outputs/parsing_merged_predictions_{label_profile}.jsonl
 teacher:
   model_name: mock-teacher
 student:
@@ -165,10 +178,6 @@ student:
 
     config = load_config(config_path)
     assert resolve_prediction_path(config.data).as_posix() == "outputs/parsing_merged_predictions_480p_8bit.jsonl"
-
-
-def test_infer_manifest_task_from_config_path_uses_filename():
-    assert infer_manifest_task_from_config_path(Path("configs/parsing_switch_kd.yaml")) == "parsing"
 
 
 def test_load_completed_ids_reads_existing_ids(tmp_path: Path):
@@ -193,7 +202,6 @@ def test_create_label_dataset_writes_elements_only_rows(tmp_path: Path):
     sample = VlmSample(
         id="parsing-000001",
         image="screen.png",
-        task="parsing",
         query="List all visible UI elements.",
         metadata={"elements": [{"text": "Home", "bbox_norm": [1, 2, 3, 4], "focused": False}]},
     )
@@ -201,4 +209,4 @@ def test_create_label_dataset_writes_elements_only_rows(tmp_path: Path):
     output_path = create_label_dataset(config, [sample])
     row = json.loads(output_path.read_text(encoding="utf-8").splitlines()[0])
 
-    assert set(row.keys()) == {"id", "image", "task", "query", "elements", "coordinate_system"}
+    assert set(row.keys()) == {"id", "image", "query", "elements", "coordinate_system"}

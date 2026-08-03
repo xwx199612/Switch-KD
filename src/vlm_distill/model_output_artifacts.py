@@ -14,9 +14,6 @@ def write_parsing_sidecar(
     role: str,
     raw_model_output: str,
 ) -> dict[str, Any]:
-    if row.get("task") != "parsing":
-        return {}
-
     json_relative = Path("json") / role / f"{row['id']}.json"
     json_path = output_root / json_relative
     json_path.parent.mkdir(parents=True, exist_ok=True)
@@ -26,7 +23,6 @@ def write_parsing_sidecar(
         "source": role,
         "id": row.get("id"),
         "image": row.get("image"),
-        "task": row.get("task"),
         "query": row.get("query"),
         "raw_model_output": raw_model_output,
         **parsed,

@@ -29,7 +29,7 @@ def test_teacher_precompute_writes_elements_only_rows_and_json_sidecars(
     tmp_path: Path,
 ):
     config = _make_config(tmp_path)
-    sample = VlmSample(id="parsing-000001", image="screen.png", task="parsing", query="List UI elements")
+    sample = VlmSample(id="parsing-000001", image="screen.png", query="List UI elements")
 
     class _Teacher:
         def answer(self, _sample):
@@ -47,7 +47,7 @@ def test_teacher_precompute_writes_elements_only_rows_and_json_sidecars(
     output_path = stage_teacher_precompute.create_label_dataset(config, [sample])
     row = json.loads(output_path.read_text(encoding="utf-8").splitlines()[0])
 
-    assert set(row.keys()) == {"id", "image", "task", "query", "elements", "coordinate_system"}
+    assert set(row.keys()) == {"id", "image", "query", "elements", "coordinate_system"}
     assert "teacher_answer" not in row
     assert "teacher_tokens" not in row
     assert "type" not in row["elements"][0]
@@ -55,12 +55,33 @@ def test_teacher_precompute_writes_elements_only_rows_and_json_sidecars(
     assert (tmp_path / "json" / "teacher" / "parsing-000001.json").exists()
 
 
+def test_teacher_precompute_text_mode_preserves_generic_answer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    config = _make_config(tmp_path)
+    config.pipeline.output_mode = "text"
+    sample = VlmSample(id="text-000001", image="screen.png", query="What is shown?")
+
+    class _Teacher:
+        def answer(self, _sample):
+            return {"teacher_answer": "a white square", "teacher_confidence": 1.0}
+
+    monkeypatch.setattr(stage_teacher_precompute, "build_teacher", lambda _config: _Teacher())
+
+    output_path = stage_teacher_precompute.create_label_dataset(config, [sample])
+    row = json.loads(output_path.read_text(encoding="utf-8").splitlines()[0])
+
+    assert row["teacher_answer"] == "a white square"
+    assert "elements" not in row
+
+
 def test_teacher_precompute_skips_invalid_parsing_rows_and_writes_sidecar_only(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ):
     config = _make_config(tmp_path)
-    sample = VlmSample(id="parsing-000002", image="screen.png", task="parsing", query="List UI elements")
+    sample = VlmSample(id="parsing-000002", image="screen.png", query="List UI elements")
 
     class _Teacher:
         def answer(self, _sample):
@@ -88,7 +109,8 @@ def test_teacher_precompute_resume_only_calls_teacher_for_pending_samples(
     tmp_path: Path,
 ):
     config = _make_config(tmp_path)
-    samples = [VlmSample(id=f"sample-{index}", image="screen.png", task="qa", query=f"q-{index}") for index in range(5)]
+    config.pipeline.output_mode = "text"
+    samples = [VlmSample(id=f"sample-{index}", image="screen.png", query=f"q-{index}") for index in range(5)]
     output_path = tmp_path / "labels.jsonl"
     output_path.write_text(
         "".join(json.dumps({"id": sample.id, "old": True}) + "\n" for sample in samples[:3]),
@@ -126,7 +148,8 @@ def test_teacher_precompute_overwrite_rebuilds_from_empty_and_removes_stale_rows
     capsys: pytest.CaptureFixture[str],
 ):
     config = _make_config(tmp_path)
-    samples = [VlmSample(id=f"sample-{index}", image="screen.png", task="qa", query=f"q-{index}") for index in range(5)]
+    config.pipeline.output_mode = "text"
+    samples = [VlmSample(id=f"sample-{index}", image="screen.png", query=f"q-{index}") for index in range(5)]
     output_path = tmp_path / "labels.jsonl"
     output_path.write_text(
         "".join(json.dumps({"id": f"sample-{index}", "old": True}) + "\n" for index in range(3))
@@ -160,7 +183,8 @@ def test_teacher_precompute_overwrite_failure_preserves_formal_output_and_remove
     tmp_path: Path,
 ):
     config = _make_config(tmp_path)
-    samples = [VlmSample(id=f"sample-{index}", image="screen.png", task="qa", query=f"q-{index}") for index in range(3)]
+    config.pipeline.output_mode = "text"
+    samples = [VlmSample(id=f"sample-{index}", image="screen.png", query=f"q-{index}") for index in range(3)]
     output_path = tmp_path / "labels.jsonl"
     original = json.dumps({"id": "old-row", "answer": "keep-me"}) + "\n"
     output_path.write_text(original, encoding="utf-8")
@@ -193,7 +217,7 @@ def test_format_prompt_returns_exact_yaml_formatted_prompt_for_parsing(tmp_path:
         '  "elements": []\n'
         "}}"
     )
-    sample = VlmSample(id="parsing-000003", image="screen.png", task="parsing", query="List UI elements")
+    sample = VlmSample(id="parsing-000003", image="screen.png", query="List UI elements")
 
     prompt = stage_teacher_precompute._format_prompt(config, sample)
 
@@ -212,7 +236,7 @@ def test_huggingface_teacher_does_not_retry_parsing_by_default(
     tmp_path: Path,
 ) -> None:
     config = _make_config(tmp_path)
-    sample = VlmSample(id="parsing-000004", image="screen.png", task="parsing", query="List UI elements")
+    sample = VlmSample(id="parsing-000004", image="screen.png", query="List UI elements")
     calls: list[str] = []
 
     teacher = object.__new__(stage_teacher_precompute.HuggingFaceTeacher)
@@ -243,7 +267,7 @@ def test_retry_prompt_wraps_original_yaml_prompt_without_schema_duplication() ->
 
 def test_qwen_parsing_prompt_template_formats_successfully_and_escapes_json_braces() -> None:
     config = load_config("configs/qwen3vl8b_r32_attn_mlp.yaml")
-    sample = VlmSample(id="parsing-000005", image="screen.png", task="parsing", query="Find the focused tile.")
+    sample = VlmSample(id="parsing-000005", image="screen.png", query="Find the focused tile.")
 
     prompt = stage_teacher_precompute._format_prompt(config, sample)
 

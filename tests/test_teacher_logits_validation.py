@@ -15,7 +15,6 @@ def _row() -> dict:
     return {
         "id": "sample-1",
         "image": "screen.png",
-        "task": "parsing",
         "query": "List the visible UI elements.",
         "elements": [{"text": "Home", "bbox_norm": [1, 2, 3, 4], "focused": True}],
         "coordinate_system": "normalized_0_1000",

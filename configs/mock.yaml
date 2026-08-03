@@ -1,3 +1,6 @@
+pipeline:
+  output_mode: text
+
 seed: 42
 
 data:
@@ -40,6 +43,8 @@ distillation:
   confidence_weighting: true
   min_teacher_confidence: 0.0
   prompt_template: "query: {query}\nAnswer:"
+
+prediction:
 
 evaluation:
   output_path: outputs/eval_report.json

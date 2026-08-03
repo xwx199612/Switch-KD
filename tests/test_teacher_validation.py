@@ -10,7 +10,6 @@ def _row(*, elements=None, coordinate_system="normalized_0_1000") -> dict:
     return {
         "id": "sample-1",
         "image": "screen.png",
-        "task": "parsing",
         "query": "List the visible UI elements.",
         "elements": elements if elements is not None else [{"text": "Home", "bbox_norm": [10, 20, 30, 40], "focused": True}],
         "coordinate_system": coordinate_system,

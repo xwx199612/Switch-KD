@@ -21,13 +21,14 @@ def evaluate_predictions(config: PipelineConfig) -> Path:
         reference_path=reference_path,
         output_path=config.evaluation.output_path,
         max_samples=config.data.max_samples,
+        output_mode=config.pipeline.output_mode,
     )
 
 
 def evaluate_prediction_paths(
     *, prediction_path: Path, reference_path: Path, output_path: Path,
     max_samples: int | None = None, experiment_name: str | None = None,
-    is_reference: bool = False,
+    is_reference: bool = False, output_mode: str = "parsing",
 ) -> Path:
     if not is_reference:
         _ensure_distinct_paths(prediction_path, reference_path)
@@ -41,10 +42,9 @@ def evaluate_prediction_paths(
     for key in all_keys:
         prediction_row = prediction_index.get(key, {})
         reference_row = reference_index.get(key, {})
-        task = prediction_row.get("task", reference_row.get("task", "parsing"))
         sample_id = str(prediction_row.get("id") or reference_row.get("id") or "")
         image = _normalized_image(prediction_row.get("image") or reference_row.get("image"))
-        if task == "parsing":
+        if output_mode == "parsing":
             sample = score_sample(
                 prediction_raw=prediction_row.get("elements", []),
                 reference_raw=reference_row.get("elements", []),
@@ -57,7 +57,6 @@ def evaluate_prediction_paths(
             sample = {
                 "id": sample_id,
                 "image": image,
-                "task": task,
                 "prediction": prediction,
                 "target": target,
                 "exact_match": exact_match(prediction, target),
@@ -67,7 +66,7 @@ def evaluate_prediction_paths(
         sample["missing_reference"] = key not in reference_index
         samples.append(sample)
 
-    parsing_samples = [sample for sample in samples if sample.get("task", "parsing") == "parsing"]
+    parsing_samples = samples if output_mode == "parsing" else []
     metrics = aggregate_samples(parsing_samples) if parsing_samples else {
         "image_count": 0, "reference_element_count": 0, "prediction_element_count": 0,
         "element_tp": 0, "element_fp": 0, "element_fn": 0,

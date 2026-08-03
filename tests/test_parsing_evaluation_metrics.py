@@ -86,17 +86,17 @@ def test_empty_and_micro_aggregation() -> None:
 
 def test_same_path_and_missing_samples_are_reported(tmp_path: Path) -> None:
     path = tmp_path / "same.jsonl"
-    path.write_text(json.dumps({"id": "1", "image": "a.png", "task": "parsing", "elements": []}) + "\n")
+    path.write_text(json.dumps({"id": "1", "image": "a.png", "elements": []}) + "\n")
     with pytest.raises(ValueError, match="different files"):
         evaluate_prediction_paths(prediction_path=path, reference_path=path, output_path=tmp_path / "report.json")
 
     prediction = tmp_path / "prediction.jsonl"
     reference = tmp_path / "reference.jsonl"
-    prediction.write_text(json.dumps({"id": "1", "image": "a.png", "task": "parsing", "elements": []}) + "\n")
+    prediction.write_text(json.dumps({"id": "1", "image": "a.png", "elements": []}) + "\n")
     reference.write_text(
         "\n".join([
-            json.dumps({"id": "1", "image": "a.png", "task": "parsing", "elements": []}),
-            json.dumps({"id": "2", "image": "b.png", "task": "parsing", "elements": []}),
+            json.dumps({"id": "1", "image": "a.png", "elements": []}),
+            json.dumps({"id": "2", "image": "b.png", "elements": []}),
         ]) + "\n"
     )
     report_path = evaluate_prediction_paths(prediction_path=prediction, reference_path=reference, output_path=tmp_path / "report.json")
@@ -108,7 +108,7 @@ def test_same_path_and_missing_samples_are_reported(tmp_path: Path) -> None:
 def test_batch_evaluation_writes_reports_and_csv(tmp_path: Path) -> None:
     reference = tmp_path / "teacher.jsonl"
     student = tmp_path / "student.jsonl"
-    row = {"id": "1", "image": "a.png", "task": "parsing", "elements": [element("a", [0, 0, 10, 10])]}
+    row = {"id": "1", "image": "a.png", "elements": [element("a", [0, 0, 10, 10])]}
     reference.write_text(json.dumps(row) + "\n")
     student.write_text(json.dumps(row) + "\n")
     config = tmp_path / "evaluate.yaml"
@@ -127,7 +127,7 @@ def test_batch_evaluation_writes_reports_and_csv(tmp_path: Path) -> None:
 
 def test_legacy_evaluate_rejects_parsing_self_comparison(tmp_path: Path) -> None:
     labels = tmp_path / "labels.jsonl"
-    labels.write_text(json.dumps({"id": "1", "task": "parsing", "elements": []}) + "\n")
+    labels.write_text(json.dumps({"id": "1", "elements": []}) + "\n")
     config = PipelineConfig(
         data=DataConfig(training_manifest_path=labels, distill_path=labels, label_path=labels),
         teacher=TeacherConfig(model_name="mock"),

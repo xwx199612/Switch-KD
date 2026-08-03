@@ -50,7 +50,6 @@ def _sample_from_row(row: dict) -> VlmSample:
     known_fields = {
         "id",
         "image",
-        "task",
         "query",
         "target_label",
         "target_type",
@@ -66,7 +65,6 @@ def _sample_from_row(row: dict) -> VlmSample:
     sample = VlmSample(
         id=str(row.get("id", "")),
         image=str(row.get("image", "")),
-        task=str(row.get("task", "vqa")),
         query=str(row["query"]) if row.get("query") is not None else None,
         target_label=str(row["target_label"]) if row.get("target_label") is not None else None,
         target_type=str(row["target_type"]) if row.get("target_type") is not None else None,

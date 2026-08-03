@@ -1,15 +1,17 @@
+pipeline:
+  output_mode: parsing
+
 seed: 42
 options:
-  task_name: parsing
   quality: 480p
   teacher_quantization: 8bit
   student_quantization: 4bit
 data:
   manifest_path: outputs/switch-kd/shards/parsing_manifest_shard1.jsonl
-  distill_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}.jsonl
+  distill_path: outputs/switch-kd/parsing_switch_kd_{response_profile}.jsonl
   label_path: outputs/switch-kd/shards/parsing_teacher_labels_shard1.jsonl
   switch_logits_path: outputs/switch-kd/shards/parsing_switch_logits_shard1.jsonl
-  eval_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}.jsonl
+  eval_path: outputs/switch-kd/parsing_switch_kd_{response_profile}.jsonl
   image_dir: /home/phison/vlm_distill/TV_data
   image_root: .
   max_samples: null
@@ -24,8 +26,8 @@ teacher:
   image_resize: '{quality}'
 student:
   model_name: Qwen/Qwen2.5-VL-3B-Instruct
-  output_dir: outputs/switch-kd/{task_name}_switch_kd_{response_profile}
-  adapter_dir: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/adapter
+  output_dir: outputs/switch-kd/parsing_switch_kd_{response_profile}
+  adapter_dir: outputs/switch-kd/parsing_switch_kd_{response_profile}/adapter
   device_map: auto
   use_lora: true
   lora_rank: 16
@@ -102,7 +104,7 @@ distillation:
 
     Important:
     Because Python .format() is used on prompt_template:
-    - Keep placeholders as single braces: {query}, {question}, {task}
+    - Keep placeholders as single braces: {query}, {question}, {output_mode}
     - Escape literal JSON braces as double braces: {{ and }}
     - Do not use unescaped JSON braces in YAML.
   lm_loss_weight: 1.0
@@ -136,8 +138,10 @@ distillation:
       mode: paper
       teacher_projector: native
       allow_fallback_adapter: false
+prediction:
+
 evaluation:
-  output_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/eval_report.json
+  output_path: outputs/switch-kd/parsing_switch_kd_{response_profile}/eval_report.json
   metrics:
   - exact_match
   - token_f1

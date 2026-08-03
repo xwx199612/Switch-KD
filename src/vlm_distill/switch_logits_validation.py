@@ -320,11 +320,10 @@ def _validate_optional_per_token_matrix(
 
 
 def _extract_teacher_tokens(row: dict[str, Any]) -> list[int]:
-    if str(row.get("task") or "").strip() == "parsing":
-        for field_name in ("teacher_logits", "switch_logits"):
-            token_ids = row.get(f"{field_name}_answer_token_ids")
-            if token_ids is not None:
-                return coerce_token_ids(token_ids)
+    for field_name in ("teacher_logits", "switch_logits"):
+        token_ids = row.get(f"{field_name}_answer_token_ids")
+        if token_ids is not None:
+            return coerce_token_ids(token_ids)
     tokens = row.get("teacher_tokens")
     if not isinstance(tokens, list):
         return []

@@ -1,15 +1,17 @@
+pipeline:
+  output_mode: parsing
+
 seed: 42
 options:
-  task_name: parsing
   quality: 1080p
   teacher_quantization: 4bit
   student_quantization: 4bit
 data:
-  training_manifest_path: outputs/lora_ablation/{task_name}_training_manifest.jsonl
-  inference_manifest_path: outputs/lora_ablation/{task_name}_inference_manifest.jsonl
-  distill_path: outputs/lora_ablation/{task_name}_online_dbild_{response_profile}.jsonl
-  label_path: outputs/lora_ablation/{task_name}_teacher_labels_{label_profile}.jsonl
-  eval_path: outputs/lora_ablation/stage1_a2_r16_attn_projector_lora/{task_name}_online_dbild_{response_profile}.jsonl
+  training_manifest_path: outputs/lora_ablation/parsing_training_manifest.jsonl
+  inference_manifest_path: outputs/lora_ablation/parsing_inference_manifest.jsonl
+  distill_path: outputs/lora_ablation/parsing_online_dbild_{response_profile}.jsonl
+  label_path: outputs/lora_ablation/parsing_teacher_labels_{label_profile}.jsonl
+  eval_path: outputs/lora_ablation/stage1_a2_r16_attn_projector_lora/parsing_online_dbild_{response_profile}.jsonl
   prediction_path: outputs/lora_ablation/stage1_a2_r16_attn_projector_lora/mixed_precision_predictions_2048/student_predictions.jsonl
   training_image_dir: /mnt/nvme0/vlm_distill/TV_data
   inference_image_dir: /mnt/nvme0/vlm_distill/validation_data
@@ -122,7 +124,7 @@ distillation:
 
     Important:
     Because Python .format() is used on prompt_template:
-    - Keep placeholders as single braces: {query}, {question}, {task}
+    - Keep placeholders as single braces: {query}, {question}, {output_mode}
     - Escape literal JSON braces as double braces: {{ and }}
     - Do not use unescaped JSON braces in YAML.
   kd_temperature: 2.0
@@ -132,6 +134,8 @@ distillation:
   dbild_min_top_k: 4
   dbild_max_top_k: 128
   dbild_kl_mode: reverse
+prediction:
+
 evaluation:
   output_path: outputs/lora_ablation/stage1_a2_r16_attn_projector_lora/mixed_precision_predictions_2048/eval_report.json
   metrics:

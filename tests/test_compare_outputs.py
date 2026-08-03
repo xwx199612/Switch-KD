@@ -8,7 +8,6 @@ def test_build_teacher_student_unique_rows_reports_counts_and_contents():
         {
             "id": "parsing-000001",
             "image": "a.png",
-            "task": "parsing",
             "elements": [
                 {"text": "Home", "bbox_norm": [0, 0, 10, 10], "focused": True},
                 {"text": "Search", "bbox_norm": [10, 0, 20, 10], "focused": False},
@@ -20,7 +19,6 @@ def test_build_teacher_student_unique_rows_reports_counts_and_contents():
         {
             "id": "parsing-000001",
             "image": "a.png",
-            "task": "parsing",
             "elements": [
                 {"text": "Home", "bbox_norm": [0, 0, 10, 10], "focused": True},
                 {"text": "Netflix", "bbox_norm": [30, 0, 40, 10], "focused": False},
@@ -49,8 +47,8 @@ def test_build_teacher_student_unique_rows_reports_counts_and_contents():
 
 def test_build_teacher_student_unique_rows_ignores_non_list_elements():
     rows = build_teacher_student_unique_rows(
-        teacher_rows=[{"id": "row-1", "image": "a.png", "task": "parsing", "elements": '{"elements":[{"text":"Home"}]}'}],
-        student_rows=[{"id": "row-1", "image": "a.png", "task": "parsing", "elements": []}],
+        teacher_rows=[{"id": "row-1", "image": "a.png", "elements": '{"elements":[{"text":"Home"}]}'}],
+        student_rows=[{"id": "row-1", "image": "a.png", "elements": []}],
         teacher_name="teacher",
         student_name="student",
     )

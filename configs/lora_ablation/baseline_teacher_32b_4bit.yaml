@@ -1,25 +1,27 @@
+pipeline:
+  output_mode: parsing
+
 seed: 42
 
 options:
-  task_name: parsing
   quality: 1080p
   teacher_quantization: 4bit
   student_quantization: 4bit
 
 data:
-  training_manifest_path: outputs/lora_ablation/shared/{task_name}_training_manifest.jsonl
-  inference_manifest_path: outputs/lora_ablation/shared/{task_name}_inference_manifest.jsonl
+  training_manifest_path: outputs/lora_ablation/shared/parsing_training_manifest.jsonl
+  inference_manifest_path: outputs/lora_ablation/shared/parsing_inference_manifest.jsonl
 
-  full_label_path: outputs/lora_ablation/shared/{task_name}_teacher_labels_full.jsonl
-  label_path: outputs/lora_ablation/shared/{task_name}_teacher_labels_train.jsonl
+  full_label_path: outputs/lora_ablation/shared/parsing_teacher_labels_full.jsonl
+  label_path: outputs/lora_ablation/shared/parsing_teacher_labels_train.jsonl
 
   training_image_dir: /mnt/nvme0/vlm_distill/training_data
   inference_image_dir: /mnt/nvme0/vlm_distill/testing_data
   image_root: .
 
-  distill_path: outputs/lora_ablation/stage1_a0_r16_attn/{task_name}_online_dbild_{response_profile}.jsonl
-  eval_path: outputs/lora_ablation/stage1_a0_r16_attn/{task_name}_evaluation_inputs.jsonl
-  prediction_path: outputs/lora_ablation/baselines/teacher_32b_4bit/predictions/{task_name}_student_predictions.jsonl
+  distill_path: outputs/lora_ablation/stage1_a0_r16_attn/parsing_online_dbild_{response_profile}.jsonl
+  eval_path: outputs/lora_ablation/stage1_a0_r16_attn/parsing_evaluation_inputs.jsonl
+  prediction_path: outputs/lora_ablation/baselines/teacher_32b_4bit/predictions/parsing_student_predictions.jsonl
 
   max_samples: null
 
@@ -102,7 +104,7 @@ training:
   validation_split_seed: 42
 
 
-  validation_label_path: outputs/lora_ablation/shared/validation/{task_name}_teacher_labels_validation.jsonl
+  validation_label_path: outputs/lora_ablation/shared/validation/parsing_teacher_labels_validation.jsonl
 
   validation_every_epochs: 1
   validation_leakage_check_enabled: true
@@ -167,7 +169,7 @@ distillation:
 
     Important:
     Because Python .format() is used on prompt_template:
-    - Keep placeholders as single braces: {query}, {question}, {task}
+    - Keep placeholders as single braces: {query}, {question}, {output_mode}
     - Escape literal JSON braces as double braces: {{ and }}
     - Do not use unescaped JSON braces in YAML.
 
@@ -180,8 +182,10 @@ distillation:
   dbild_max_top_k: 128
   dbild_kl_mode: reverse
 
+prediction:
+
 evaluation:
-  output_path: outputs/lora_ablation/baselines/teacher_32b_4bit/evaluation/{task_name}_eval_report.json
+  output_path: outputs/lora_ablation/baselines/teacher_32b_4bit/evaluation/parsing_eval_report.json
 
   metrics:
     - exact_match

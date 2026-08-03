@@ -1,11 +1,14 @@
+pipeline:
+  output_mode: parsing
+
 seed: 42
 
 data:
-  manifest_path: outputs/switch-kd/{task_name}_manifest.jsonl
-  distill_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}.jsonl
-  label_path: outputs/switch-kd/{task_name}_teacher_labels_{label_profile}.jsonl
-  switch_logits_path: outputs/switch-kd/{task_name}_switch_logits_{response_profile}.jsonl
-  eval_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}.jsonl
+  manifest_path: outputs/switch-kd/parsing_manifest.jsonl
+  distill_path: outputs/switch-kd/parsing_switch_kd_{response_profile}.jsonl
+  label_path: outputs/switch-kd/parsing_teacher_labels_{label_profile}.jsonl
+  switch_logits_path: outputs/switch-kd/parsing_switch_logits_{response_profile}.jsonl
+  eval_path: outputs/switch-kd/parsing_switch_kd_{response_profile}.jsonl
   image_dir: /home/phison/vlm_distill/TV_data
   image_root: .
   max_samples:
@@ -22,8 +25,8 @@ teacher:
 
 student:
   model_name: Qwen/Qwen2.5-VL-3B-Instruct
-  output_dir: outputs/switch-kd/{task_name}_switch_kd_{response_profile}
-  adapter_dir: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/adapter
+  output_dir: outputs/switch-kd/parsing_switch_kd_{response_profile}
+  adapter_dir: outputs/switch-kd/parsing_switch_kd_{response_profile}/adapter
   device_map: auto
   use_lora: true
   lora_rank: 16
@@ -93,8 +96,10 @@ distillation:
       teacher_projector: native
       allow_fallback_adapter: false
 
+prediction:
+
 evaluation:
-  output_path: outputs/switch-kd/{task_name}_switch_kd_{response_profile}/eval_report.json
+  output_path: outputs/switch-kd/parsing_switch_kd_{response_profile}/eval_report.json
   metrics:
     - exact_match
     - token_f1

@@ -17,7 +17,8 @@ from PIL import Image, UnidentifiedImageError
 from .bbox_grounding_inference import BBoxGroundingInferenceEngine
 from .config_schema import load_config
 from .data_manifest import VlmSample
-from .parsing_output_parser import COORDINATE_SYSTEM_NORMALIZED_0_1000, parse_parsing_answer
+from .output_processors import ParsingOutputProcessor
+from .parsing_output_parser import COORDINATE_SYSTEM_NORMALIZED_0_1000
 from .runtime_validation import summarize_model_precision, validate_loaded_precision
 from .stage_teacher_precompute import _format_prompt, _load_teacher_image
 
@@ -73,14 +74,18 @@ def _infer_sync(image_bytes: bytes, query: str) -> dict[str, Any]:
         handle.write(image_bytes)
         handle.flush()
         image = _load_teacher_image(Path(handle.name), config.training.image_resize)
-    sample = VlmSample(id="request", image="", task="parsing", query=query)
-    prompt = _format_prompt(config, sample)
+    sample = VlmSample(id="request", image="", query=query)
+    prompt = _format_prompt(config, sample, output_mode="parsing")
     # This synchronous lock must be acquired by the worker thread.  Acquiring
     # it in the async endpoint would block FastAPI's event-loop thread while a
     # previous GPU inference is still running.
     with inference_lock:
         raw_output = engine.generate_raw(image, prompt, config.teacher.max_new_tokens)
-    parsed = parse_parsing_answer(raw_output)
+    parsed = ParsingOutputProcessor().process(
+        sample=sample,
+        raw_output=raw_output,
+        backend_result={},
+    )
     result = {"raw_output": raw_output, "usable": bool(parsed.get("usable")),
             "parse_error": parsed.get("parse_error"), "elements": parsed.get("elements", []),
             "coordinate_system": COORDINATE_SYSTEM_NORMALIZED_0_1000}
@@ -107,6 +112,6 @@ async def infer(image: UploadFile = File(...), query: str = Form(DEFAULT_QUERY),
         raise
     except Exception as exc:  # no traceback is returned to clients
         raise HTTPException(status_code=500, detail=f"Inference failed: {exc}") from exc
-    result.update({"id": request_id or "request-id", "task": "parsing", "query": query or DEFAULT_QUERY,
+    result.update({"id": request_id or "request-id", "query": query or DEFAULT_QUERY,
                    "elapsed_seconds": round(time.perf_counter() - started, 3)})
     return result

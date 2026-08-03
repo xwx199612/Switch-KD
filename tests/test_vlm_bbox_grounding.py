@@ -46,11 +46,11 @@ def test_cli_does_not_support_output_format(monkeypatch) -> None:
 
 def test_prompt_matches_training_schema_and_query() -> None:
     prompt = vlm_bbox_grounding.TRAINING_JSON_PROMPT_TEMPLATE.format(
-        query="Find the focused Settings tile.", question="ignored", task="parsing"
+        query="Find the focused Settings tile.", question="ignored", output_mode="parsing"
     )
     assert """Important:
 Because Python .format() is used on prompt_template:
-- Keep placeholders as single braces: {query}, {question}, {task}
+- Keep placeholders as single braces: {query}, {question}, {output_mode}
 - Escape literal JSON braces as double braces: {{ and }}
 - Do not use unescaped JSON braces in YAML.""" in prompt
     assert "Return valid JSON only." in prompt

@@ -30,7 +30,7 @@ def test_label_forwards_overwrite_to_label_dataset(
     tmp_path: Path,
 ):
     config = _config(tmp_path)
-    samples = [VlmSample(id="sample-1", image="screen.png", task="qa", query="q")]
+    samples = [VlmSample(id="sample-1", image="screen.png", query="q")]
     calls: list[bool] = []
 
     monkeypatch.setattr(cli, "load_config", lambda _path: config)
@@ -55,7 +55,7 @@ def test_label_forwards_overwrite_to_teacher_and_labeled_split(
     config.training.validation_enabled = True
     config.training.validation_ratio = 0.5
     config.training.validation_label_path = tmp_path / "validation.jsonl"
-    samples = [VlmSample(id="sample-1", image="screen.png", task="qa", query="q")]
+    samples = [VlmSample(id="sample-1", image="screen.png", query="q")]
     teacher_calls: list[bool] = []
     split_calls: list[bool] = []
 
@@ -87,7 +87,7 @@ def test_label_dry_run_does_not_call_teacher_or_modify_labels(
     output_path = tmp_path / "labels.jsonl"
     original = '{"id":"old-row"}\n'
     output_path.write_text(original, encoding="utf-8")
-    samples = [VlmSample(id="sample-1", image="screen.png", task="qa", query="q")]
+    samples = [VlmSample(id="sample-1", image="screen.png", query="q")]
 
     monkeypatch.setattr(cli, "load_config", lambda _path: config)
     monkeypatch.setattr(cli, "validate_manifest", lambda *args, **kwargs: samples)

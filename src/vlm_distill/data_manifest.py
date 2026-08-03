@@ -10,7 +10,6 @@ from typing import Iterable, Any
 class VlmSample:
     id: str
     image: str
-    task: str = "parsing"
     query: str | None = None
     target_label: str | None = None
     target_type: str | None = None
@@ -43,9 +42,13 @@ def write_jsonl(path: Path, rows: Iterable[dict]) -> None:
 def validate_manifest(path: Path, image_root: Path = Path("."), max_samples: int | None = None) -> list[VlmSample]:
     rows = read_jsonl(path, max_samples=max_samples)
     samples: list[VlmSample] = []
-    required = {"id", "image", "task"}
+    required = {"id", "image"}
 
     for index, row in enumerate(rows, start=1):
+        # Older manifests may carry a task label. It is deliberately discarded
+        # at this input boundary and never enters the domain model.
+        row = dict(row)
+        row.pop("task", None)
         missing = required - set(row)
         if missing:
             raise ValueError(f"{path}:{index} missing required fields: {sorted(missing)}")
@@ -54,14 +57,9 @@ def validate_manifest(path: Path, image_root: Path = Path("."), max_samples: int
         if not image_path.exists():
             raise FileNotFoundError(f"{path}:{index} image not found: {image_path}")
 
-        task = str(row["task"])
-        if task != "parsing":
-            raise ValueError(f"{path}:{index} unsupported task={task!r}; only 'parsing' is supported")
-
         known_keys = {
             "id",
             "image",
-            "task",
             "query",
             "answer",
             "metadata",
@@ -78,7 +76,6 @@ def validate_manifest(path: Path, image_root: Path = Path("."), max_samples: int
             VlmSample(
                 id=str(row["id"]),
                 image=str(row["image"]),
-                task=task,
                 query=str(row["query"]) if row.get("query") is not None else None,
                 answer=row.get("answer"),
                 metadata=metadata,

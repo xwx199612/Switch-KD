@@ -1,6 +1,8 @@
+pipeline:
+  output_mode: parsing
+
 seed: 42
 options:
-  task_name: parsing
   quality: 1080p
   teacher_quantization: 4bit
   student_quantization: 4bit
@@ -8,8 +10,8 @@ data:
   training_manifest_path: outputs/lora_ablation/parsing_inference_manifest.jsonl
   inference_manifest_path: outputs/lora_ablation/parsing_inference_manifest.jsonl
   distill_path: outputs/baselines/qwen3_vl_8b_student_4bit_json_prompt_1280/distill.jsonl
-  label_path: outputs/switch-kd/{task_name}_teacher_labels_{label_profile}.jsonl
-  switch_logits_path: outputs/switch-kd/{task_name}_switch_logits_{response_profile}.jsonl
+  label_path: outputs/switch-kd/parsing_teacher_labels_{label_profile}.jsonl
+  switch_logits_path: outputs/switch-kd/parsing_switch_logits_{response_profile}.jsonl
   eval_path: outputs/lora_ablation/parsing_teacher_labels_1080p_4bit.jsonl
   prediction_path: outputs/baselines/qwen3_vl_8b_student_4bit_2048/student_predictions.jsonl
   training_image_dir: /mnt/nvme0/vlm_distill/TV_data
@@ -112,7 +114,7 @@ distillation:
 
     Important:
     Because Python .format() is used on prompt_template:
-    - Keep placeholders as single braces: {query}, {question}, {task}
+    - Keep placeholders as single braces: {query}, {question}, {output_mode}
     - Escape literal JSON braces as double braces: {{ and }}
     - Do not use unescaped JSON braces in YAML.
   lm_loss_weight: 1.0
@@ -134,7 +136,7 @@ distillation:
   teacher_token_embedding_path: model.language_model.embed_tokens
   teacher_lm_head_path: lm_head
   switch_cache_student_visual: true
-  student_visual_cache_dir: outputs/switch-kd/{task_name}_student_visual_cache_{response_profile}
+  student_visual_cache_dir: outputs/switch-kd/parsing_student_visual_cache_{response_profile}
   keep_student_visual_cache_on_cpu: true
   visual_token_placeholder: <|image_pad|>
   max_cached_logits_vocab: 4096
@@ -146,6 +148,8 @@ distillation:
       mode: paper
       teacher_projector: native
       allow_fallback_adapter: false
+prediction:
+
 evaluation:
   output_path: outputs/baselines/qwen3_vl_8b_student_4bit_2048/eval_report.json
   metrics:

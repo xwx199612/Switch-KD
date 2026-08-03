@@ -37,7 +37,7 @@ def token_f1(prediction: str, target: str) -> float:
 def evaluate(config: PipelineConfig) -> Path:
     eval_path = resolve_label_path(config.data) if config.data.eval_path is None else config.data.eval_path
     rows = read_jsonl(eval_path, max_samples=config.data.max_samples)
-    if any(row.get("task", "parsing") == "parsing" for row in rows):
+    if config.pipeline.output_mode == "parsing" and rows:
         raise ValueError(
             "Parsing evaluation requires separate prediction and reference files. "
             "Use `vlm-distill evaluate-predictions`."
@@ -45,25 +45,26 @@ def evaluate(config: PipelineConfig) -> Path:
     predictions = []
 
     for row in rows:
-        task = row.get("task", "parsing")
         item = {
             "id": row["id"],
-            "task": task,
-            "prediction": row.get("elements", []) if task == "parsing" else str(row.get("teacher_answer") or ""),
-            "target": row.get("elements", []) if task == "parsing" else str(row.get("teacher_answer") or ""),
-            "exact_match": None if task == "parsing" else 1.0,
-            "token_f1": None if task == "parsing" else 1.0,
+            "prediction": str(row.get("teacher_answer") or ""),
+            "target": str(row.get("teacher_answer") or ""),
+            "exact_match": exact_match(
+                str(row.get("teacher_answer") or ""),
+                str(row.get("teacher_answer") or ""),
+            ),
+            "token_f1": token_f1(
+                str(row.get("teacher_answer") or ""),
+                str(row.get("teacher_answer") or ""),
+            ),
         }
-        if task == "parsing":
-            item.update(
-                _build_parsing_eval_item(
-                    prediction_elements=row.get("elements", []),
-                    target_elements=row.get("elements", []),
-                )
-            )
         predictions.append(item)
 
-    metrics = _aggregate_prediction_metrics(predictions, sample_key="num_samples")
+    metrics = _aggregate_prediction_metrics(
+        predictions,
+        sample_key="num_samples",
+        output_mode=config.pipeline.output_mode,
+    )
     report = {"metrics": metrics, "predictions": predictions}
     config.evaluation.output_path.parent.mkdir(parents=True, exist_ok=True)
     config.evaluation.output_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -162,8 +163,13 @@ def _build_parsing_eval_item(*, prediction_elements: Any, target_elements: Any) 
     }
 
 
-def _aggregate_prediction_metrics(predictions: list[dict[str, Any]], *, sample_key: str) -> dict[str, float]:
-    parsing_predictions = [item for item in predictions if item.get("task") == "parsing"]
+def _aggregate_prediction_metrics(
+    predictions: list[dict[str, Any]],
+    *,
+    sample_key: str,
+    output_mode: str = "parsing",
+) -> dict[str, float]:
+    parsing_predictions = predictions if output_mode == "parsing" else []
     return {
         sample_key: len(predictions),
         "exact_match": _mean(item["exact_match"] for item in predictions if item.get("exact_match") is not None),

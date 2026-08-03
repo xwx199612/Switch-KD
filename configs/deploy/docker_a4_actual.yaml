@@ -1,3 +1,6 @@
+pipeline:
+  output_mode: parsing
+
 # Container-path equivalent of the validated A4 r32 mixed-precision config.
 # Host model/artifact paths are supplied only through Docker volume mounts.
 extends: ../lora_ablation/predict/stage1_a4_r32_attn_mlp_projector_mixed_precision.yaml
