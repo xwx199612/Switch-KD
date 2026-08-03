@@ -1,0 +1,21 @@
+reference_path: /mnt/nvme0/vlm_distill/Switch-KD/outputs/lora_ablation/baselines/teacher_32b_4bit/predictions/parsing_student_predictions.jsonl
+
+output_dir: /mnt/nvme0/vlm_distill/Switch-KD/outputs/evaluation_2048
+
+include_reference: true
+
+experiments:
+  - name: A4_R32_Mixed
+    prediction_path: /mnt/nvme0/vlm_distill/Switch-KD/outputs/lora_ablation/stage1_a4_r32_attn_mlp_projector/predictions/parsing_student_predictions.jsonl
+
+  - name: A4_R16_Mixed
+    prediction_path: /mnt/nvme0/vlm_distill/Switch-KD/outputs/lora_ablation/stage1_a4_r16_attn_mlp_projector/predictions/parsing_student_predictions.jsonl
+
+  - name: A3_R16_Mixed
+    prediction_path: /mnt/nvme0/vlm_distill/Switch-KD/outputs/lora_ablation/stage1_a3_r16_attn_mlp/predictions/parsing_student_predictions.jsonl
+
+  - name: A0_R16_Mixed
+    prediction_path: /mnt/nvme0/vlm_distill/Switch-KD/outputs/lora_ablation/stage1_a0_r16_attn/predictions/parsing_student_predictions.jsonl
+
+  - name: 8B
+    prediction_path: /mnt/nvme0/vlm_distill/Switch-KD/outputs/lora_ablation/baselines/student_8b_4bit/predictions/parsing_student_predictions.jsonl
