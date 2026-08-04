@@ -8,11 +8,11 @@ from typing import Any
 
 from .config_schema import (
     PipelineConfig,
-    format_prompt,
     resolve_label_path,
     resolve_teacher_logits_path,
     resolve_switch_logits_path,
 )
+from .prompt_composer import compose_prompt
 from .data_manifest import read_jsonl
 from .device_utils import (
     ensure_stage_uses_cuda,
@@ -104,9 +104,8 @@ class VlmTrainingDataset:
             resize_mode=self.config.training.image_resize,
         )
         metadata = example.get("metadata") if isinstance(example.get("metadata"), dict) else {}
-        prompt = format_prompt(
-            self.config.distillation.prompt_template,
-            query=example.get("query") or metadata.get("query"),
+        prompt = compose_prompt(
+            example.get("query") or metadata.get("query") or "",
             output_mode=self.config.pipeline.output_mode,
         )
         target = _training_target_text(example)

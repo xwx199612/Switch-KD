@@ -8,6 +8,7 @@ from vlm_distill.output_processors import (
     ParsingOutputProcessor,
     build_output_processor,
 )
+from vlm_distill.prompt_composer import compose_prompt
 from vlm_distill.stage_teacher_precompute import _format_prompt
 
 
@@ -60,4 +61,4 @@ def test_prompt_uses_output_mode_not_task_metadata() -> None:
     )
     prompts = [_format_prompt(config, sample) for sample in _samples()]
 
-    assert prompts == ["parsing\nList elements."] * 3
+    assert prompts == [compose_prompt("List elements.", output_mode="parsing")] * 3

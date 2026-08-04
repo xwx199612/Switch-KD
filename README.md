@@ -595,8 +595,12 @@ training:
 
 distillation:
   method: response
-  prompt_template: "query: {query}\nAnswer:"
 ```
+
+Prompt text is composed by the system from `pipeline.output_mode` and each
+manifest row's `query` instruction. Legacy `distillation.prompt_template`
+values are accepted for migration compatibility, ignored, and never sent to
+the model.
 
 Reference configs in this repo:
 
@@ -776,7 +780,6 @@ student:
   quantization: none
 
 distillation:
-  prompt_template: "query: {query}\nAnswer:"
 
 evaluation:
   output_path: outputs/parsing_merged_eval_report_480p_8bit.json

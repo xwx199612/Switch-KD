@@ -13,11 +13,9 @@ from .model_loading import resolve_model_path
 from .bbox_grounding_inference import BBoxGroundingInferenceEngine
 from .model_output_artifacts import refresh_parsing_sidecar_reports, write_parsing_sidecar
 from .output_processors import OutputProcessor, build_output_processor
-from .stage_teacher_precompute import (
-    _format_prompt as _format_teacher_prompt,
-    _load_teacher_image,
-)
+from .stage_teacher_precompute import _load_teacher_image
 from .parsing_output_parser import COORDINATE_SYSTEM_NORMALIZED_0_1000
+from .prompt_composer import compose_prompt
 
 
 class StudentBackend(Protocol):
@@ -64,8 +62,9 @@ class HuggingFaceStudent:
         self.model, self.processor = self.engine.model, self.engine.processor
 
     def answer(self, sample: VlmSample) -> dict:
-        prompt = _format_teacher_prompt(
-            self.config, sample, output_mode=self.config.pipeline.output_mode
+        prompt = compose_prompt(
+            sample.query or "",
+            output_mode=self.config.pipeline.output_mode,
         )
         image_path = self.config.data.image_root / sample.image
         image = _load_teacher_image(image_path, self.config.training.image_resize)

@@ -11,7 +11,6 @@ from urllib.parse import quote
 
 from .config_schema import (
     PipelineConfig,
-    format_prompt,
     resolve_label_path,
     resolve_switch_logits_path,
     resolve_training_manifest_path,
@@ -28,6 +27,7 @@ from .device_utils import (
 )
 from .model_loading import resolve_attn_implementation, resolve_model_path
 from .parsing_output_parser import serialize_parsing_label
+from .prompt_composer import compose_prompt
 from .token_alignment import build_token_mismatch_details, coerce_token_ids
 
 
@@ -225,10 +225,9 @@ class VisualSwitchDistiller:
             sample.image,
             resize_mode=self.config.training.image_resize,
         )
-        prompt = format_prompt(
-            self.config.distillation.prompt_template,
-            query=sample.query,
-            output_mode="parsing",
+        prompt = compose_prompt(
+            sample.query or "",
+            output_mode=self.config.pipeline.output_mode,
         )
         with torch.no_grad():
             student_inputs = self._student_image_inputs(image)
@@ -291,10 +290,9 @@ class VisualSwitchDistiller:
                 "student_vision_hidden_states. Regenerate the cache with the paper-mode pipeline."
             )
         student_visual = cached["student_vision_hidden_states"]
-        prompt = format_prompt(
-            self.config.distillation.prompt_template,
-            query=sample.query,
-            output_mode="parsing",
+        prompt = compose_prompt(
+            sample.query or "",
+            output_mode=self.config.pipeline.output_mode,
         )
         with self._torch.no_grad():
             return self._generate_for_sample_from_student_visual(
@@ -311,10 +309,9 @@ class VisualSwitchDistiller:
 
     def _mock_generate_for_sample(self, sample: VlmSample, *, base_row: dict[str, Any] | None = None) -> dict[str, Any]:
         field = self.config.distillation.switch_logits_field
-        prompt = format_prompt(
-            self.config.distillation.prompt_template,
-            query=sample.query,
-            output_mode="parsing",
+        prompt = compose_prompt(
+            sample.query or "",
+            output_mode=self.config.pipeline.output_mode,
         )
         text_prompt_len = max(1, len(prompt.split()))
         teacher_tokens = _extract_teacher_tokens(base_row or {})

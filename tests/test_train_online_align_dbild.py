@@ -7,6 +7,7 @@ import torch
 
 from vlm_distill.config_schema import DataConfig, DistillationConfig, PipelineConfig, StudentConfig, TeacherConfig
 from vlm_distill.parsing_output_parser import serialize_parsing_label
+from vlm_distill.prompt_composer import compose_prompt
 from vlm_distill.train_online_align_dbild import (
     OnlineAlignCollator,
     OnlineAlignDataset,
@@ -93,7 +94,7 @@ def test_online_align_dataset_uses_serialized_parsing_target_without_teacher_fie
 
     def fake_encode(processor, image, prompt, target, max_length, mask_prompt_labels, canonical_answer_span):
         del processor, image, max_length, mask_prompt_labels, canonical_answer_span
-        assert prompt == "List UI elements"
+        assert prompt == compose_prompt("List UI elements", output_mode="parsing")
         assert target == target_text
         return EncodedVlmSample(
             model_inputs={

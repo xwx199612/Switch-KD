@@ -26,6 +26,7 @@ from scripts.vlm_compare_utils import (  # noqa: E402
 )
 from vlm_distill.bbox_grounding_inference import BBoxGroundingInferenceEngine  # noqa: E402
 from vlm_distill.config_schema import load_config  # noqa: E402
+from vlm_distill.prompt_composer import compose_prompt  # noqa: E402
 from vlm_distill.parsing_output_parser import (  # noqa: E402
     is_truncation_error, normalize_elements, recover_truncated_elements_json,
 )
@@ -276,11 +277,10 @@ def main() -> None:
     query = args.query
     max_new_tokens = args.max_new_tokens
     if config is not None:
-        template = config.distillation.prompt_template
-        prompt = template.format(query=query, question=query, output_mode="parsing")
+        prompt = compose_prompt(query, output_mode=config.pipeline.output_mode)
         max_new_tokens = config.teacher.max_new_tokens
     else:
-        prompt = TRAINING_JSON_PROMPT_TEMPLATE.format(query=query, question=query, output_mode="parsing")
+        prompt = compose_prompt(query, output_mode="parsing")
     output_dir = ensure_dir(args.output_dir)
     raw_dir = ensure_dir(output_dir / "raw")
     json_dir = ensure_dir(output_dir / "json")

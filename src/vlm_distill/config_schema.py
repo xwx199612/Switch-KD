@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 from typing import Any
+import warnings
 
 import yaml
 
@@ -509,6 +510,13 @@ def _build_student_config(raw: dict[str, Any]) -> StudentConfig:
 
 def _build_distillation_config(raw: dict[str, Any]) -> DistillationConfig:
     values = dict(raw)
+    if values.get("prompt_template") not in (None, ""):
+        warnings.warn(
+            "distillation.prompt_template is deprecated and ignored; "
+            "the final prompt is composed from pipeline.output_mode and sample query.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     _warn_if_deprecated_offline_logits_config(
         values,
         deprecated_keys=(
@@ -687,14 +695,11 @@ def format_prompt(
     target_type: str | None = None,
     output_mode: str | None = None,
 ) -> str:
-    return template.format(
-        **build_prompt_context(
-            query=query,
-            target_label=target_label,
-            target_type=target_type,
-            output_mode=output_mode,
-        )
-    )
+    """Deprecated compatibility wrapper; ``template`` is intentionally ignored."""
+    del template, target_label, target_type
+    from .prompt_composer import compose_prompt
+
+    return compose_prompt(query or "", output_mode=output_mode or "parsing")
 
 
 def resolve_label_path(data: DataConfig) -> Path:

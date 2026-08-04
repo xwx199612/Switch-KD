@@ -14,7 +14,6 @@ import warnings
 
 from .config_schema import (
     load_config,
-    format_prompt,
     resolve_full_label_path,
     resolve_label_path,
     resolve_labeled_split_metadata_path,
@@ -53,6 +52,7 @@ from .student_trainability import (
     merger_dtype_map,
 )
 from .parsing_output_parser import serialize_parsing_label
+from .prompt_composer import compose_prompt
 from .stage_student_training import VlmTrainingDataset
 from .vlm_batching import build_vlm_data_collator, encode_vlm_training_sample, load_training_image
 
@@ -395,9 +395,8 @@ class OnlineAlignDataset(VlmTrainingDataset):
             row["image"],
             resize_mode=self.config.training.image_resize,
         )
-        prompt = format_prompt(
-            self.config.distillation.prompt_template,
-            query=row.get("query") or metadata.get("query"),
+        prompt = compose_prompt(
+            row.get("query") or metadata.get("query") or "",
             output_mode=self.config.pipeline.output_mode,
         )
         target = _target_text_for_row(row)

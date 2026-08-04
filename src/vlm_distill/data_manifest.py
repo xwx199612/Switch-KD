@@ -64,8 +64,20 @@ def validate_manifest(path: Path, image_root: Path = Path("."), max_samples: int
             "answer",
             "metadata",
         }
-        metadata: dict[str, Any] = {}
+        forbidden_prompt_keys = {"prompt", "prompt_template", "system_prompt"}
         existing_metadata = row.get("metadata")
+        metadata_forbidden = (
+            forbidden_prompt_keys.intersection(existing_metadata)
+            if isinstance(existing_metadata, dict)
+            else set()
+        )
+        forbidden = sorted(forbidden_prompt_keys.intersection(row) | metadata_forbidden)
+        if forbidden:
+            raise ValueError(
+                f"{path}:{index} does not accept complete prompt fields: {forbidden}. "
+                "Use query as the user instruction."
+            )
+        metadata: dict[str, Any] = {}
         if isinstance(existing_metadata, dict):
             metadata.update(existing_metadata)
         for key, value in row.items():

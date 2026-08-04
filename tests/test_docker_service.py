@@ -10,6 +10,7 @@ from PIL import Image
 fastapi = pytest.importorskip("fastapi")
 
 from vlm_distill import docker_service  # noqa: E402
+from vlm_distill.prompt_composer import compose_prompt  # noqa: E402
 
 
 def _png() -> bytes:
@@ -49,7 +50,7 @@ def _runtime():
         training=SimpleNamespace(image_resize="original"),
         teacher=SimpleNamespace(max_new_tokens=17),
         student=SimpleNamespace(quantization="mixed_4bit_bf16"),
-        distillation=SimpleNamespace(prompt_template="Query: {query}\nAnswer:"),
+        pipeline=SimpleNamespace(output_mode="parsing"),
     )
     engine = FakeEngine()
     return config, engine, {"linear4bit_module_count": 1}
@@ -110,7 +111,7 @@ def test_infer_sync_uses_formatter_parser_and_worker_thread_lock(monkeypatch):
     assert not worker.is_alive()
     body = result_holder[0]
     assert body["raw_output"]
-    assert fake_engine.prompts == [("Query: find buttons\nAnswer:", 17, (8, 8))]
+    assert fake_engine.prompts == [(compose_prompt("find buttons", output_mode="parsing"), 17, (8, 8))]
     assert entered_thread_ids
     assert entered_thread_ids[0] != threading.get_ident()
     endpoint_source = inspect.getsource(docker_service.infer)

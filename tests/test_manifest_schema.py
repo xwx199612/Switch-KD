@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from PIL import Image
+import pytest
 
 from vlm_distill.config_schema import (
     DataConfig,
@@ -64,6 +65,23 @@ def test_legacy_manifest_task_is_discarded(tmp_path: Path):
     samples = validate_manifest(manifest, image_root=image_root)
 
     assert all(not hasattr(sample, "task") for sample in samples)
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("forbidden_key", ["prompt", "prompt_template", "system_prompt"])
+def test_manifest_rejects_complete_prompt_fields(tmp_path: Path, forbidden_key: str, nested: bool):
+    image_root = tmp_path / "images"
+    _make_image(image_root / "screen.jpg")
+    manifest = tmp_path / "screen.jsonl"
+    row = {"id": "screen-1", "image": "screen.jpg", "query": "List UI elements."}
+    if nested:
+        row["metadata"] = {forbidden_key: "override"}
+    else:
+        row[forbidden_key] = "override"
+    manifest.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="complete prompt fields"):
+        validate_manifest(manifest, image_root=image_root)
 
 
 def test_load_config_accepts_legacy_target_field(tmp_path: Path):

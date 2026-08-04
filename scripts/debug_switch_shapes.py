@@ -5,8 +5,9 @@ from pathlib import Path
 
 from PIL import Image
 
-from vlm_distill.config_schema import format_prompt, load_config
+from vlm_distill.config_schema import load_config
 from vlm_distill.data_manifest import validate_manifest
+from vlm_distill.prompt_composer import compose_prompt
 from vlm_distill.stage_visual_switch_logits import (
     VisualSwitchDistiller,
     _ensure_batch_sequence,
@@ -46,11 +47,8 @@ def main() -> None:
 
     image_path = config.data.image_root / sample.image
     image = Image.open(image_path).convert("RGB")
-    prompt = format_prompt(
-        config.distillation.prompt_template,
-        query=sample.query,
-        target_label=sample.target_label,
-        target_type=sample.target_type,
+    prompt = compose_prompt(
+        sample.query or "",
         output_mode=config.pipeline.output_mode,
     )
 

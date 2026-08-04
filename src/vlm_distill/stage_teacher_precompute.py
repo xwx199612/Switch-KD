@@ -32,6 +32,7 @@ from .model_output_artifacts import (
     refresh_parsing_sidecar_reports,
 )
 from .output_processors import OutputProcessor, build_output_processor
+from .prompt_composer import compose_prompt
 from .model_loading import apply_attn_implementation, resolve_model_path
 from .parsing_output_parser import (
     COORDINATE_SYSTEM_NORMALIZED_0_1000,
@@ -471,7 +472,7 @@ def _label_sample(
     output_processor: OutputProcessor | None = None,
 ) -> dict | None:
     output_processor = output_processor or build_output_processor(
-        getattr(getattr(config, "teacher", None), "output_mode", "parsing")
+        config.pipeline.output_mode
     )
     existing_target = _target_from_existing_annotation(sample)
 
@@ -1167,21 +1168,11 @@ def _format_prompt(
     *,
     output_mode: str | None = None,
 ) -> str:
-    template = config.distillation.prompt_template
-
-    try:
-        prompt = template.format(
-            query=sample.query or "",
-            question=sample.query or "",
-            output_mode=output_mode or getattr(getattr(config, "pipeline", None), "output_mode", "parsing"),
-        )
-    except KeyError as exc:
-        raise KeyError(
-            f"Prompt template references unsupported placeholder: {exc}. "
-            "Supported placeholders are: query, question, output_mode."
-        ) from exc
-
-    return prompt
+    del output_mode
+    return compose_prompt(
+        sample.query or "",
+        output_mode=getattr(getattr(config, "pipeline", None), "output_mode", "parsing"),
+    )
 
 
 def _mock_answer(sample: VlmSample, *, output_mode: str = "parsing") -> str:

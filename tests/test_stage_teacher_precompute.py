@@ -207,7 +207,7 @@ def test_teacher_precompute_overwrite_failure_preserves_formal_output_and_remove
     assert not (tmp_path / ".labels.jsonl.precompute.tmp").exists()
 
 
-def test_format_prompt_returns_exact_yaml_formatted_prompt_for_parsing(tmp_path: Path) -> None:
+def test_legacy_prompt_template_is_ignored_for_parsing(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     config.distillation.prompt_template = (
         "Task:\n"
@@ -221,14 +221,9 @@ def test_format_prompt_returns_exact_yaml_formatted_prompt_for_parsing(tmp_path:
 
     prompt = stage_teacher_precompute._format_prompt(config, sample)
 
-    assert prompt == (
-        "Task:\n"
-        "List UI elements\n\n"
-        "Use this exact schema:\n"
-        "{\n"
-        '  "elements": []\n'
-        "}"
-    )
+    assert "List UI elements" in prompt
+    assert '"elements"' in prompt
+    assert "Task:" not in prompt
 
 
 def test_huggingface_teacher_does_not_retry_parsing_by_default(
@@ -265,13 +260,13 @@ def test_retry_prompt_wraps_original_yaml_prompt_without_schema_duplication() ->
     )
 
 
-def test_qwen_parsing_prompt_template_formats_successfully_and_escapes_json_braces() -> None:
+def test_qwen_legacy_parsing_prompt_is_ignored_and_fixed_schema_is_used() -> None:
     config = load_config("configs/qwen3vl8b_r32_attn_mlp.yaml")
     sample = VlmSample(id="parsing-000005", image="screen.png", query="Find the focused tile.")
 
     prompt = stage_teacher_precompute._format_prompt(config, sample)
 
-    assert "Task:\nFind the focused tile." in prompt
+    assert "User instruction:\nFind the focused tile." in prompt
     assert '"elements": [' in prompt
     assert '"coordinate_system": "normalized_0_1000"' in prompt
     assert "{{" not in prompt

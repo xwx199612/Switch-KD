@@ -12,6 +12,8 @@ from typing import Any
 import torch
 from PIL import Image
 
+from vlm_distill.prompt_composer import compose_prompt
+
 
 GIB = 1024 ** 3
 _TRUST_REMOTE_CODE = True
@@ -195,7 +197,7 @@ def profile_one_model(label: str, model_path: str, args, output_path: Path) -> N
                     processor=processor,
                     tokenizer=tokenizer,
                     image=image,
-                    prompt=args.prompt,
+                    prompt=compose_prompt(args.instruction, output_mode="text"),
                     max_new_tokens=args.max_new_tokens,
                 )
                 log_memory(label, resolved_model_path, "after_generate", output_path)
@@ -252,7 +254,7 @@ def main() -> None:
     parser.add_argument("--distilled-model", required=True)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--image", type=Path)
-    parser.add_argument("--prompt", default="Describe this image briefly.")
+    parser.add_argument("--instruction", default="Describe this image briefly.")
     parser.add_argument("--run-smoke-test", action="store_true")
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--sleep-seconds", type=float, default=3.0)

@@ -350,7 +350,7 @@ def test_student_dataset_accepts_canonical_teacher_answer_span(monkeypatch, tmp_
     ]
 
     monkeypatch.setattr("vlm_distill.vlm_batching.load_training_image", lambda *args, **kwargs: object())
-    monkeypatch.setattr("vlm_distill.stage_student_training.format_prompt", lambda *args, **kwargs: "prompt")
+    monkeypatch.setattr("vlm_distill.stage_student_training.compose_prompt", lambda *args, **kwargs: "prompt")
 
     dataset = VlmTrainingDataset(rows, config, processor=_CanonicalSpanProcessor(serialize_parsing_label(rows[0])))
     item = dataset[0]

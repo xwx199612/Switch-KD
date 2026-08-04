@@ -20,7 +20,8 @@ from .data_manifest import VlmSample
 from .output_processors import ParsingOutputProcessor
 from .parsing_output_parser import COORDINATE_SYSTEM_NORMALIZED_0_1000
 from .runtime_validation import summarize_model_precision, validate_loaded_precision
-from .stage_teacher_precompute import _format_prompt, _load_teacher_image
+from .prompt_composer import compose_prompt
+from .stage_teacher_precompute import _load_teacher_image
 
 DEFAULT_QUERY = "List all visible interactive UI elements on this screen."
 inference_lock = threading.Lock()
@@ -67,15 +68,15 @@ async def ready() -> dict[str, Any]:
             "precision_summary": app.state.precision_summary}
 
 
-def _infer_sync(image_bytes: bytes, query: str) -> dict[str, Any]:
+def _infer_sync(image_bytes: bytes, instruction: str) -> dict[str, Any]:
     config = app.state.config
     engine = app.state.engine
     with tempfile.NamedTemporaryFile(suffix=".image") as handle:
         handle.write(image_bytes)
         handle.flush()
         image = _load_teacher_image(Path(handle.name), config.training.image_resize)
-    sample = VlmSample(id="request", image="", query=query)
-    prompt = _format_prompt(config, sample, output_mode="parsing")
+    sample = VlmSample(id="request", image="", query=instruction)
+    prompt = compose_prompt(instruction, output_mode="parsing")
     # This synchronous lock must be acquired by the worker thread.  Acquiring
     # it in the async endpoint would block FastAPI's event-loop thread while a
     # previous GPU inference is still running.
@@ -95,7 +96,8 @@ def _infer_sync(image_bytes: bytes, query: str) -> dict[str, Any]:
 
 
 @app.post("/infer")
-async def infer(image: UploadFile = File(...), query: str = Form(DEFAULT_QUERY),
+async def infer(image: UploadFile = File(...), instruction: str | None = Form(None),
+                query: str | None = Form(None),
                 request_id: str | None = Form(None)) -> dict[str, Any]:
     if not getattr(app.state, "ready", False):
         raise HTTPException(status_code=503, detail="Model is not ready")
@@ -107,11 +109,14 @@ async def infer(image: UploadFile = File(...), query: str = Form(DEFAULT_QUERY),
     except (UnidentifiedImageError, OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="Invalid image file") from exc
     try:
-        result = await asyncio.to_thread(_infer_sync, content, query or DEFAULT_QUERY)
+        # ``query`` remains a compatibility alias, but both fields are only
+        # user instructions and are always composed by the server.
+        resolved_instruction = instruction if instruction is not None else query
+        result = await asyncio.to_thread(_infer_sync, content, resolved_instruction or DEFAULT_QUERY)
     except HTTPException:
         raise
     except Exception as exc:  # no traceback is returned to clients
         raise HTTPException(status_code=500, detail=f"Inference failed: {exc}") from exc
-    result.update({"id": request_id or "request-id", "query": query or DEFAULT_QUERY,
+    result.update({"id": request_id or "request-id", "query": resolved_instruction or DEFAULT_QUERY,
                    "elapsed_seconds": round(time.perf_counter() - started, 3)})
     return result
